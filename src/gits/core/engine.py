@@ -15,6 +15,7 @@ from typing import Any
 from ..adapters.base import Button, IncomingMessage, OutgoingMessage
 from ..config import Settings
 from .health import HealthMonitor
+from .jsonl_monitor import JsonlMonitor
 from .launcher import CodingCLILauncher
 from .monitor import PaneMonitor
 from .screenshot import ScreenshotEngine
@@ -54,6 +55,10 @@ class Engine:
             session_mgr=self.session_mgr,
             interval=settings.pane_poll_interval,
         )
+        self.jsonl_monitor = JsonlMonitor(
+            session_mgr=self.session_mgr,
+            poll_interval=settings.jsonl_poll_interval,
+        )
 
         # Platform adapter (set externally)
         self._adapter: Any = None
@@ -78,11 +83,16 @@ class Engine:
         for binding in self.session_mgr.list_bindings():
             self.monitor.start_polling(binding.channel_id, binding.window_id)
 
+        # Start JSONL output monitoring
+        self.jsonl_monitor.on_message(self._on_jsonl_message)
+        self.jsonl_monitor.start()
+
         logger.info("Engine started")
 
     async def stop(self) -> None:
         """Stop the engine."""
         self.monitor.stop_all()
+        self.jsonl_monitor.stop()
         await self.health.stop()
         logger.info("Engine stopped")
 
@@ -594,6 +604,19 @@ class Engine:
         button_rows.append([cancel_button, abort_button])
 
         return OutgoingMessage(text=text, buttons=button_rows)
+
+    # ------------------------------------------------------------------
+    # JSONL monitor callback
+    # ------------------------------------------------------------------
+
+    async def _on_jsonl_message(self, channel_id: str, text: str) -> None:
+        """Called by JsonlMonitor when new assistant output is detected."""
+        if not self._adapter:
+            return
+        await self._adapter.send_message(
+            channel_id,
+            OutgoingMessage(text=text),
+        )
 
     # ------------------------------------------------------------------
     # Pane monitor callbacks

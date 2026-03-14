@@ -1,0 +1,683 @@
+"""Tests for JsonlMonitor — JSONL polling, parsing, and callback firing."""
+
+import json
+import os
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from gits.core.jsonl_monitor import (
+    JsonlMonitor,
+    extract_assistant_content,
+    format_tool_use_summary,
+    parse_jsonl_line,
+)
+
+
+# -- parse_jsonl_line --------------------------------------------------------
+
+
+class TestParseJsonlLine:
+    def test_valid_json(self):
+        line = '{"type": "assistant", "message": {}}'
+        result = parse_jsonl_line(line)
+        assert result == {"type": "assistant", "message": {}}
+
+    def test_empty_line(self):
+        assert parse_jsonl_line("") is None
+        assert parse_jsonl_line("   ") is None
+        assert parse_jsonl_line("\n") is None
+
+    def test_invalid_json(self):
+        assert parse_jsonl_line("{broken") is None
+        assert parse_jsonl_line("not json at all") is None
+
+    def test_whitespace_stripped(self):
+        result = parse_jsonl_line('  {"a": 1}  \n')
+        assert result == {"a": 1}
+
+
+# -- format_tool_use_summary ------------------------------------------------
+
+
+class TestFormatToolUseSummary:
+    def test_read_tool(self):
+        result = format_tool_use_summary("Read", {"file_path": "/tmp/foo.py"})
+        assert "Read" in result
+        assert "/tmp/foo.py" in result
+
+    def test_bash_tool(self):
+        result = format_tool_use_summary("Bash", {"command": "ls -la"})
+        assert "Bash" in result
+        assert "ls -la" in result
+
+    def test_grep_tool(self):
+        result = format_tool_use_summary("Grep", {"pattern": "TODO"})
+        assert "Grep" in result
+        assert "TODO" in result
+
+    def test_write_tool(self):
+        result = format_tool_use_summary("Write", {"file_path": "/tmp/out.txt"})
+        assert "Write" in result
+        assert "/tmp/out.txt" in result
+
+    def test_edit_tool(self):
+        result = format_tool_use_summary("Edit", {"file_path": "/tmp/edit.py"})
+        assert "Edit" in result
+        assert "/tmp/edit.py" in result
+
+    def test_unknown_tool_no_input(self):
+        result = format_tool_use_summary("CustomTool", {})
+        assert "CustomTool" in result
+
+    def test_non_dict_input(self):
+        result = format_tool_use_summary("Foo", "just a string")
+        assert "Foo" in result
+
+    def test_long_summary_truncated(self):
+        long_cmd = "x" * 300
+        result = format_tool_use_summary("Bash", {"command": long_cmd})
+        assert len(result) < 350  # summary truncated + prefix
+        assert "\u2026" in result
+
+    def test_web_fetch(self):
+        result = format_tool_use_summary("WebFetch", {"url": "https://example.com"})
+        assert "WebFetch" in result
+        assert "https://example.com" in result
+
+    def test_web_search(self):
+        result = format_tool_use_summary("WebSearch", {"query": "python async"})
+        assert "WebSearch" in result
+        assert "python async" in result
+
+    def test_task_tool(self):
+        result = format_tool_use_summary("Task", {"description": "do stuff"})
+        assert "Task" in result
+        assert "do stuff" in result
+
+    def test_generic_tool_first_string_value(self):
+        result = format_tool_use_summary("MyTool", {"key": "value123"})
+        assert "MyTool" in result
+        assert "value123" in result
+
+
+# -- extract_assistant_content -----------------------------------------------
+
+
+class TestExtractAssistantContent:
+    def test_assistant_text_block(self):
+        entry = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Hello, world!"}
+                ]
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert result == ["Hello, world!"]
+
+    def test_multiple_text_blocks(self):
+        entry = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "First"},
+                    {"type": "text", "text": "Second"},
+                ]
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert result == ["First", "Second"]
+
+    def test_tool_use_block(self):
+        entry = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/foo.py"},
+                    }
+                ]
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert len(result) == 1
+        assert "Read" in result[0]
+        assert "/tmp/foo.py" in result[0]
+
+    def test_mixed_text_and_tool_use(self):
+        entry = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Let me check that file."},
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/foo.py"},
+                    },
+                ]
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert len(result) == 2
+        assert result[0] == "Let me check that file."
+        assert "Read" in result[1]
+
+    def test_thinking_block_skipped(self):
+        entry = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "I should..."},
+                    {"type": "text", "text": "Here is my answer."},
+                ]
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert result == ["Here is my answer."]
+
+    def test_user_message_skipped(self):
+        entry = {
+            "type": "user",
+            "message": {
+                "content": [{"type": "text", "text": "user prompt"}]
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert result == []
+
+    def test_summary_type_skipped(self):
+        entry = {"type": "summary", "summary": "some summary text"}
+        result = extract_assistant_content(entry)
+        assert result == []
+
+    def test_empty_text_block_skipped(self):
+        entry = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": ""},
+                    {"type": "text", "text": "   "},
+                    {"type": "text", "text": "Real content"},
+                ]
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert result == ["Real content"]
+
+    def test_string_content(self):
+        entry = {
+            "type": "assistant",
+            "message": {"content": "Plain string response"},
+        }
+        result = extract_assistant_content(entry)
+        assert result == ["Plain string response"]
+
+    def test_no_message(self):
+        entry = {"type": "assistant"}
+        result = extract_assistant_content(entry)
+        assert result == []
+
+    def test_non_dict_message(self):
+        entry = {"type": "assistant", "message": "not a dict"}
+        result = extract_assistant_content(entry)
+        assert result == []
+
+
+# -- JsonlMonitor -----------------------------------------------------------
+
+
+@pytest.fixture
+def session_mgr():
+    mgr = MagicMock()
+    mgr.list_bindings.return_value = []
+    return mgr
+
+
+@pytest.fixture
+def monitor(session_mgr):
+    return JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+
+
+def _make_jsonl_file(path: Path, entries: list[dict]) -> None:
+    """Write JSONL entries to a file."""
+    with open(path, "w") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
+
+def _make_binding(channel_id="ch1", cli_session_id="sess-123", work_dir="/tmp/project"):
+    b = MagicMock()
+    b.channel_id = channel_id
+    b.cli_session_id = cli_session_id
+    b.work_dir = work_dir
+    return b
+
+
+# -- Lifecycle tests ---------------------------------------------------------
+
+
+class TestJsonlMonitorLifecycle:
+    @pytest.mark.asyncio
+    async def test_start_creates_task(self, monitor):
+        monitor.start()
+        assert monitor._running
+        assert monitor._task is not None
+        monitor.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_task(self, monitor):
+        monitor.start()
+        monitor.stop()
+        assert not monitor._running
+        assert monitor._task is None
+
+    @pytest.mark.asyncio
+    async def test_double_start_warns(self, monitor):
+        monitor.start()
+        monitor.start()  # should warn, not crash
+        monitor.stop()
+
+
+# -- Byte-offset tracking ---------------------------------------------------
+
+
+class TestByteOffsetTracking:
+    @pytest.mark.asyncio
+    async def test_first_poll_skips_to_end(self, monitor, session_mgr, tmp_path):
+        """First time seeing a file should skip to end (no replay)."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "old message"}]},
+            }
+        ])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor.on_message(callback)
+
+        # Patch _find_jsonl_file to return our test file
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()
+
+        # First poll should NOT trigger callback (skip to end)
+        callback.assert_not_called()
+
+        # Offset should be set to file size
+        file_key = str(jsonl_file)
+        assert monitor._offsets[file_key] == jsonl_file.stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_new_content_triggers_callback(self, monitor, session_mgr, tmp_path):
+        """New content appended after initial skip should trigger callback."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "old"}]},
+            }
+        ])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor.on_message(callback)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        # First poll — skip to end
+        await monitor._poll_once()
+        callback.assert_not_called()
+
+        # Append new content
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "new response"}]},
+            }) + "\n")
+
+        await monitor._poll_once()
+        callback.assert_called_once()
+        assert callback.call_args[0][0] == "ch1"
+        assert callback.call_args[0][1] == "new response"
+
+    @pytest.mark.asyncio
+    async def test_no_double_read(self, monitor, session_mgr, tmp_path):
+        """Content should not be read twice."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor.on_message(callback)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        # Initial poll
+        await monitor._poll_once()
+
+        # Append content
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "msg1"}]},
+            }) + "\n")
+
+        await monitor._poll_once()
+        assert callback.call_count == 1
+
+        # Poll again without changes
+        await monitor._poll_once()
+        assert callback.call_count == 1  # still 1 — no double-read
+
+
+# -- mtime skip -------------------------------------------------------------
+
+
+class TestMtimeSkip:
+    @pytest.mark.asyncio
+    async def test_unchanged_file_skipped(self, monitor, session_mgr, tmp_path):
+        """File with unchanged mtime should not be read."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        # Initialize tracking
+        await monitor._poll_once()
+
+        # Set up a spy on _read_new_entries
+        original_read = monitor._read_new_entries
+        read_calls = []
+
+        def spy_read(fp, offset):
+            read_calls.append((fp, offset))
+            return original_read(fp, offset)
+
+        monitor._read_new_entries = staticmethod(spy_read)
+
+        # Poll again — file hasn't changed
+        await monitor._poll_once()
+        assert len(read_calls) == 0
+
+
+# -- Truncation handling -----------------------------------------------------
+
+
+class TestTruncationHandling:
+    @pytest.mark.asyncio
+    async def test_truncated_file_resets_offset(self, monitor, session_mgr, tmp_path):
+        """If file is truncated (e.g. /clear), offset should reset."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+
+        # Write initial content
+        big_entry = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "x" * 500}]},
+        }
+        _make_jsonl_file(jsonl_file, [big_entry])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor.on_message(callback)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        # First poll — skip to end
+        await monitor._poll_once()
+        file_key = str(jsonl_file)
+        assert monitor._offsets[file_key] > 0
+
+        # Truncate file to something smaller
+        _make_jsonl_file(jsonl_file, [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "fresh"}]},
+            }
+        ])
+
+        # Force mtime change
+        new_mtime = os.path.getmtime(jsonl_file) + 1
+        os.utime(jsonl_file, (new_mtime, new_mtime))
+
+        await monitor._poll_once()
+        # Should have read the new content after reset
+        callback.assert_called_once()
+        assert "fresh" in callback.call_args[0][1]
+
+
+# -- Callback behavior -------------------------------------------------------
+
+
+class TestCallbackBehavior:
+    @pytest.mark.asyncio
+    async def test_long_text_truncated(self, monitor, session_mgr, tmp_path):
+        """Text exceeding MAX_MESSAGE_LENGTH should be truncated."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor.on_message(callback)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        # Initialize
+        await monitor._poll_once()
+
+        # Append very long message
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "A" * 3000}]},
+            }) + "\n")
+
+        await monitor._poll_once()
+        callback.assert_called_once()
+        sent_text = callback.call_args[0][1]
+        assert len(sent_text) < 2100  # truncated
+        assert "truncated" in sent_text
+
+    @pytest.mark.asyncio
+    async def test_callback_error_doesnt_crash(self, monitor, session_mgr, tmp_path):
+        """Callback errors should be caught, not crash the monitor."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock(side_effect=RuntimeError("discord down"))
+        monitor.on_message(callback)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()
+
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "test"}]},
+            }) + "\n")
+
+        # Should not raise
+        await monitor._poll_once()
+
+    @pytest.mark.asyncio
+    async def test_no_callback_registered(self, monitor, session_mgr, tmp_path):
+        """Polling without a callback should not crash."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        # No callback registered — should not crash
+        await monitor._poll_once()
+
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "test"}]},
+            }) + "\n")
+
+        await monitor._poll_once()
+
+
+# -- No session ID -----------------------------------------------------------
+
+
+class TestNoSessionId:
+    @pytest.mark.asyncio
+    async def test_binding_without_session_id_skipped(self, monitor, session_mgr):
+        """Bindings without cli_session_id should be skipped."""
+        binding = _make_binding(cli_session_id=None)
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor.on_message(callback)
+
+        await monitor._poll_once()
+        callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_binding_with_empty_session_id_skipped(self, monitor, session_mgr):
+        """Bindings with empty cli_session_id should be skipped."""
+        binding = _make_binding(cli_session_id="")
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor.on_message(callback)
+
+        await monitor._poll_once()
+        callback.assert_not_called()
+
+
+# -- Tool use output ---------------------------------------------------------
+
+
+class TestToolUseOutput:
+    @pytest.mark.asyncio
+    async def test_tool_use_fires_callback(self, monitor, session_mgr, tmp_path):
+        """Tool use blocks should generate formatted summary messages."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor.on_message(callback)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        # Initialize
+        await monitor._poll_once()
+
+        # Append tool use entry
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Let me read that."},
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": "/tmp/example.py"},
+                        },
+                    ]
+                },
+            }) + "\n")
+
+        await monitor._poll_once()
+        assert callback.call_count == 2
+        # First call: text
+        assert callback.call_args_list[0][0][1] == "Let me read that."
+        # Second call: tool_use summary
+        assert "Read" in callback.call_args_list[1][0][1]
+        assert "/tmp/example.py" in callback.call_args_list[1][0][1]
+
+
+# -- _read_new_entries (static method) ----------------------------------------
+
+
+class TestReadNewEntries:
+    def test_reads_from_offset(self, tmp_path):
+        """Should only read entries after the given byte offset."""
+        jsonl_file = tmp_path / "test.jsonl"
+
+        # Write two entries
+        entries = [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "old"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "new"}]}},
+        ]
+
+        with open(jsonl_file, "w") as f:
+            f.write(json.dumps(entries[0]) + "\n")
+            offset = f.tell()
+            f.write(json.dumps(entries[1]) + "\n")
+
+        result = JsonlMonitor._read_new_entries(jsonl_file, offset)
+        assert result == ["new"]
+
+    def test_reads_all_from_zero(self, tmp_path):
+        """Offset 0 should read all entries."""
+        jsonl_file = tmp_path / "test.jsonl"
+        _make_jsonl_file(jsonl_file, [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "b"}]}},
+        ])
+
+        result = JsonlMonitor._read_new_entries(jsonl_file, 0)
+        assert result == ["a", "b"]
+
+    def test_skips_user_messages(self, tmp_path):
+        """User messages should not appear in output."""
+        jsonl_file = tmp_path / "test.jsonl"
+        _make_jsonl_file(jsonl_file, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "user msg"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "reply"}]}},
+        ])
+
+        result = JsonlMonitor._read_new_entries(jsonl_file, 0)
+        assert result == ["reply"]
+
+    def test_skips_summary_entries(self, tmp_path):
+        """Summary entries should be skipped."""
+        jsonl_file = tmp_path / "test.jsonl"
+        _make_jsonl_file(jsonl_file, [
+            {"type": "summary", "summary": "session summary"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+        ])
+
+        result = JsonlMonitor._read_new_entries(jsonl_file, 0)
+        assert result == ["hi"]
+
+    def test_handles_invalid_lines(self, tmp_path):
+        """Invalid JSON lines should be skipped without error."""
+        jsonl_file = tmp_path / "test.jsonl"
+        with open(jsonl_file, "w") as f:
+            f.write("not json\n")
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "valid"}]},
+            }) + "\n")
+            f.write("\n")  # empty line
+
+        result = JsonlMonitor._read_new_entries(jsonl_file, 0)
+        assert result == ["valid"]
