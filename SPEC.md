@@ -468,12 +468,12 @@ Discord                              tmux session "gits"
 │         dir=/data/projects/my-app"     └─ cwd: /data/projects/my-app
 │
 ├─ Thread: "fix-auth-bug"           window "fix-auth-bug"
-│   └─ 继承项目根目录                   └─ claude (独立会话)
-│                                       └─ cwd: /data/projects/my-app
+│   └─ /fork fix-auth-bug              └─ claude (独立会话)
+│      (默认继承根目录)                   └─ cwd: /data/projects/my-app
 │
-└─ Thread: "add-tests"              window "add-tests"
-    └─ 继承项目根目录                   └─ claude (独立会话)
-                                        └─ cwd: /data/projects/my-app
+└─ Thread: "frontend-work"          window "frontend-work"
+    └─ /fork frontend-work -d frontend  └─ claude (独立会话)
+       (可选指定子目录)                    └─ cwd: /data/projects/my-app/frontend
 ```
 
 **Channel 行为（`/bind`）：**
@@ -485,11 +485,9 @@ Discord                              tmux session "gits"
 **Thread 行为（`/fork`）：**
 1. 在 Discord 中创建 Thread
 2. 创建新的 tmux 窗口，以 thread 名命名
-3. cd 到父频道的项目根目录
+3. cd 到工作目录：默认 = 父频道项目根目录；可选 `-d <subdir>` 指定子目录
 4. 启动独立的 coding CLI 会话
 5. Thread 内的消息转发到这个独立窗口
-
-> 💡 **后续可选扩展**：`/fork -d <subdir>` 支持指定子目录（如 `frontend/`, `src/api/`），MVP 阶段先只继承项目根目录。
 
 **Thread 生命周期**（不需要手动关闭）：
 
@@ -569,14 +567,15 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 #### 子任务分支（Thread 级）
 
-**`/fork [title]`**
+**`/fork [title] [-d <subdir>]`**
 - 在当前频道下创建 Thread（子任务）
 - 行为：
   1. 创建 Discord Thread（名称 = title 或自动生成）
   2. 创建新 tmux 窗口（以 thread 名命名）
-  3. cd 到父频道的项目根目录
+  3. cd 到工作目录：默认 = 父频道项目根目录；`-d <subdir>` 可选指定子目录
   4. 启动独立的 coding CLI 会话
 - 对应 claude-on-discord 的 `/fork`，用 tmux 窗口替代 SDK session
+- 示例：`/fork fix-bug`、`/fork frontend-work -d frontend`
 
 #### 会话管理
 
