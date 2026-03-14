@@ -442,576 +442,184 @@ class CodingCLIHook:
 
 ---
 
-## Discord Adapter 详细设计
+## Discord 交互设计
 
-Discord 适配器是 **MVP 阶段的唯一平台**。以下是所有交互方式的完整设计。
+以下交互基于 ccbot 和 claude-on-discord **功能交集**——即两个项目都实现了的核心功能，外加 tmux 绑定管理。
 
-### 频道映射策略
+### 设计逻辑
 
-```
-Discord Server (Guild)
-├── #general           → 忽略（非绑定频道）
-├── #claude-main       → tmux window "main"    (claude code)
-├── #claude-frontend   → tmux window "frontend" (claude code)
-└── #shell-debug       → tmux window "debug"    (任意 coding CLI)
-```
+ccbot (Telegram) 和 claude-on-discord (Discord) 都实现了以下核心能力：
 
----
+| 核心能力 | ccbot 实现 | claude-on-discord 实现 | GITS 方案 |
+|----------|-----------|----------------------|-----------|
+| 发消息给 AI | 普通文本 → tmux | 普通文本 → SDK | 普通文本 → tmux |
+| 执行 bash | `!command` 前缀 | `/bash` + `!command` | `!command` 前缀 |
+| 截屏 | `/screenshot` → ANSI→PNG | `/screenshot` → 网页截屏 | `/screenshot` → ANSI→PNG |
+| 重置会话 | `/clear` | `/new` | `/new` |
+| 中断执行 | `/esc` | `/stop` + Abort 按钮 | `Esc` 按钮 + `/stop` |
+| 上下文压缩 | `/compact` | `/compact` | `/compact` |
+| 查看成本 | `/usage` | `/cost` | `/cost` |
+| 切换模型 | `/model` | `/model` | `/model` |
+| 交互式 UI | 终端解析→按钮 | SDK 回调→按钮 | 终端解析→按钮 |
+| 输出推送 | JSONL + pane 轮询 | SDK 流式回调 | JSONL + pane 轮询 |
 
-### 交互方式一览
-
-本项目在 Discord 中支持 **6 大类交互方式**：
-
-| # | 交互方式 | 说明 |
-|---|----------|------|
-| 1 | **Slash Commands** | Discord 斜杠命令（`/screenshot`, `/bind` 等） |
-| 2 | **普通文本消息** | 直接在绑定频道发送文本 → 转发到 tmux |
-| 3 | **感叹号命令** | `!git status` → 直接执行 bash 并返回输出 |
-| 4 | **按钮交互** | 交互式 UI 导航按钮、截屏控制键盘 |
-| 5 | **图片附件** | 发送图片 → 保存并告知 coding CLI 图片路径 |
-| 6 | **输出推送** | 后台轮询 tmux → 自动推送 Claude 输出到频道 |
+在此交集之上，我们新增 **tmux 绑定管理**（`/bind`, `/unbind`, `/windows`），因为 ccbot 用 Telegram topic 自动映射而我们需要显式绑定。
 
 ---
 
-### 1. Slash Commands（斜杠命令）
+### 交互方式总览
 
-#### 1.1 会话绑定命令
+| # | 方式 | 说明 |
+|---|------|------|
+| 1 | **Slash Commands** (7个) | `/bind`, `/unbind`, `/windows`, `/screenshot`, `/new`, `/stop`, `/compact` |
+| 2 | **CLI 转发命令** (1个) | `/cc <cmd>` — 转发任意 CLI 斜杠命令 (/cost, /model, /memory 等) |
+| 3 | **普通文本** | 直接发文字 → 转发到 tmux pane |
+| 4 | **!bash 命令** | `!git status` → 执行 bash 并返回输出 |
+| 5 | **按钮交互** | 截屏导航键盘 + 交互式 UI 导航 |
+| 6 | **输出推送** | 后台 JSONL + pane 轮询 → 自动推送到频道 |
 
-**`/bind <path> [cli]`**
-- 参数：
-  - `path`（必需）— 工作目录的绝对路径或 `~/...` 相对路径
-  - `cli`（可选，默认 `claude`）— coding CLI 类型：`claude` / `cursor` / `codex` / 自定义命令
-- 行为：
-  1. 验证路径存在且在 `ALLOWED_PATHS` 范围内
-  2. 创建新 tmux 窗口（窗口名 = 频道名）
-  3. 在窗口中 `cd` 到工作目录
-  4. 启动指定 coding CLI（如 `claude`）
-  5. 建立频道 ↔ 窗口绑定
-  6. 回复确认消息："✅ Bound to `<path>`, window `<name>`, CLI: `<cli>`"
-- 错误处理：
-  - 路径不存在 → "❌ Path does not exist: `<path>`"
-  - 路径不在白名单 → "❌ Path not allowed. Allowed: `<paths>`"
-  - 频道已绑定 → "⚠️ Already bound to window `<name>`. Use `/unbind` first."
+---
 
-**`/bind-window <window>`**
-- 参数：`window`（必需）— tmux 窗口名或 ID
-- 行为：将当前频道绑定到已存在的 tmux 窗口（不创建新窗口、不启动 CLI）
-- 用途：绑定到手动创建的或已在运行中的 tmux 窗口
+### 1. Slash Commands
 
-**`/unbind [keep_window]`**
-- 参数：`keep_window`（可选 bool，默认 `true`）— 是否保留 tmux 窗口
-- 行为：
-  - 解除频道 ↔ 窗口绑定
-  - 如果 `keep_window=false`：同时 kill 对应 tmux 窗口
-  - 清除该频道的所有内存状态
+**`/bind <path>`**
+- 将当前频道绑定到工作目录：创建 tmux 窗口 → cd 到目录 → 启动 coding CLI
+- 频道已绑定时提示先 `/unbind`
 
-#### 1.2 截屏命令
-
-**`/screenshot`**
-- 无参数
-- 行为：
-  1. 通过 `tmux capture-pane -e -p -t {window_id}` 捕获带 ANSI 颜色的 pane 内容
-  2. ScreenshotEngine 解析 ANSI 转义序列、渲染为 PNG（三级字体）
-  3. 以 Discord 图片附件形式发送到当前频道
-  4. 图片下方附带**截屏控制键盘**（见按钮交互章节）
-- 错误处理：
-  - 频道未绑定 → "❌ No binding. Use `/bind` first."
-  - tmux 窗口已关闭 → "❌ Window no longer exists."
-
-#### 1.3 导航与控制命令
-
-**`/send-keys <keys>`**
-- 参数：`keys`（必需）— 按键名称，支持：
-  - 特殊键：`Escape`, `Enter`, `Space`, `Tab`, `Up`, `Down`, `Left`, `Right`
-  - 控制键：`C-c` (Ctrl+C), `C-d` (Ctrl+D), `C-z` (Ctrl+Z), `C-l` (Ctrl+L)
-  - 功能键：`F1`-`F12`
-  - 组合：空格分隔多个按键，如 `Escape Escape` 或 `C-c Enter`
-- 行为：通过 `tmux send-keys` 发送到绑定窗口
-- 回复："`⚡ Sent: <keys>`"
+**`/unbind`**
+- 解除绑定，保留 tmux 窗口（窗口中的进程不受影响）
 
 **`/windows`**
-- 无参数
-- 行为：列出当前 tmux session 的所有窗口，标注绑定状态
-- 输出格式：
+- 列出 tmux session 中所有窗口及其绑定状态
+- 示例输出：
   ```
-  📋 tmux windows (session: gits)
-
-  🟢 0: main (bound → #claude-main)
-     └─ cwd: /data/projects/myapp
-  🟢 1: frontend (bound → #claude-frontend)
-     └─ cwd: /data/projects/myapp/frontend
-  ⚪ 2: debug (unbound)
-     └─ cwd: /home/user
+  🟢 0: main → #claude-main (/data/projects/myapp)
+  ⚪ 1: debug (unbound)
   ```
 
-**`/status`**
-- 无参数
-- 行为：显示当前频道绑定的窗口详细状态
-- 输出格式：
-  ```
-  📊 Status for #claude-main
-
-  Window:    main (@3)
-  Work Dir:  /data/projects/myapp
-  CLI:       claude
-  Session:   abc123 (active)
-  Status:    ✻ Working...
-  Bound at:  2026-03-14 18:30 UTC
-  ```
-- 状态行来自 tmux pane 底部状态栏解析（参考 ccbot `terminal_parser.py` 的 `parse_status_line()`）
-
-#### 1.4 Coding CLI 会话管理命令
+**`/screenshot`**
+- 截取绑定窗口的终端画面，渲染 ANSI→PNG 发送到频道
+- 附带**导航键盘按钮**（见下文）
 
 **`/new`**
-- 无参数
-- 行为：
-  1. 在当前绑定窗口中向 coding CLI 发送退出信号（`C-c` + `/exit` 或 `exit`）
-  2. 等待 CLI 退出
-  3. 重新启动 coding CLI（`claude` 等）
-  4. 清除旧 session ID 映射
-- 回复："🆕 New session started in window `<name>`"
+- 重置会话：退出当前 coding CLI → 重新启动
 
-**`/resume <session_id>`**
-- 参数：`session_id`（可选）— Claude Code session ID
-- 行为：
-  - 有参数：在绑定窗口中启动 `claude --resume <session_id>`
-  - 无参数：列出该工作目录下的可用 session（从 `~/.claude/projects/` 解析），生成**会话选择器按钮**
-- 会话列表格式：
-  ```
-  📂 Available sessions in /data/projects/myapp
-
-  [fix-auth-bug (2h ago, 15 msgs)]
-  [refactor-api (1d ago, 42 msgs)]
-  [🆕 New Session]
-  ```
+**`/stop`**
+- 向绑定窗口发送 `Escape` + `Escape`（中断当前操作）
 
 **`/compact`**
-- 无参数
-- 行为：向绑定窗口发送 `/compact` 文本 + Enter 键
-- 回复："⚡ Sent: /compact"
+- 向绑定窗口发送 `/compact` + Enter（压缩上下文）
 
-**`/cost`**
-- 无参数
-- 行为：向绑定窗口发送 `/cost` 文本 + Enter 键
-- 回复："⚡ Sent: /cost"
-- 注：Claude Code 的 `/cost` 输出会通过 OutputMonitor 自动推送回频道
+### 2. CLI 转发命令
 
-**`/model <name>`**
-- 参数：`name`（必需）— 模型名称
-- 行为：向绑定窗口发送 `/model <name>` 文本 + Enter 键
-- 注：因为我们通过 tmux 间接控制，所以 `/model` 直接作为文本转发给 Claude Code CLI
+**`/cc <command>`**
+- 向绑定窗口发送 `/<command>` + Enter
+- 用于转发任何 coding CLI 原生命令：`/cc cost`, `/cc model sonnet`, `/cc memory`, `/cc help` 等
+- 这样不需要为每个 CLI 命令都做一个 slash command
 
-**`/clear`**
-- 无参数
-- 行为：
-  1. 向绑定窗口发送 `/clear` + Enter
-  2. 清除本地 session ID 映射（等待 Hook 重新注册新 session）
-- 回复："⚡ Sent: /clear (session tracking reset)"
+### 3. 普通文本
 
-#### 1.5 通用 CLI 命令转发
-
-**`/cc <command>`**（Claude Code 命令转发）
-- 参数：`command`（必需）— 任意 Claude Code 斜杠命令
-- 行为：向绑定窗口发送 `/<command>` + Enter
-- 示例：`/cc help`, `/cc memory`, `/cc doctor`
-- 回复："⚡ Sent: /<command>"
-- 用途：转发任何我们没有单独实现的 Claude Code 命令
-
----
-
-### 2. 普通文本消息
-
-用户在绑定频道中发送的普通文本消息直接转发到 tmux 窗口。
-
-#### 处理流程
+用户在绑定频道发送文本 → `TmuxController.send_text()` 转发到 tmux pane。
 
 ```
-用户在 #claude-main 发送: "帮我修复这个 bug"
-    │
-    ▼
-on_message 事件 → 过滤检查:
-    ├── 是 bot 自己的消息？ → 忽略
-    ├── 是系统消息？ → 忽略
-    ├── 频道未绑定？ → 忽略（或提示 /bind）
-    └── 通过 ✓
-    │
-    ▼
-TmuxController.send_text(window_id, "帮我修复这个 bug", enter=True)
-    │
-    │  发送方式（参考 ccbot 的特殊处理）:
-    │  1. pane.send_keys(text, literal=True, enter=False)
-    │  2. await asyncio.sleep(0.5)  # 等待终端处理
-    │  3. pane.send_keys("Enter", literal=False)
-    │
-    ▼
-Discord 回复确认: "⚡ Sent to window `main`"
-    │
-    ▼
-OutputMonitor 开始监控输出变化（JSONL + pane 轮询）→ 自动推送
+用户: "帮我修复这个 bug"
+  → pane.send_keys("帮我修复这个 bug", literal=True)
+  → pane.send_keys("Enter")
+  → 回复: "⚡ Sent"
+  → OutputMonitor 轮询输出变化 → 推送回频道
 ```
 
-#### 特殊文本处理
+### 4. !bash 命令
 
-| 用户输入 | 处理方式 | 说明 |
-|----------|----------|------|
-| 普通文本 | `send_keys(text, literal=True)` | 直接转发 |
-| 多行文本 | 逐行发送，行间 100ms 延迟 | 防止终端丢字符 |
-| 超长文本 (>4000字符) | 截断 + 警告 | 防止 tmux paste buffer 溢出 |
-| 空消息 | 忽略 | 不转发 |
-
----
-
-### 3. 感叹号命令（!command）
-
-以 `!` 开头的消息作为 **bash 命令直接执行**，不通过 coding CLI。
-
-#### 处理流程
+以 `!` 开头的消息作为 bash 命令在绑定窗口的工作目录下执行（subprocess，不经过 tmux）。
 
 ```
-用户发送: !git status
-    │
-    ▼
-检测到 ! 前缀 → 提取命令: "git status"
-    │
-    ▼
-方式一（简单 bash，不经过 tmux）:
-    subprocess 在绑定窗口的 work_dir 下执行
-    ├── stdout + stderr 合并捕获
-    ├── 超时 30 秒
-    └── 返回 exit_code + output
-    │
-    ▼
-格式化输出:
-    ```
+用户: !git status
+  → subprocess("git status", cwd=work_dir)
+  → 回复:
     $ git status
     On branch main
     nothing to commit, working tree clean
-
-    Exit code: 0
-    ```
-    │
-    ▼
-分块发送到 Discord（每块 ≤ 2000 字符）
-
-方式二（通过 tmux，参考 ccbot）:
-    发送 "!git status" 到 tmux → Claude Code 进入 bash 模式
-    ├── ccbot 特殊处理: 先发 "!"，等 1s，再发 "git status"
-    └── 后台 _capture_bash_output() 循环 30s 捕获输出
+    (exit 0)
 ```
 
-#### 配置项
+### 5. 按钮交互
 
-`BANG_COMMAND_MODE` — 感叹号命令模式：
-- `direct`（默认）— 直接在 work_dir 下 subprocess 执行，快速返回结果
-- `tmux` — 通过 tmux 发送给 coding CLI 的 bash 模式（与 ccbot 行为一致）
+#### 5.1 截屏导航键盘
 
----
-
-### 4. 按钮交互（InlineKeyboard / Buttons）
-
-Discord 中使用 `discord.ui.Button` 和 `discord.ui.View` 组件。
-
-#### 4.1 截屏控制键盘
-
-`/screenshot` 命令执行后，图片下方附带一组终端导航按钮：
+`/screenshot` 截图下方附带导航按钮，可在 Discord 中操控终端：
 
 ```
 ┌─────────────────────────────────────┐
-│ [␣ Space] [↑ Up]     [⇥ Tab]       │
-│ [← Left]  [↓ Down]   [→ Right]     │
-│ [⎋ Esc]   [^C Ctrl-C] [⏎ Enter]   │
+│ [⎋ Esc]  [↑]  [⏎ Enter]           │
+│ [←]      [↓]  [→]                  │
+│ [^C]     [␣]  [⇥ Tab]              │
 │ [🔄 Refresh]                        │
 └─────────────────────────────────────┘
 ```
 
-**按键映射：**
+点击按钮 → 发送按键到 tmux → 等 500ms → 重新截屏更新图片。
 
-| 按钮标签 | callback_data | tmux 按键 | 说明 |
-|----------|---------------|-----------|------|
-| `␣ Space` | `kb:spc:{wid}` | `Space` | 空格键 |
-| `↑ Up` | `kb:up:{wid}` | `Up` | 上箭头（菜单导航） |
-| `⇥ Tab` | `kb:tab:{wid}` | `Tab` | Tab 键（切换选项） |
-| `← Left` | `kb:lt:{wid}` | `Left` | 左箭头 |
-| `↓ Down` | `kb:dn:{wid}` | `Down` | 下箭头 |
-| `→ Right` | `kb:rt:{wid}` | `Right` | 右箭头 |
-| `⎋ Esc` | `kb:esc:{wid}` | `Escape` | Escape（取消/退出） |
-| `^C` | `kb:cc:{wid}` | `C-c` | Ctrl+C（中断） |
-| `⏎ Enter` | `kb:ent:{wid}` | `Enter` | Enter（确认） |
-| `🔄 Refresh` | `kb:ref:{wid}` | — | 重新截屏并更新图片 |
+`🔄 Refresh` 仅刷新截图不发送任何按键。
 
-**按钮点击处理流程：**
-1. 发送对应按键到 tmux pane
-2. 等待 500ms（让终端更新）
-3. 重新截屏
-4. 编辑原消息，替换为新截图（保留键盘按钮）
+#### 5.2 交互式 UI 检测
 
-#### 4.2 交互式 UI 按钮
+pane 轮询检测到 Claude Code 的交互式 UI 时（参考 ccbot `terminal_parser.py`），自动截屏并附带导航键盘推送到频道：
 
-当 OutputMonitor 通过 `terminal_parser` 检测到 Claude Code 的交互式 UI 时，自动生成对应按钮。
+| UI 类型 | 触发条件 | 典型场景 |
+|---------|----------|----------|
+| PermissionPrompt | pane 中出现权限请求文本 | Claude 要执行 bash/编辑文件 |
+| AskUserQuestion | pane 中出现 ☐/✔/☒ 选项 | Claude 问用户多选题 |
+| BashApproval | pane 中出现 bash 命令审批 | 高风险命令需确认 |
+| ExitPlanMode | pane 中出现计划确认提示 | 退出计划模式 |
 
-**支持的 6 种交互式 UI 类型及其检测正则：**
+检测到后发送截屏 + 导航键盘，用户通过方向键/Enter/Esc 操作即可。
 
-| UI 类型 | 检测正则 (top) | 检测正则 (bottom) | 说明 |
-|---------|---------------|------------------|------|
-| `AskUserQuestion` | `^\s*[☐✔☒]` | `^\s*Enter to select` | 单选/多选问题 |
-| `AskUserQuestion` (多选) | `^\s*←\s+[☐✔☒]` | (无) | 带 ← 的多选 |
-| `ExitPlanMode` | `^\s*Would you like to proceed\?` | `^\s*Esc to (cancel\|exit)` | 计划模式确认 |
-| `PermissionPrompt` | `^\s*Do you want to (proceed\|make this edit\|create\|delete)` | `^\s*Esc to cancel` | 工具权限请求 |
-| `BashApproval` | `^\s*Bash command\s*$` 或 `^\s*This command requires approval` | `^\s*Esc to cancel` | Bash 命令批准 |
-| `RestoreCheckpoint` | `^\s*Restore the code` | `^\s*Enter to continue` | 检查点恢复 |
+### 6. 输出推送
 
-**交互式 UI 按钮布局：**
+后台双通道监控，将 coding CLI 输出推送到 Discord：
 
-默认布局（适用于大部分 UI 类型）：
-```
-┌─────────────────────────────────────┐
-│ [␣ Space] [↑ Up]     [⇥ Tab]       │
-│ [← Left]  [↓ Down]   [→ Right]     │
-│ [⎋ Esc]   [🔄 Refresh] [⏎ Enter]  │
-└─────────────────────────────────────┘
-```
+**JSONL 轮询**（结构化）— 解析 `~/.claude/projects/<hash>/*.jsonl`：
+- `assistant.text` → Markdown 文本消息
+- `tool_use` → "🔧 Using `<tool>`..."
+- `tool_result` → 编辑上条消息追加结果
 
-RestoreCheckpoint 布局（无左右箭头）：
-```
-┌─────────────────────────────────────┐
-│ [␣ Space] [↑ Up]     [⇥ Tab]       │
-│           [↓ Down]                  │
-│ [⎋ Esc]   [🔄 Refresh] [⏎ Enter]  │
-└─────────────────────────────────────┘
-```
+**Pane 轮询**（实时）— 定期 `tmux capture-pane`：
+- 状态行变化 → 更新状态消息
+- 交互式 UI → 触发截屏 + 按钮推送
 
-**交互式 UI 消息格式：**
-
-检测到交互式 UI 后，向频道发送消息：
-```
-🔔 Claude Code is waiting for input:
-───────────────────
-[pane 中提取的 UI 文本内容，纯文本]
-───────────────────
-Use buttons below to navigate, or type your response directly.
-```
-
-**按钮点击流程与截屏控制键盘相同**：发送按键 → 等待 500ms → 刷新 UI 文本显示。
-
-#### 4.3 会话选择器按钮
-
-`/resume` 无参数时显示：
-
-```
-📂 Available sessions in /data/projects/myapp
-
-[fix-auth-bug (2h ago)]     [refactor-api (1d ago)]
-[add-tests (3d ago)]        [🆕 New Session]
-[❌ Cancel]
-```
-
-| 按钮标签 | callback_data | 行为 |
-|----------|---------------|------|
-| 会话名 | `rs:sel:{index}` | 启动 `claude --resume <session_id>` |
-| 🆕 New Session | `rs:new` | 启动 `claude`（新会话） |
-| ❌ Cancel | `rs:cancel` | 取消选择，删除此消息 |
-
-#### 4.4 窗口选择器按钮
-
-当频道未绑定且有空闲 tmux 窗口时显示：
-
-```
-📋 Unbound tmux windows available:
-
-[debug (@3)]     [scratch (@5)]
-[🆕 Create New]  [❌ Cancel]
-```
-
-| 按钮标签 | callback_data | 行为 |
-|----------|---------------|------|
-| 窗口名 | `wb:sel:{index}` | 绑定该频道到选中窗口 |
-| 🆕 Create New | `wb:new` | 触发 `/bind` 流程 |
-| ❌ Cancel | `wb:cancel` | 取消 |
+**消息分块**：超过 2000 字符自动分块，代码块感知（跨块自动闭合/重开围栏）。
 
 ---
 
-### 5. 图片附件处理
-
-用户在绑定频道发送图片时：
-
-#### 处理流程
+### 消息流向总图
 
 ```
-用户发送图片（可带 caption 文字）
+Discord 频道
     │
-    ▼
-下载最高分辨率版本
-    │
-    ▼
-保存到 ~/.gits/images/<timestamp>_<file_id>.jpg
-    │
-    ▼
-构建消息:
-    如果有 caption: "<caption>\n\n(image attached: /path/to/image)"
-    如果无 caption: "(image attached: /path/to/image)"
-    │
-    ▼
-TmuxController.send_text(window_id, 构建的消息)
-    │
-    ▼
-回复确认: "📷 Image sent to coding CLI."
+    ├── /screenshot  → 截屏 + 导航键盘
+    ├── /bind /unbind /windows /new /stop /compact → tmux 操作
+    ├── /cc <cmd>    → 转发 /<cmd> 到 tmux
+    ├── "普通文字"   → send_text 到 tmux pane
+    ├── !bash cmd    → subprocess 执行, 返回输出
+    └── 按钮点击     → send_keys 到 tmux + 刷新截屏
+                           │
+                           ▼
+                     ┌──────────┐
+                     │ tmux     │
+                     │ session  │
+                     └──────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼                         ▼
+       JSONL 轮询                 Pane 轮询
+       (结构化输出)               (状态+UI检测)
+              │                         │
+              └────────────┬────────────┘
+                           ▼
+                   Discord 频道推送
+                   (文本/截图/按钮)
 ```
-
-**注意**: Claude Code 目前可以通过路径引用图片。其他 coding CLI 可能不支持，此时仅发送 caption 文本。
-
----
-
-### 6. 输出推送（后台自动）
-
-OutputMonitor 在后台持续运行，将 coding CLI 的输出推送到 Discord 频道。
-
-#### 双通道监控
-
-**通道一：JSONL 文件轮询**（结构化数据，高保真）
-
-```
-每 JSONL_POLL_INTERVAL 秒:
-    │
-    ├── 扫描 ~/.claude/projects/<project_hash>/ 下的 .jsonl 文件
-    │   (通过 mtime 跳过未变更文件)
-    │
-    ├── 按字节偏移量增量读取新行
-    │
-    ├── 解析 JSON 消息类型:
-    │   ├── assistant.text       → 格式化为 Markdown，发送到频道
-    │   ├── assistant.thinking   → 折叠显示："∴ *Thinking...*\n||<内容>||"
-    │   ├── tool_use             → "🔧 Using `<tool_name>`..."
-    │   ├── tool_result          → 编辑上一条 tool_use 消息，追加结果
-    │   └── user (来自 CLI 内部) → "👤 <内容>"
-    │
-    └── 配对 tool_use / tool_result（通过 tool_use_id 关联）
-```
-
-**通道二：tmux pane 轮询**（实时终端状态，UI 检测）
-
-```
-每 PANE_POLL_INTERVAL 秒:
-    │
-    ├── tmux capture-pane 获取当前 pane 内容
-    │
-    ├── terminal_parser.is_interactive_ui(pane_text):
-    │   ├── 检测到 → InteractiveUIBridge 生成按钮消息
-    │   └── 未检测到 → 继续
-    │
-    ├── terminal_parser.parse_status_line(pane_text):
-    │   ├── 状态变化 → 更新 Discord 状态消息（编辑已有消息）
-    │   │   格式: "✻ Working..." / "● Idle" / "⏳ Waiting for input..."
-    │   └── 未变化 → 跳过
-    │
-    └── 状态消息管理:
-        ├── 第一条输出: 发送新消息
-        ├── 后续输出: 编辑已有消息（避免消息轰炸）
-        └── 状态消息在内容消息到达时自动转换
-```
-
-#### 消息格式化规则
-
-**Markdown 代码块处理：**
-- 短代码片段（<10行）→ 内联代码块
-- 长代码片段 → 带语言标注的围栏代码块
-
-**消息分块（Discord 2000 字符限制）：**
-```
-原始输出 → 按段落分割 → 合并到 ≤1900 字符的块 → 逐块发送
-    │
-    ├── 代码块感知: 跨块时自动闭合/重开 ``` 围栏
-    ├── 第一块: 作为新消息发送
-    └── 后续块: 作为 follow-up 消息发送
-```
-
-**消息去重：**
-- 相同内容 5 分钟内不重复发送
-- 状态消息仅在文本变化时才编辑更新
-
-#### 状态消息生命周期
-
-```
-[频道空闲]
-    │
-    ├── Claude 开始工作 → 发送状态消息: "✻ Working..."
-    │   (edit_message 更新旋转器动画)
-    │
-    ├── 产生输出 → 状态消息转为内容消息
-    │   (编辑原消息，替换为实际输出)
-    │
-    ├── 检测到交互式 UI → 发送带按钮的 UI 消息
-    │
-    ├── 用户通过按钮/文本响应 → UI 消息更新或删除
-    │
-    └── Claude 完成 → 状态消息: "● Idle"（或删除）
-```
-
----
-
-### 完整消息处理流程图
-
-```
-                    Discord 频道消息
-                         │
-                         ▼
-              ┌──────────────────────┐
-              │   消息类型判断        │
-              └──────────────────────┘
-                    │    │    │    │
-         ┌──────┐  │    │    │    │  ┌──────────┐
-         │Slash │  │    │    │    └──│ 图片附件 │
-         │Cmd   │  │    │    │       └──────────┘
-         └──┬───┘  │    │    │            │
-            │      │    │    │       下载保存图片
-            ▼      │    │    │       发送路径到 tmux
-     ┌────────┐    │    │    │
-     │处理命令│    │    │    │
-     │/bind   │    │    │    │
-     │/screenshot  │    │    │
-     │/windows│    │    │    │
-     │ ...    │    │    │    │
-     └────────┘    │    │    │
-                   │    │    │
-              ┌────┘    │    └────┐
-              │         │         │
-              ▼         ▼         ▼
-         ┌────────┐ ┌───────┐ ┌──────────┐
-         │普通文本│ │!bash  │ │按钮点击  │
-         └───┬────┘ │命令   │ └────┬─────┘
-             │      └──┬────┘      │
-             │         │           │
-             ▼         ▼           ▼
-     ┌──────────┐ ┌────────┐ ┌──────────┐
-     │send_text │ │执行bash│ │send_keys │
-     │到 tmux   │ │返回输出│ │到 tmux   │
-     └────┬─────┘ └───┬────┘ │+ 刷新截屏│
-          │            │      └────┬─────┘
-          ▼            ▼           ▼
-    ┌─────────────────────────────────────┐
-    │        OutputMonitor (后台)          │
-    │                                      │
-    │  JSONL 轮询 ──→ 结构化输出推送       │
-    │  Pane 轮询  ──→ 状态行 + UI 检测     │
-    └──────────────────┬──────────────────┘
-                       │
-                       ▼
-              Discord 频道消息推送
-              (文本/截图/按钮)
-```
-
----
-
-### 错误处理策略
-
-| 场景 | 处理方式 |
-|------|----------|
-| 频道未绑定时发消息 | 忽略（静默），或首次时提示 "Use `/bind <path>` to get started" |
-| 绑定的 tmux 窗口已被手动关闭 | 自动解绑 + 通知 "⚠️ Window `<name>` was closed externally. Binding removed." |
-| tmux session 不存在 | 自动创建 session（`tmux new-session -d -s gits`） |
-| Coding CLI 崩溃/退出 | OutputMonitor 检测到退出 → 通知 "⚠️ CLI exited in window `<name>` (exit code: N)" |
-| Discord API 限速 (429) | 指数退避重试（参考 claude-on-discord `dispatcher.ts`） |
-| 消息发送失败 (5xx) | 最多重试 3 次，间隔 1s/2s/4s |
-| JSONL 文件损坏/解析失败 | 跳过损坏行，记录 warning 日志，继续读取 |
 
 ---
 
