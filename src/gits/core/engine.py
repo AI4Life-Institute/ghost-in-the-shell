@@ -72,7 +72,6 @@ class Engine:
         self.health.on_recovery(self._on_recovery)
 
         # Register pane monitor callbacks
-        self.monitor.on_output(self._on_pane_output)
         self.monitor.on_prompt(self._on_pane_prompt)
 
         # Resume polling for existing bindings
@@ -599,24 +598,6 @@ class Engine:
     # ------------------------------------------------------------------
     # Pane monitor callbacks
     # ------------------------------------------------------------------
-
-    async def _on_pane_output(self, channel_id: str, new_lines: str) -> None:
-        """Called by PaneMonitor when new terminal output is detected."""
-        if not self._adapter:
-            return
-
-        text = new_lines.strip()
-        if not text:
-            return
-
-        # Truncate to ~1800 chars to leave room for code block formatting
-        if len(text) > 1800:
-            text = text[:1800] + "\n... (truncated)"
-
-        await self._adapter.send_message(
-            channel_id,
-            OutgoingMessage(text=f"```\n{text}\n```"),
-        )
 
     async def _on_pane_prompt(
         self, channel_id: str, window_id: str, prompt_info: PromptInfo
