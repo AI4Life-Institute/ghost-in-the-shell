@@ -597,9 +597,9 @@ Thread 的结束是自然发生的，不应该是用户刻意去做的操作。
 
 Thread 创建时设置 `autoArchiveDuration`，无人发言超过此时间后 Discord 自动归档：
 - 60 分钟（1 小时）
-- 1440 分钟（1 天）— **GITS 默认值**
+- 1440 分钟（1 天）
 - 4320 分钟（3 天）— 需要服务器 Boost
-- 10080 分钟（7 天）— 需要服务器 Boost
+- 10080 分钟（7 天）— **GITS 默认值**，需要服务器 Boost
 
 "活动"的定义：发送消息、取消归档、或修改归档时间。
 
@@ -607,7 +607,7 @@ Thread 创建时设置 `autoArchiveDuration`，无人发言超过此时间后 Di
 # /fork 创建 Thread 时设置自动归档时间
 thread = await channel.create_thread(
     name=title,
-    auto_archive_duration=1440,  # 默认 1 天无活动后归档
+    auto_archive_duration=10080,  # 默认 7 天无活动后归档
 )
 ```
 
