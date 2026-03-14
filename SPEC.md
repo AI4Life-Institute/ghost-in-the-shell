@@ -448,12 +448,16 @@ class CodingCLIHook:
 
 ### Channel + Thread 映射架构
 
-参考 claude-on-discord 的频道结构设计：
+两个参考项目都有 thread 概念，但设计完全不同：
 
-- **Channel = 项目**：每个 Discord 频道对应一个项目工作目录，频道 topic 显示项目信息
-- **Thread = 子任务**：频道内的 Thread 代表项目下的子任务，自动继承父频道的工作目录
+| | **ccbot** (Telegram) | **claude-on-discord** (Discord) |
+|---|---|---|
+| 组织方式 | **平面**：每个 topic 独立，无层级 | **层级**：Channel=项目，Thread=子任务 |
+| 映射关系 | 1 topic = 1 tmux window | Channel=1 session，Thread 继承 Channel |
+| 创建方式 | 用户手动创建 topic → bot 引导选目录 → 自动创建 window | `/project` 绑定 Channel，`/fork` 创建 Thread |
+| 上下文继承 | 无，每个 topic 完全独立 | Thread 继承父 Channel 的 workingDir |
 
-映射到 tmux：
+**我们的方案**：结合两者——用 Discord 的 **Channel = 项目** 概念（来自 claude-on-discord），同时支持 ccbot 风格的 **Thread = 独立任务**，Thread 自动继承父 Channel 的工作目录。
 
 ```
 Discord                              tmux session "gits"
@@ -484,11 +488,12 @@ Discord                              tmux session "gits"
 **Thread 行为（`/fork`）：**
 1. 在 Discord 中创建 Thread（继承父频道）
 2. 创建新的 tmux 窗口，以 thread 名命名
-3. cd 到**父频道相同的工作目录**
+3. cd 到**父频道相同的工作目录**（参考 claude-on-discord `maybeInheritThreadContext()`）
 4. 启动独立的 coding CLI 会话（不共享父频道的 session）
 5. Thread 内的消息转发到这个独立窗口
+6. Thread 关闭/归档时，可选杀掉关联 tmux 窗口（参考 ccbot `topic_closed_handler`）
 
-这样一个项目可以在 Discord 里并行开多个子任务，每个子任务有独立的 tmux 窗口和 coding CLI 会话，但共享同一个工作目录。
+**与 ccbot 的关键区别**：ccbot 每个 topic 完全独立（用户需手动选目录），我们的 Thread 自动继承父 Channel 的工作目录，更适合"一个项目多个并行任务"的场景。
 
 ---
 
