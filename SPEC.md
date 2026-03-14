@@ -467,16 +467,16 @@ Discord                              tmux session "gits"
 │         dir=/data/projects/my-app"     └─ cwd: /data/projects/my-app
 │
 ├─ Thread: "fix-auth-bug"           window "fix-auth-bug"
-│   └─ 继承 #my-app 的 workingDir     └─ claude (独立会话)
+│   └─ 默认继承项目根目录               └─ claude (独立会话)
 │                                       └─ cwd: /data/projects/my-app
 │
-└─ Thread: "add-tests"              window "add-tests"
-    └─ 继承 #my-app 的 workingDir     └─ claude (独立会话)
-                                       └─ cwd: /data/projects/my-app
-
-#frontend (channel)                  window "frontend"
-├─ topic: "project=frontend            └─ claude (coding CLI)
-│         dir=/data/projects/fe"         └─ cwd: /data/projects/fe
+├─ Thread: "frontend-redesign"      window "frontend-redesign"
+│   └─ /fork -d frontend               └─ claude (独立会话)
+│      指定子目录                        └─ cwd: /data/projects/my-app/frontend
+│
+└─ Thread: "api-refactor"           window "api-refactor"
+    └─ /fork -d src/api                └─ claude (独立会话)
+       指定子目录                        └─ cwd: /data/projects/my-app/src/api
 ```
 
 **Channel 行为（`/bind`）：**
@@ -486,14 +486,26 @@ Discord                              tmux session "gits"
 4. 后续该频道的所有消息转发到此 tmux 窗口
 
 **Thread 行为（`/fork`）：**
-1. 在 Discord 中创建 Thread（继承父频道）
+1. 在 Discord 中创建 Thread
 2. 创建新的 tmux 窗口，以 thread 名命名
-3. cd 到**父频道相同的工作目录**（参考 claude-on-discord `maybeInheritThreadContext()`）
-4. 启动独立的 coding CLI 会话（不共享父频道的 session）
+3. cd 到工作目录：
+   - 默认 = 父频道的项目根目录
+   - `/fork -d <subdir>` = 项目根目录下的子目录（如 `frontend/`, `src/api/`）
+4. 启动独立的 coding CLI 会话
 5. Thread 内的消息转发到这个独立窗口
-6. Thread 关闭/归档时，可选杀掉关联 tmux 窗口（参考 ccbot `topic_closed_handler`）
 
-**与 ccbot 的关键区别**：ccbot 每个 topic 完全独立（用户需手动选目录），我们的 Thread 自动继承父 Channel 的工作目录，更适合"一个项目多个并行任务"的场景。
+**Thread 生命周期**（不需要手动关闭）：
+
+Thread 的结束是自然发生的，不应该是用户刻意去做的操作：
+
+| 触发事件 | 行为 |
+|----------|------|
+| 用户在 Thread 中执行 `/kill` | 杀掉 tmux 窗口进程 → bot 自动归档 Thread |
+| tmux 窗口中的 coding CLI 正常退出 | OutputMonitor 检测到退出 → bot 发消息通知 → 自动归档 Thread |
+| tmux 窗口被外部手动关闭 | OutputMonitor 检测到窗口消失 → bot 发消息通知 → 自动归档 Thread |
+| Discord Thread 自然沉底（无人说话） | Discord 自动归档（默认 24h），tmux 窗口保留不动 |
+
+**归档 ≠ 删除**：Discord Thread 归档后仍可重新打开，对应的 tmux 窗口如果还在，自动恢复绑定。
 
 ---
 
@@ -559,14 +571,17 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 #### 子任务分支（Thread 级）
 
-**`/fork [title]`**
+**`/fork [title] [-d <subdir>]`**
 - 在当前频道下创建 Thread（子任务）
 - 行为：
   1. 创建 Discord Thread（名称 = title 或自动生成）
   2. 创建新 tmux 窗口（以 thread 名命名）
-  3. cd 到**父频道相同的工作目录**
+  3. cd 到工作目录：
+     - 默认 = 父频道的项目根目录
+     - `-d <subdir>` = 项目根目录下的子目录（如 `frontend/`, `src/api/`）
   4. 启动独立的 coding CLI 会话
 - 对应 claude-on-discord 的 `/fork`，用 tmux 窗口替代 SDK session
+- 示例：`/fork frontend-redesign -d frontend`
 
 #### 会话管理
 
