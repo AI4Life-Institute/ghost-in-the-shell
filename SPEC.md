@@ -446,13 +446,59 @@ class CodingCLIHook:
 
 以 **claude-on-discord 的命令集为蓝本**，适配 tmux 架构，并新增终端截屏功能。
 
+### Channel + Thread 映射架构
+
+参考 claude-on-discord 的频道结构设计：
+
+- **Channel = 项目**：每个 Discord 频道对应一个项目工作目录，频道 topic 显示项目信息
+- **Thread = 子任务**：频道内的 Thread 代表项目下的子任务，自动继承父频道的工作目录
+
+映射到 tmux：
+
+```
+Discord                              tmux session "gits"
+─────────                            ───────────────────
+#my-app (channel)                    window "my-app"
+├─ topic: "project=my-app              └─ claude (coding CLI)
+│         dir=/data/projects/my-app"     └─ cwd: /data/projects/my-app
+│
+├─ Thread: "fix-auth-bug"           window "fix-auth-bug"
+│   └─ 继承 #my-app 的 workingDir     └─ claude (独立会话)
+│                                       └─ cwd: /data/projects/my-app
+│
+└─ Thread: "add-tests"              window "add-tests"
+    └─ 继承 #my-app 的 workingDir     └─ claude (独立会话)
+                                       └─ cwd: /data/projects/my-app
+
+#frontend (channel)                  window "frontend"
+├─ topic: "project=frontend            └─ claude (coding CLI)
+│         dir=/data/projects/fe"         └─ cwd: /data/projects/fe
+```
+
+**Channel 行为（`/bind`）：**
+1. 创建 tmux 窗口，以频道名命名
+2. cd 到工作目录，启动 coding CLI
+3. 设置 Discord 频道 topic：`project=<name> dir=<path>`（参考 claude-on-discord `topic.ts`）
+4. 后续该频道的所有消息转发到此 tmux 窗口
+
+**Thread 行为（`/fork`）：**
+1. 在 Discord 中创建 Thread（继承父频道）
+2. 创建新的 tmux 窗口，以 thread 名命名
+3. cd 到**父频道相同的工作目录**
+4. 启动独立的 coding CLI 会话（不共享父频道的 session）
+5. Thread 内的消息转发到这个独立窗口
+
+这样一个项目可以在 Discord 里并行开多个子任务，每个子任务有独立的 tmux 窗口和 coding CLI 会话，但共享同一个工作目录。
+
+---
+
 ### 设计逻辑
 
 claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 - ✅ **保留** — 通过 tmux 转发即可实现的命令（大部分会话管理类）
 - ✅ **新增** — tmux 绑定管理（`/bind`, `/unbind`）和终端截屏（`/screenshot`）
-- ❌ **不做** — 依赖 Claude Agent SDK 的功能（fork/merge 线程分支）、git 高级工作流（worktree/branches/pr/diff）、SDK 权限管理（mode）
+- ❌ **不做** — 依赖 Claude Agent SDK 的功能（merge 线程合并）、git 高级工作流（worktree/branches/pr/diff）、SDK 权限管理（mode）
 
 | claude-on-discord 命令 | GITS 处理 | 说明 |
 |------------------------|-----------|------|
@@ -466,12 +512,12 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 | `/cost` | ✅ **保留** | 查看花费 |
 | `/stop` | ✅ **保留** | 中断执行 |
 | `/kill` | ✅ **保留** | 终止会话 |
+| `/fork` | ✅ **保留** | 创建 Thread + 独立 tmux 窗口（继承父频道工作目录） |
 | `/systemprompt` | → **`/cc memory`** | 通过 CLI 转发实现 |
 | `/persona` | ❌ 不做 | SDK 专属 |
 | `/mentions` | ❌ 不做 | 多用户频道策略，MVP 不需要 |
 | `/mode` | ❌ 不做 | SDK 权限模式 |
-| `/fork` | ❌ 不做 | SDK 线程分支 |
-| `/merge` | ❌ 不做 | SDK 线程合并 |
+| `/merge` | ❌ 不做 | SDK 线程合并（依赖会话摘要） |
 | `/branches` | ❌ 不做 | git 工作流 |
 | `/diff` | ❌ 不做 | git 工作流 |
 | `/pr` | ❌ 不做 | git 工作流 |
@@ -485,7 +531,7 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 | # | 方式 | 说明 |
 |---|------|------|
-| 1 | **Slash Commands** (12个) | 会话管理 + tmux 绑定 + 截屏 |
+| 1 | **Slash Commands** (13个) | 会话管理 + tmux 绑定 + 子任务分支 + 截屏 |
 | 2 | **普通文本** | 直接发文字 → 转发到 tmux pane |
 | 3 | **`!bash` 命令** | `!git status` → 直接执行 bash 返回输出 |
 | 4 | **按钮交互** | 截屏导航键盘 + 交互式 UI 按钮 |
@@ -493,64 +539,55 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 ---
 
-### 1. Slash Commands (12 个)
+### 1. Slash Commands (13 个)
 
-#### tmux 绑定管理（新增）
+#### 项目绑定（Channel 级）
 
 **`/bind <path>`**
-- 将当前频道绑定到工作目录：创建 tmux 窗口 → cd 到目录 → 启动 coding CLI
-- 对应 claude-on-discord 的 `/project`，但额外管理 tmux 窗口
+- 将当前频道绑定到项目工作目录
+- 行为：创建 tmux 窗口（以频道名命名） → cd 到目录 → 启动 coding CLI
+- 设置频道 topic：`project=<name> dir=<path>`
+- 对应 claude-on-discord 的 `/project`
 
 **`/unbind`**
 - 解除频道绑定，保留 tmux 窗口
 
-#### 会话管理（对应 claude-on-discord 同名命令）
+#### 子任务分支（Thread 级）
 
-**`/new`**
-- 重置会话：退出当前 coding CLI → 重新启动
-- 对应 claude-on-discord 的 `/new`
+**`/fork [title]`**
+- 在当前频道下创建 Thread（子任务）
+- 行为：
+  1. 创建 Discord Thread（名称 = title 或自动生成）
+  2. 创建新 tmux 窗口（以 thread 名命名）
+  3. cd 到**父频道相同的工作目录**
+  4. 启动独立的 coding CLI 会话
+- 对应 claude-on-discord 的 `/fork`，用 tmux 窗口替代 SDK session
 
-**`/stop`**
-- 中断当前操作（向 tmux 发送 `Escape Escape`）
-- 对应 claude-on-discord 的 `/stop`
+#### 会话管理
 
-**`/kill`**
-- 终止会话：杀掉 tmux 窗口中的进程
-- 对应 claude-on-discord 的 `/kill`
+**`/new`** — 重置会话：退出当前 coding CLI → 重新启动
 
-**`/compact`**
-- 向 tmux 转发 `/compact` + Enter
-- 对应 claude-on-discord 的 `/compact`
+**`/stop`** — 中断当前操作（向 tmux 发送 `Escape Escape`）
 
-**`/status`**
-- 显示当前频道绑定的窗口、工作目录、CLI 状态等
-- 对应 claude-on-discord 的 `/status`
+**`/kill`** — 终止会话：杀掉 tmux 窗口中的进程；如果在 Thread 中，同时归档 Thread
 
-**`/cost`**
-- 向 tmux 转发 `/cost` + Enter，输出通过 OutputMonitor 推送回频道
-- 对应 claude-on-discord 的 `/cost`
+**`/compact`** — 向 tmux 转发 `/compact` + Enter
 
-**`/model <name>`**
-- 向 tmux 转发 `/model <name>` + Enter
-- 对应 claude-on-discord 的 `/model`
+**`/status`** — 显示当前频道/Thread 绑定的窗口、工作目录、CLI 状态
+
+**`/cost`** — 向 tmux 转发 `/cost` + Enter
+
+**`/model <name>`** — 向 tmux 转发 `/model <name>` + Enter
 
 #### 工具命令
 
-**`/bash <command>`**
-- 在绑定窗口的工作目录下直接执行 shell 命令（subprocess，不经过 tmux）
-- 对应 claude-on-discord 的 `/bash`
+**`/bash <command>`** — 在工作目录下直接执行 shell 命令（subprocess）
 
-**`/screenshot`**
-- **终端截屏**：捕获 tmux pane 的 ANSI 内容 → 渲染为 PNG → 发送到频道
-- 附带**导航键盘按钮**
-- 对应 claude-on-discord 的 `/screenshot`，但改为终端截屏（原项目是网页截屏）
+**`/screenshot`** — 终端截屏：ANSI→PNG + 导航键盘按钮
 
 #### CLI 命令转发
 
-**`/cc <command>`**
-- 向 tmux 转发 `/<command>` + Enter
-- 用于转发任何 coding CLI 原生命令：`/cc memory`, `/cc help`, `/cc doctor` 等
-- 兜底方案，覆盖所有我们没有单独实现的 CLI 命令
+**`/cc <command>`** — 向 tmux 转发 `/<command>` + Enter，兜底覆盖所有 CLI 命令
 
 ---
 
@@ -639,23 +676,30 @@ pane 轮询检测到 Claude Code 的交互式 UI 时，自动截屏并附带导�
 ### 消息流向总图
 
 ```
-Discord 频道
-    │
-    ├── /bind /unbind                → tmux 窗口管理
-    ├── /new /stop /kill /compact    → 会话控制 (→ tmux 按键)
-    ├── /status                      → 查询状态
-    ├── /cost /model /cc <cmd>       → 转发 CLI 命令 (→ tmux 文本)
-    ├── /bash <cmd>                  → subprocess 执行, 返回输出
-    ├── /screenshot                  → 截屏 + 导航键盘
-    ├── "普通文字"                   → send_text 到 tmux pane
-    ├── !bash cmd                    → subprocess 执行, 返回输出
-    └── 按钮点击                     → send_keys 到 tmux + 刷新截屏
-                           │
-                           ▼
-                     ┌──────────┐
-                     │ tmux     │
-                     │ session  │
-                     └──────────┘
+Discord Server
+│
+├── #my-app (Channel = 项目)
+│   ├── /bind /unbind          → tmux window "my-app"
+│   ├── /fork "fix-bug"        → 创建 Thread + tmux window "fix-bug"
+│   ├── /new /stop /kill       → 会话控制 (→ tmux 按键)
+│   ├── /compact /cost /model  → 转发 CLI 命令 (→ tmux 文本)
+│   ├── /cc <cmd>              → 转发任意 CLI 命令
+│   ├── /bash <cmd>            → subprocess 执行
+│   ├── /screenshot            → 截屏 + 导航键盘
+│   ├── "普通文字"             → send_text 到 tmux pane
+│   ├── !bash cmd              → subprocess 执行
+│   └── 按钮点击               → send_keys + 刷新截屏
+│
+├── Thread: "fix-bug" (子任务，继承 #my-app 的 workingDir)
+│   └── 所有交互同上，但指向独立的 tmux window "fix-bug"
+│
+│              ┌──────────────────────────────┐
+│              │  tmux session "gits"          │
+│              │  ┌─────────┐ ┌─────────────┐ │
+└──────────────│──│my-app   │ │fix-bug      │ │
+               │  │(claude) │ │(claude)     │ │
+               │  └─────────┘ └─────────────┘ │
+               └──────────────────────────────┘
                            │
               ┌────────────┼────────────┐
               ▼                         ▼
@@ -664,8 +708,8 @@ Discord 频道
               │                         │
               └────────────┬────────────┘
                            ▼
-                   Discord 频道推送
-                   (文本/截图/按钮)
+              Discord Channel/Thread 推送
+              (文本/截图/按钮)
 ```
 
 ---
