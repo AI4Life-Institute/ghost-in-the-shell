@@ -625,7 +625,7 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 | `/compact` | ✅ **`/compact`** | CLI 转发 | → `/compact` |
 | (无) | ✅ **`/clear`** | CLI 转发 | → `/clear`（清除对话历史） |
 | `/cost` | ✅ **`/cost`** | CLI 转发 | → `/cost` |
-| `/model` | ✅ **`/model`** | CLI 转发 | → `/model <name>` |
+| `/model` | ✅ **`/model`** | **原生** | Discord 下拉菜单选择 → `/model <name>`（跳过 CLI 交互式 picker） |
 | `/systemprompt` | → **`/memory`** | CLI 转发 | → `/memory` |
 | (无) | ✅ **`/context`** | CLI 转发 | → `/context`（上下文占用） |
 | (无) | ✅ **`/diff`** | CLI 转发 | → `/diff`（代码变更） |
@@ -645,7 +645,7 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 | # | 方式 | 说明 |
 |---|------|------|
-| 1 | **Slash Commands** (9 原生 + 8 CLI 转发 + 万能 `/cc`) | 会话管理 + tmux 绑定 + 子任务分支 + 截屏 + CLI 命令转发 |
+| 1 | **Slash Commands** (10 原生 + 7 CLI 转发 + 万能 `/cc`) | 会话管理 + tmux 绑定 + 模型切换 + 子任务分支 + 截屏 + CLI 命令转发 |
 | 2 | **普通文本** | 直接发文字 → 转发到 tmux pane |
 | 3 | **`!bash` 命令** | `!git status` → 直接执行 bash 返回输出 |
 | 4 | **按钮交互** | 截屏导航键盘 + 交互式 UI 按钮 |
@@ -670,6 +670,9 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 | **`/status`** | 显示绑定信息：窗口名、目录、CLI 类型、session ID、运行状态 |
 | **`/bash <command>`** | 在工作目录下直接执行 shell 命令（subprocess，不经过 tmux） |
 | **`/screenshot`** | 终端截屏：ANSI→PNG + 导航键盘按钮 |
+| **`/model [name]`** | 切换模型：Discord 下拉菜单选择 → 直接发 `/model <name>` 到 tmux（跳过 CLI 交互式 picker） |
+
+**`/model` 设计说明**：Coding CLI 的 `/model`（无参数）会打开基于 Ink/React 的交互式 picker（方向键选择 + 回车确认），这种终端 UI 无法通过 Discord 按钮桥接。GITS 改为在 Discord 侧提供模型下拉菜单（sonnet / opus / haiku / sonnet[1m] / opus[1m] / opusplan），选择后直接发送 `/model <name>` 给 CLI，完全跳过交互式 picker。
 
 #### B. CLI 转发命令 — 明确映射到 coding CLI 内置 slash command
 
@@ -680,7 +683,6 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 | **`/compact`** | `→ /compact` + Enter | ✅ `/compact` | ✅ `/compact` | 压缩上下文 |
 | **`/clear`** | `→ /clear` + Enter | ✅ `/clear` | ✅ `/clear` | 清除对话历史，全新开始 |
 | **`/cost`** | `→ /cost` + Enter | ✅ `/cost` | ✅ `/cost` | 查看 token 用量和花费 |
-| **`/model <name>`** | `→ /model <name>` + Enter | ✅ `/model` | ✅ `/model` | 切换模型 |
 | **`/memory`** | `→ /memory` + Enter | ✅ `/memory` | ❌ | 编辑项目记忆文件 |
 | **`/context`** | `→ /context` + Enter | ✅ `/context` | ❌ | 查看上下文窗口占用 |
 | **`/diff`** | `→ /diff` + Enter | ✅ `/diff` | ❌ | 查看代码变更 |
