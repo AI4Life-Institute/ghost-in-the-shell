@@ -610,30 +610,34 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 - ✅ **新增** — tmux 绑定管理（`/bind`, `/unbind`）和终端截屏（`/screenshot`）
 - ❌ **不做** — 依赖 Claude Agent SDK 的功能（merge 线程合并）、git 高级工作流（worktree/branches/pr/diff）、SDK 权限管理（mode）
 
-| claude-on-discord 命令 | GITS 处理 | 说明 |
-|------------------------|-----------|------|
-| `/project <path>` | → **`/bind <path>`** | 我们需要 tmux 绑定，功能合并 |
-| `/new` | ✅ **保留** | 重置会话 |
-| `/compact` | ✅ **保留** | 压缩上下文 |
-| `/bash <cmd>` | ✅ **保留** | 执行 shell 命令 |
-| `/screenshot` | ✅ **改造** | 改为终端 ANSI→PNG 截屏（原项目是网页截屏） |
-| `/model <name>` | ✅ **保留** | 切换模型 |
-| `/status` | ✅ **保留** | 查看会话信息 |
-| `/cost` | ✅ **保留** | 查看花费 |
-| `/stop` | ✅ **保留** | 中断执行 |
-| `/kill` | ✅ **保留** | 终止会话 |
-| `/fork` | ✅ **保留** | 创建 Thread + 独立 tmux 窗口（继承父频道工作目录） |
-| `/systemprompt` | → **`/cc memory`** | 通过 CLI 转发实现 |
-| `/persona` | ❌ 不做 | SDK 专属 |
-| `/mentions` | ❌ 不做 | 多用户频道策略，MVP 不需要 |
-| `/mode` | ❌ 不做 | SDK 权限模式 |
-| `/merge` | ❌ 不做 | SDK 线程合并（依赖会话摘要） |
-| `/branches` | ❌ 不做 | git 工作流 |
-| `/diff` | ❌ 不做 | git 工作流 |
-| `/pr` | ❌ 不做 | git 工作流 |
-| `/worktree` | ❌ 不做 | git 工作流 |
-| (无) | ✅ **新增 `/bind`** | tmux 绑定管理 |
-| (无) | ✅ **新增 `/unbind`** | tmux 绑定管理 |
+| claude-on-discord 命令 | GITS 处理 | 类型 | 说明 |
+|------------------------|-----------|------|------|
+| `/project <path>` | → **`/bind`** | 原生 | tmux 绑定 + 目录浏览器 + session picker |
+| `/new` | ✅ **`/new`** | 原生 | 重置会话 |
+| `/bash <cmd>` | ✅ **`/bash`** | 原生 | subprocess 执行 |
+| `/screenshot` | ✅ **`/screenshot`** | 原生 | 改为终端 ANSI→PNG |
+| `/stop` | ✅ **`/stop`** | 原生 | Escape Escape |
+| `/kill` | ✅ **`/kill`** | 原生 | 杀进程 + 归档 Thread |
+| `/fork` | ✅ **`/fork`** | 原生 | Thread + tmux 窗口 |
+| (无) | ✅ **`/status`** | 原生 | 绑定信息 + session ID |
+| (无) | ✅ **`/bind`** | 原生 | 新增：tmux 绑定管理 |
+| (无) | ✅ **`/unbind`** | 原生 | 新增：解除绑定 |
+| `/compact` | ✅ **`/compact`** | CLI 转发 | → `/compact` |
+| (无) | ✅ **`/clear`** | CLI 转发 | → `/clear`（清除对话历史） |
+| `/cost` | ✅ **`/cost`** | CLI 转发 | → `/cost` |
+| `/model` | ✅ **`/model`** | CLI 转发 | → `/model <name>` |
+| `/systemprompt` | → **`/memory`** | CLI 转发 | → `/memory` |
+| (无) | ✅ **`/context`** | CLI 转发 | → `/context`（上下文占用） |
+| (无) | ✅ **`/diff`** | CLI 转发 | → `/diff`（代码变更） |
+| (无) | ✅ **`/usage`** | CLI 转发 | → `/usage`（速率限额） |
+| (无) | ✅ **`/cc <cmd>`** | 万能转发 | → `/<cmd>`（兜底） |
+| `/persona` | ❌ 不做 | — | SDK 专属 |
+| `/mentions` | ❌ 不做 | — | 多用户策略，MVP 不需要 |
+| `/mode` | ❌ 不做 | — | SDK 权限模式 |
+| `/merge` | ❌ 不做 | — | SDK 线程合并 |
+| `/branches` | ❌ 不做 | — | git 工作流 |
+| `/pr` | ❌ 不做 | — | git 工作流 |
+| `/worktree` | ❌ 不做 | — | git 工作流 |
 
 ---
 
@@ -641,7 +645,7 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 | # | 方式 | 说明 |
 |---|------|------|
-| 1 | **Slash Commands** (13个) | 会话管理 + tmux 绑定 + 子任务分支 + 截屏 |
+| 1 | **Slash Commands** (9 原生 + 8 CLI 转发 + 万能 `/cc`) | 会话管理 + tmux 绑定 + 子任务分支 + 截屏 + CLI 命令转发 |
 | 2 | **普通文本** | 直接发文字 → 转发到 tmux pane |
 | 3 | **`!bash` 命令** | `!git status` → 直接执行 bash 返回输出 |
 | 4 | **按钮交互** | 截屏导航键盘 + 交互式 UI 按钮 |
@@ -649,59 +653,47 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 ---
 
-### 1. Slash Commands (13 个)
+### 1. Slash Commands
 
-#### 项目绑定（Channel 级）
+分为三类：**GITS 原生命令**（bot 自身处理）、**CLI 转发命令**（明确映射到 coding CLI 的 slash command）、**万能转发**。
 
-**`/bind [path]`**
-- 将当前频道绑定到项目工作目录
-- 两种使用方式：
-  - `/bind /data/projects/my-app` — 直接指定路径
-  - `/bind` — 不带参数，启动交互式目录浏览器（见下方）
-- 行为：选定目录 → 检查已有窗口/session → 创建/绑定 tmux 窗口 → 启动 CLI
-- 设置频道 topic：`project=<name> dir=<path>`
-- 对应 claude-on-discord 的 `/project` + ccbot 的目录浏览器
+#### A. GITS 原生命令 — Bot 自身处理，不经过 tmux
 
-**`/unbind`**
-- 解除频道绑定，保留 tmux 窗口
+| 命令 | 说明 |
+|------|------|
+| **`/bind [path]`** | 绑定频道到项目目录（交互式目录浏览器 + session picker） |
+| **`/unbind`** | 解除频道绑定，保留 tmux 窗口 |
+| **`/fork [title] [-d <subdir>]`** | 创建 Thread + 独立 tmux 窗口 |
+| **`/new`** | 重置会话：退出当前 coding CLI → 重新启动（可选 resume） |
+| **`/stop`** | 中断当前操作 → 向 tmux 发送 `Escape Escape` |
+| **`/kill`** | 终止会话：杀掉 tmux 窗口进程；Thread 中同时归档 |
+| **`/status`** | 显示绑定信息：窗口名、目录、CLI 类型、session ID、运行状态 |
+| **`/bash <command>`** | 在工作目录下直接执行 shell 命令（subprocess，不经过 tmux） |
+| **`/screenshot`** | 终端截屏：ANSI→PNG + 导航键盘按钮 |
 
-#### 子任务分支（Thread 级）
+#### B. CLI 转发命令 — 明确映射到 coding CLI 内置 slash command
 
-**`/fork [title] [-d <subdir>]`**
-- 在当前频道下创建 Thread（子任务）
-- 行为：
-  1. 创建 Discord Thread（名称 = title 或自动生成）
-  2. 创建新 tmux 窗口（以 thread 名命名）
-  3. cd 到工作目录：默认 = 父频道项目根目录；`-d <subdir>` 可选指定子目录
-  4. 启动独立的 coding CLI 会话
-- 对应 claude-on-discord 的 `/fork`，用 tmux 窗口替代 SDK session
-- 示例：`/fork fix-bug`、`/fork frontend-work -d frontend`
+这些命令 GITS 直接向 tmux pane 转发对应的 CLI 命令，需要 coding CLI 本身支持：
 
-#### 会话管理
+| GITS 命令 | 转发内容 | Claude Code | Codex CLI | 说明 |
+|-----------|----------|-------------|-----------|------|
+| **`/compact`** | `→ /compact` + Enter | ✅ `/compact` | ✅ `/compact` | 压缩上下文 |
+| **`/clear`** | `→ /clear` + Enter | ✅ `/clear` | ✅ `/clear` | 清除对话历史，全新开始 |
+| **`/cost`** | `→ /cost` + Enter | ✅ `/cost` | ✅ `/cost` | 查看 token 用量和花费 |
+| **`/model <name>`** | `→ /model <name>` + Enter | ✅ `/model` | ✅ `/model` | 切换模型 |
+| **`/memory`** | `→ /memory` + Enter | ✅ `/memory` | ❌ | 编辑项目记忆文件 |
+| **`/context`** | `→ /context` + Enter | ✅ `/context` | ❌ | 查看上下文窗口占用 |
+| **`/diff`** | `→ /diff` + Enter | ✅ `/diff` | ❌ | 查看代码变更 |
+| **`/usage`** | `→ /usage` + Enter | ✅ `/usage` | ❌ | 查看计划限额和速率 |
 
-**`/new`** — 重置会话：退出当前 coding CLI → 重新启动
+#### C. 万能转发
 
-**`/stop`** — 中断当前操作（向 tmux 发送 `Escape Escape`）
+**`/cc <command>`** — 向 tmux 转发 `/<command>` + Enter
 
-**`/kill`** — 终止会话：杀掉 tmux 窗口中的进程；如果在 Thread 中，同时归档 Thread
-
-**`/compact`** — 向 tmux 转发 `/compact` + Enter
-
-**`/status`** — 显示当前绑定信息：窗口名、工作目录、CLI 类型、session ID、运行状态
-
-**`/cost`** — 向 tmux 转发 `/cost` + Enter
-
-**`/model <name>`** — 向 tmux 转发 `/model <name>` + Enter
-
-#### 工具命令
-
-**`/bash <command>`** — 在工作目录下直接执行 shell 命令（subprocess）
-
-**`/screenshot`** — 终端截屏：ANSI→PNG + 导航键盘按钮
-
-#### CLI 命令转发
-
-**`/cc <command>`** — 向 tmux 转发 `/<command>` + Enter，兜底覆盖所有 CLI 命令
+兜底覆盖所有 CLI 命令，不需要 GITS 逐一支持。例如：
+- `/cc doctor` → 转发 `/doctor`
+- `/cc hooks` → 转发 `/hooks`
+- `/cc resume abc123` → 转发 `/resume abc123`
 
 ---
 
