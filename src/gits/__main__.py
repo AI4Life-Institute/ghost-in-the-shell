@@ -100,8 +100,9 @@ def _cmd_start(args: argparse.Namespace) -> None:
     engine.set_adapter(adapter)
     adapter.set_engine(engine)
 
-    # Register message forwarding
+    # Register message forwarding and button click handling
     adapter.on_message(engine.handle_message)
+    adapter.on_button_click(engine.handle_button_click)
 
     async def _run() -> None:
         await engine.start()

@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..adapters.base import IncomingMessage, OutgoingMessage
+from ..adapters.base import Button, IncomingMessage, OutgoingMessage
 from ..config import Settings
 from .health import HealthMonitor
 from .launcher import CodingCLILauncher
@@ -464,6 +464,114 @@ class Engine:
 
         await self.tmux.send_text(binding.window_id, command)
         await self._reply(interaction, f"Forwarded: `{command}`")
+
+    # ------------------------------------------------------------------
+    # Button click handler (prompt bridge)
+    # ------------------------------------------------------------------
+
+    async def handle_button_click(
+        self, channel_id: str, user_id: str, callback_data: str
+    ) -> None:
+        """Handle a button click from the platform adapter.
+
+        Callback data formats:
+        - ``prompt_opt:{window_id}:{option_number}`` — send number key
+        - ``prompt_esc:{window_id}`` — send Escape
+        - ``prompt_abort:{window_id}`` — send Ctrl-C
+        """
+        parts = callback_data.split(":")
+        if len(parts) < 2:
+            logger.warning("Invalid callback_data: %s", callback_data)
+            return
+
+        action = parts[0]
+
+        if action == "prompt_opt" and len(parts) >= 3:
+            window_id = parts[1]
+            option_number = parts[2]
+            logger.info(
+                "Button click: option %s for window %s (user %s)",
+                option_number,
+                window_id,
+                user_id,
+            )
+            await self.tmux.send_keys(window_id, option_number)
+
+        elif action == "prompt_esc" and len(parts) >= 2:
+            window_id = parts[1]
+            logger.info(
+                "Button click: Escape for window %s (user %s)",
+                window_id,
+                user_id,
+            )
+            await self.tmux.send_keys(window_id, "Escape")
+
+        elif action == "prompt_abort" and len(parts) >= 2:
+            window_id = parts[1]
+            logger.info(
+                "Button click: Ctrl-C for window %s (user %s)",
+                window_id,
+                user_id,
+            )
+            await self.tmux.send_keys(window_id, "C-c")
+
+        else:
+            logger.warning("Unknown button action: %s", callback_data)
+
+    # ------------------------------------------------------------------
+    # Prompt message builder
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_prompt_message(
+        tool_context: str | None,
+        options: list[tuple[int, str]],
+        window_id: str,
+    ) -> OutgoingMessage:
+        """Build an OutgoingMessage with buttons for a Claude Code prompt.
+
+        Parameters
+        ----------
+        tool_context:
+            Descriptive text about what the tool is asking, e.g.
+            ``"**Bash command**\\n```\\ntail -30 /tmp/log\\n```\\nProceed?"``
+        options:
+            List of ``(number, label)`` tuples for each prompt option.
+        window_id:
+            The tmux window ID the prompt belongs to.
+
+        Returns
+        -------
+        OutgoingMessage with buttons for each option plus Cancel/Abort.
+        """
+        text = tool_context or "Claude Code is waiting for input."
+
+        # Build option buttons (one row)
+        option_buttons = [
+            Button(
+                label=label,
+                callback_data=f"prompt_opt:{window_id}:{number}",
+            )
+            for number, label in options
+        ]
+
+        # Control buttons
+        cancel_button = Button(
+            label="Cancel",
+            callback_data=f"prompt_esc:{window_id}",
+        )
+        abort_button = Button(
+            label="Abort",
+            callback_data=f"prompt_abort:{window_id}",
+        )
+
+        # Layout: option buttons in first row, cancel/abort in second row
+        button_rows: list[list[Button]] = []
+        if option_buttons:
+            button_rows.append(option_buttons)
+        button_rows.append([cancel_button, abort_button])
+
+        return OutgoingMessage(text=text, buttons=button_rows)
 
     # ------------------------------------------------------------------
     # Recovery callback
