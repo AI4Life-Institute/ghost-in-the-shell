@@ -437,6 +437,8 @@ class CodingCLIHook:
     - 读取 TMUX_PANE 环境变量获取当前 tmux window ID
     - 读取 Claude 传入的 session_id
     - 写入 ~/.gits/session_map.json 建立映射
+    - 通知 bot 进程（通过 IPC / 文件监控）→ bot 将 session ID 更新到 state.json
+      并发送到 Discord 频道展示给用户
     """
     ...
 ```
@@ -479,15 +481,22 @@ Discord                              tmux session "gits"
 **Channel 行为（`/bind`）：**
 1. 创建 tmux 窗口，以频道名命名
 2. cd 到工作目录，启动 coding CLI
-3. 设置 Discord 频道 topic：`project=<name> dir=<path>`（参考 claude-on-discord `topic.ts`）
-4. 后续该频道的所有消息转发到此 tmux 窗口
+3. Hook 捕获 CLI session ID → 记录到 `state.json`
+4. 设置 Discord 频道 topic：`project=<name> dir=<path>`（参考 claude-on-discord `topic.ts`）
+5. 回复确认消息（含 session ID）：
+   ```
+   ✅ 已绑定 #my-app → /data/projects/my-app
+   🖥 tmux: window "my-app" | 🤖 claude | 📋 session: abc12345
+   ```
+6. 后续该频道的所有消息转发到此 tmux 窗口
 
 **Thread 行为（`/fork`）：**
 1. 在 Discord 中创建 Thread
 2. 创建新的 tmux 窗口，以 thread 名命名
 3. cd 到工作目录：默认 = 父频道项目根目录；可选 `-d <subdir>` 指定子目录
 4. 启动独立的 coding CLI 会话
-5. Thread 内的消息转发到这个独立窗口
+5. Hook 捕获 session ID → 记录 → 回复确认消息（含 session ID）
+6. Thread 内的消息转发到这个独立窗口
 
 **Thread 生命周期**（不需要手动关闭）：
 
@@ -587,7 +596,7 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 **`/compact`** — 向 tmux 转发 `/compact` + Enter
 
-**`/status`** — 显示当前频道/Thread 绑定的窗口、工作目录、CLI 状态
+**`/status`** — 显示当前绑定信息：窗口名、工作目录、CLI 类型、session ID、运行状态
 
 **`/cost`** — 向 tmux 转发 `/cost` + Enter
 
