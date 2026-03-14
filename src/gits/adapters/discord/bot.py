@@ -53,9 +53,9 @@ class DiscordAdapter(PlatformAdapter):
             intents=intents,
         )
 
-        # Register event handlers
+        # Register event handlers — names MUST match discord.py event names
         self.bot.event(self.on_ready)
-        self.bot.event(self.on_message_event)
+        self.bot.event(self.on_message)
         self.bot.event(self.on_interaction)
 
         # We'll register slash commands in _setup_commands()
@@ -190,8 +190,12 @@ class DiscordAdapter(PlatformAdapter):
         except Exception:
             logger.exception("Failed to sync slash commands")
 
-    async def on_message_event(self, message: discord.Message) -> None:
-        """Handle incoming Discord messages (non-command text)."""
+    async def on_message(self, message: discord.Message) -> None:
+        """Handle incoming Discord messages (non-command text).
+
+        The method name MUST be ``on_message`` — discord.py registers event
+        handlers by function name.
+        """
         # Ignore bot's own messages
         if message.author == self.bot.user:
             return
@@ -221,6 +225,9 @@ class DiscordAdapter(PlatformAdapter):
                 await cb(incoming)
             except Exception:
                 logger.exception("Message callback error")
+
+        # Let commands.Bot process prefix commands (e.g. !bash)
+        await self.bot.process_commands(message)
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Handle button interactions."""

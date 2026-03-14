@@ -79,9 +79,19 @@ class Engine:
         """Forward plain text messages to the bound tmux window."""
         binding = self.session_mgr.get_binding(msg.channel_id)
         if binding is None:
-            return  # not bound, ignore
+            logger.debug(
+                "Ignoring message in unbound channel %s: %s",
+                msg.channel_id,
+                (msg.text or "")[:50],
+            )
+            return
 
         if msg.text:
+            logger.info(
+                "Forwarding message to tmux %s: %s",
+                binding.window_id,
+                msg.text[:80],
+            )
             try:
                 await self.tmux.send_text(binding.window_id, msg.text)
             except Exception:
@@ -261,7 +271,15 @@ class Engine:
             ansi_text = await self.tmux.capture_pane_ansi(binding.window_id)
             png_bytes = await self.screenshot.capture(ansi_text)
 
-            if self._adapter:
+            # Reply to the deferred interaction with the screenshot
+            if interaction and hasattr(interaction, "followup"):
+                import io
+
+                import discord
+
+                file = discord.File(io.BytesIO(png_bytes), filename="screenshot.png")
+                await interaction.followup.send(file=file)
+            elif self._adapter:
                 await self._adapter.send_message(
                     channel_id,
                     OutgoingMessage(image=png_bytes),

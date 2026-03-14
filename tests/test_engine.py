@@ -223,18 +223,13 @@ class TestHandleScreenshot:
             project_dir.mkdir()
             await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
 
-            # Set up adapter mock
-            adapter = MagicMock()
-            adapter.send_message = AsyncMock(return_value="msg-1")
-            engine.set_adapter(adapter)
-
             interaction = FakeInteraction()
             await engine.handle_screenshot("ch-1", interaction)
 
-            adapter.send_message.assert_called_once()
-            msg = adapter.send_message.call_args[0][1]
-            assert msg.image is not None
-            assert msg.image[:4] == b"\x89PNG"
+            # Screenshot now replies via interaction.followup.send(file=...)
+            interaction.followup.send.assert_called_once()
+            call_kwargs = interaction.followup.send.call_args[1]
+            assert "file" in call_kwargs
 
         asyncio.run(_test())
 

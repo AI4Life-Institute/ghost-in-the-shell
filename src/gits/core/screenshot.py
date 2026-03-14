@@ -14,7 +14,11 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+import logging
+
 from ..utils.ansi import DEFAULT_BG, StyledSegment, parse_ansi_line
+
+logger = logging.getLogger(__name__)
 
 # Font search paths
 FONT_DIR = Path(__file__).parent.parent / "fonts"
@@ -22,6 +26,10 @@ SYSTEM_FONT_DIRS = [
     Path("/usr/share/fonts"),
     Path("/usr/local/share/fonts"),
     Path.home() / ".local/share/fonts",
+    # macOS
+    Path("/System/Library/Fonts"),
+    Path("/Library/Fonts"),
+    Path.home() / "Library/Fonts",
 ]
 
 # Font file names to search for (ordered by preference)
@@ -31,15 +39,32 @@ FONT_CANDIDATES: dict[str, list[str]] = {
         "JetBrainsMonoNL-Regular.ttf",
         "DejaVuSansMono.ttf",
         "FiraCode-Regular.ttf",
+        # macOS built-in
+        "Menlo.ttc",
+        "SFMono-Regular.otf",
     ],
     "cjk": [
         "NotoSansMonoCJKsc-Regular.otf",
         "NotoSansCJKsc-Regular.otf",
         "NotoSansMonoCJKsc-Regular.ttf",
+        "NotoSansCJK-Regular.ttc",
+        # Linux common CJK fonts (apt install fonts-noto-cjk / fonts-wqy-zenhei)
+        "NotoSansCJKsc-Regular.ttf",
+        "wqy-zenhei.ttc",
+        "WenQuanYiMicroHei.ttf",
+        "DroidSansFallbackFull.ttf",
+        # macOS built-in CJK fonts
+        "PingFang.ttc",
+        "STHeiti Light.ttc",
+        "Hiragino Sans GB.ttc",
+        "华文黑体.ttf",
     ],
     "symbol": [
         "Symbola.ttf",
         "Symbola.otf",
+        # macOS built-in
+        "Apple Color Emoji.ttc",
+        "Apple Symbols.ttf",
     ],
 }
 
@@ -113,6 +138,9 @@ class ScreenshotEngine:
             if path:
                 with contextlib.suppress(Exception):
                     self.fonts[tier] = ImageFont.truetype(path, self.font_size)
+                    logger.debug("Font[%s]: %s", key, path)
+            else:
+                logger.debug("Font[%s]: not found", key)
 
         # Fallback: if no mono font found, use default
         if self.fonts[0] is None:
@@ -123,6 +151,13 @@ class ScreenshotEngine:
                 )
             except Exception:
                 self.fonts[0] = ImageFont.load_default()
+
+        if self.fonts[1] is None:
+            logger.warning(
+                "No CJK font found — Chinese/Japanese/Korean text will render as boxes. "
+                "Install a CJK font: apt install fonts-noto-cjk (Debian/Ubuntu) "
+                "or yum install google-noto-sans-cjk-fonts (RHEL/CentOS)"
+            )
 
     def _get_font(self, ch: str) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         """Get the appropriate font for a character."""
