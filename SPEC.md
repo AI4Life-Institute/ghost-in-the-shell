@@ -478,30 +478,11 @@ Discord                              tmux session "gits"
        (可选指定子目录)                    └─ cwd: /data/projects/my-app/frontend
 ```
 
-**Channel 行为（`/bind`）— 三步交互式流程：**
+**Channel 行为（`/bind`）— 两步交互式流程：**
 
 参考 ccbot `directory_browser.py` 的交互式菜单设计，`/bind` 是一个多步按钮交互流程：
 
-**Step 1: Window Picker — 检查已有 tmux 窗口**
-
-如果有未绑定的 tmux 窗口，先展示列表让用户直接绑定：
-```
-🖥 Bind to Existing Window
-
-These windows are running but not bound to any channel:
-• my-app — ~/projects/my-app
-• backend — ~/projects/backend
-
-┌───────────────────────────────────┐
-│ [🖥 my-app]  [🖥 backend]        │
-│ [➕ New Session]  [Cancel]         │
-└───────────────────────────────────┘
-```
-- 选择已有窗口 → 直接绑定，跳到 Step 3
-- 选择「➕ New Session」→ 进入 Step 2
-- 无未绑定窗口 → 自动跳到 Step 2
-
-**Step 2: Directory Browser — 选择工作目录**
+**Step 1: Directory Browser — 选择工作目录**
 
 如果 `/bind` 没有带路径参数，启动交互式目录浏览器：
 ```
@@ -522,9 +503,9 @@ Tap a folder to enter, or select current directory
 - 点击 📁 → 进入子目录
 - 点击 `..` → 上一级
 - `◀ ▶` → 翻页（每页 6 个目录，参考 ccbot `DIRS_PER_PAGE = 6`）
-- `✅ Select` → 确认当前目录，进入 Step 3
+- `✅ Select` → 确认当前目录，进入 Step 2
 
-**Step 3: Session Picker — 选择恢复或新建**
+**Step 2: Session Picker — 选择恢复或新建**
 
 选定目录后，扫描该目录下已有的 coding CLI session：
 ```
@@ -545,17 +526,18 @@ Existing sessions found in this directory:
 - 无历史 session → 自动全新启动
 
 **绑定完成后：**
-1. Hook 捕获 CLI session ID → 记录到 `state.json`
-2. 设置 Discord 频道 topic：`project=<name> dir=<path>`
-3. 回复确认消息：
+1. 创建 tmux 窗口（以频道名命名） → cd 到目录 → 启动 CLI
+2. Hook 捕获 CLI session ID → 记录到 `state.json`
+3. 设置 Discord 频道 topic：`project=<name> dir=<path>`
+4. 回复确认消息：
    ```
    ✅ 已绑定 #my-app → /data/projects/my-app
    🖥 tmux: window "my-app" | 🤖 claude | 📋 session: abc12345
    🔄 已恢复上次会话 (2h ago)
    ```
-4. 后续该频道的所有消息转发到此 tmux 窗口
+5. 后续该频道的所有消息转发到此 tmux 窗口
 
-**快捷方式**：`/bind /path/to/project` 直接指定路径时跳过 Step 2，直接进入 Step 1（窗口检查）和 Step 3（session 选择）。
+**快捷方式**：`/bind /path/to/project` 直接指定路径时跳过 Step 1，直接进入 Step 2（session 选择）。
 
 ---
 
