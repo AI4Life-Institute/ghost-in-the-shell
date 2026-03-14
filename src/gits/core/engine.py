@@ -16,8 +16,10 @@ from ..adapters.base import Button, IncomingMessage, OutgoingMessage
 from ..config import Settings
 from .health import HealthMonitor
 from .launcher import CodingCLILauncher
+from .monitor import PaneMonitor
 from .screenshot import ScreenshotEngine
 from .session import SessionManager
+from .terminal_parser import PromptInfo
 from .tmux import TmuxController
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,11 @@ class Engine:
             launcher=self.launcher,
             check_interval=settings.health_check_interval,
         )
+        self.monitor = PaneMonitor(
+            tmux=self.tmux,
+            session_mgr=self.session_mgr,
+            interval=settings.pane_poll_interval,
+        )
 
         # Platform adapter (set externally)
         self._adapter: Any = None
@@ -64,10 +71,19 @@ class Engine:
         # Register health recovery callback
         self.health.on_recovery(self._on_recovery)
 
+        # Register pane monitor callbacks
+        self.monitor.on_output(self._on_pane_output)
+        self.monitor.on_prompt(self._on_pane_prompt)
+
+        # Resume polling for existing bindings
+        for binding in self.session_mgr.list_bindings():
+            self.monitor.start_polling(binding.channel_id, binding.window_id)
+
         logger.info("Engine started")
 
     async def stop(self) -> None:
         """Stop the engine."""
+        self.monitor.stop_all()
         await self.health.stop()
         logger.info("Engine stopped")
 
@@ -149,6 +165,9 @@ class Engine:
                 cli_session_id=session_id,
             )
 
+            # Start pane polling for the new binding
+            self.monitor.start_polling(channel_id, win.window_id)
+
             resume_info = ""
             if session_id:
                 resume_info = f"\nResuming session `{session_id[:8]}...`"
@@ -186,6 +205,7 @@ class Engine:
 
     async def handle_unbind(self, channel_id: str, interaction: Any) -> None:
         """Handle /unbind — unbind channel."""
+        self.monitor.stop_polling(channel_id)
         binding = await self.session_mgr.unbind(channel_id)
         if binding:
             await self._reply(
@@ -336,7 +356,8 @@ class Engine:
             await self._reply(interaction, "Not bound.")
             return
 
-        # Kill tmux window
+        # Stop polling and kill tmux window
+        self.monitor.stop_polling(channel_id)
         killed = await self.tmux.kill_window(binding.window_id)
 
         # Remove binding
@@ -572,6 +593,43 @@ class Engine:
         button_rows.append([cancel_button, abort_button])
 
         return OutgoingMessage(text=text, buttons=button_rows)
+
+    # ------------------------------------------------------------------
+    # Pane monitor callbacks
+    # ------------------------------------------------------------------
+
+    async def _on_pane_output(self, channel_id: str, new_lines: str) -> None:
+        """Called by PaneMonitor when new terminal output is detected."""
+        if not self._adapter:
+            return
+
+        text = new_lines.strip()
+        if not text:
+            return
+
+        # Truncate to ~1800 chars to leave room for code block formatting
+        if len(text) > 1800:
+            text = text[:1800] + "\n... (truncated)"
+
+        await self._adapter.send_message(
+            channel_id,
+            OutgoingMessage(text=f"```\n{text}\n```"),
+        )
+
+    async def _on_pane_prompt(
+        self, channel_id: str, window_id: str, prompt_info: PromptInfo
+    ) -> None:
+        """Called by PaneMonitor when an interactive prompt is detected."""
+        if not self._adapter:
+            return
+
+        options = [(o.number, o.label) for o in prompt_info.options]
+        msg = self.build_prompt_message(
+            tool_context=prompt_info.tool_context or None,
+            options=options,
+            window_id=window_id,
+        )
+        await self._adapter.send_message(channel_id, msg)
 
     # ------------------------------------------------------------------
     # Recovery callback
