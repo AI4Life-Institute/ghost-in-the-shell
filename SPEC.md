@@ -478,26 +478,86 @@ Discord                              tmux session "gits"
        (可选指定子目录)                    └─ cwd: /data/projects/my-app/frontend
 ```
 
-**Channel 行为（`/bind`）：**
-1. 创建 tmux 窗口，以频道名命名
-2. cd 到工作目录
-3. **扫描已有 CLI session**（见下方 Session 发现机制），发现可用 session 列表
-4. 启动 coding CLI：有可恢复 session → resume；无 → 全新启动
-5. Hook 捕获 CLI session ID → 记录到 `state.json`
-6. 设置 Discord 频道 topic：`project=<name> dir=<path>`（参考 claude-on-discord `topic.ts`）
-7. 回复确认消息（含 session ID + 是否恢复）：
+**Channel 行为（`/bind`）— 三步交互式流程：**
+
+参考 ccbot `directory_browser.py` 的交互式菜单设计，`/bind` 是一个多步按钮交互流程：
+
+**Step 1: Window Picker — 检查已有 tmux 窗口**
+
+如果有未绑定的 tmux 窗口，先展示列表让用户直接绑定：
+```
+🖥 Bind to Existing Window
+
+These windows are running but not bound to any channel:
+• my-app — ~/projects/my-app
+• backend — ~/projects/backend
+
+┌───────────────────────────────────┐
+│ [🖥 my-app]  [🖥 backend]        │
+│ [➕ New Session]  [Cancel]         │
+└───────────────────────────────────┘
+```
+- 选择已有窗口 → 直接绑定，跳到 Step 3
+- 选择「➕ New Session」→ 进入 Step 2
+- 无未绑定窗口 → 自动跳到 Step 2
+
+**Step 2: Directory Browser — 选择工作目录**
+
+如果 `/bind` 没有带路径参数，启动交互式目录浏览器：
+```
+📁 Select Working Directory
+
+Current: ~/projects/my-app
+
+Tap a folder to enter, or select current directory
+
+┌───────────────────────────────────┐
+│ [📁 frontend]  [📁 backend]      │
+│ [📁 docs]      [📁 scripts]      │
+│ [📁 tests]     [📁 config]       │
+│         [◀] [1/3] [▶]            │
+│ [..] [✅ Select]  [Cancel]        │
+└───────────────────────────────────┘
+```
+- 点击 📁 → 进入子目录
+- 点击 `..` → 上一级
+- `◀ ▶` → 翻页（每页 6 个目录，参考 ccbot `DIRS_PER_PAGE = 6`）
+- `✅ Select` → 确认当前目录，进入 Step 3
+
+**Step 3: Session Picker — 选择恢复或新建**
+
+选定目录后，扫描该目录下已有的 coding CLI session：
+```
+▶ Resume Session?
+
+Existing sessions found in this directory:
+
+1. Fix authentication bug — 42 msgs (2h ago)
+2. Add unit tests — 18 msgs (1d ago)
+
+┌───────────────────────────────────┐
+│ [▶ Fix auth...]  [▶ Add unit...] │
+│ [➕ New Session]  [Cancel]         │
+└───────────────────────────────────┘
+```
+- 选择已有 session → `claude --resume <id>` 恢复
+- 选择「➕ New Session」→ 全新启动
+- 无历史 session → 自动全新启动
+
+**绑定完成后：**
+1. Hook 捕获 CLI session ID → 记录到 `state.json`
+2. 设置 Discord 频道 topic：`project=<name> dir=<path>`
+3. 回复确认消息：
    ```
    ✅ 已绑定 #my-app → /data/projects/my-app
    🖥 tmux: window "my-app" | 🤖 claude | 📋 session: abc12345
    🔄 已恢复上次会话 (2h ago)
    ```
-   或：
-   ```
-   ✅ 已绑定 #my-app → /data/projects/my-app
-   🖥 tmux: window "my-app" | 🤖 claude | 📋 session: def67890
-   🆕 全新会话
-   ```
-8. 后续该频道的所有消息转发到此 tmux 窗口
+4. 后续该频道的所有消息转发到此 tmux 窗口
+
+**快捷方式**：`/bind /path/to/project` 直接指定路径时跳过 Step 2，直接进入 Step 1（窗口检查）和 Step 3（session 选择）。
+
+---
 
 **Thread 行为（`/fork`）：**
 1. 在 Discord 中创建 Thread
@@ -507,20 +567,17 @@ Discord                              tmux session "gits"
 5. Hook 捕获 session ID → 记录 → 回复确认消息（含 session ID）
 6. Thread 内的消息转发到这个独立窗口
 
+---
+
 **Session 发现机制：**
 
-`/bind` 时自动扫描目标目录下已有的 coding CLI session，让用户选择恢复还是新建：
+各 CLI 的 session 扫描方式：
 
 | Coding CLI | Session 存储 | 发现方式 |
 |------------|-------------|----------|
-| **Claude Code** | `~/.claude/projects/<dir-hash>/` | 扫描目录下 `*.jsonl`，按 mtime 排序，读取 session UUID |
+| **Claude Code** | `~/.claude/projects/<dir-hash>/` | 扫描目录下 `*.jsonl`，按 mtime 排序，读取 session UUID + 首条消息摘要 |
 | **Codex CLI** | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | 扫描 JSONL 文件，过滤 cwd 匹配目标目录的 session |
 | **OpenCode** | SQLite 数据库 | 查询数据库中 cwd 匹配的最近 session |
-
-启动策略（按优先级）：
-1. `state.json` 中有此目录之前的 session ID → `--resume <id>`
-2. 扫描到该目录下有最近的 session → 提示用户选择恢复或新建
-3. 无历史 session → 全新启动
 
 **Thread 生命周期**（不需要手动关闭）：
 
@@ -614,11 +671,14 @@ claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
 #### 项目绑定（Channel 级）
 
-**`/bind <path>`**
+**`/bind [path]`**
 - 将当前频道绑定到项目工作目录
-- 行为：创建 tmux 窗口（以频道名命名） → cd 到目录 → 启动 coding CLI
+- 两种使用方式：
+  - `/bind /data/projects/my-app` — 直接指定路径
+  - `/bind` — 不带参数，启动交互式目录浏览器（见下方）
+- 行为：选定目录 → 检查已有窗口/session → 创建/绑定 tmux 窗口 → 启动 CLI
 - 设置频道 topic：`project=<name> dir=<path>`
-- 对应 claude-on-discord 的 `/project`
+- 对应 claude-on-discord 的 `/project` + ccbot 的目录浏览器
 
 **`/unbind`**
 - 解除频道绑定，保留 tmux 窗口
