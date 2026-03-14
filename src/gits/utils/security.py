@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # Sensitive environment variables to remove from tmux sessions.
 # Prevents coding CLIs running inside tmux from reading bot credentials.
 SENSITIVE_ENV_VARS: tuple[str, ...] = (
-    "DISCORD_BOT_TOKEN",
+    "GITS_DISCORD_TOKEN",
     "TELEGRAM_BOT_TOKEN",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -21,6 +21,9 @@ SENSITIVE_ENV_VARS: tuple[str, ...] = (
     "SLACK_APP_TOKEN",
     "AWS_SECRET_ACCESS_KEY",
     "GOOGLE_API_KEY",
+    # Claude Code sets this to detect nested sessions — must unset so
+    # the CLI can launch inside our tmux windows.
+    "CLAUDECODE",
 )
 
 

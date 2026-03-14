@@ -281,7 +281,7 @@ class TmuxController:
 
     # --- 安全（参考 ccbot）---
     def scrub_env(self, session: libtmux.Session) -> None:
-        """清除 DISCORD_BOT_TOKEN, OPENAI_API_KEY 等敏感环境变量"""
+        """清除 GITS_DISCORD_TOKEN, OPENAI_API_KEY 等敏感环境变量"""
         ...
 ```
 
@@ -826,7 +826,7 @@ Discord Server
 
 参考 ccbot 的安全实践：
 
-1. **环境变量清洗** — 从 tmux session 环境中移除 `DISCORD_BOT_TOKEN`, `OPENAI_API_KEY` 等敏感变量，防止被 coding CLI 读取（ccbot `tmux_manager.py` 第82-93行）
+1. **环境变量清洗** — 从 tmux session 环境中移除 `GITS_DISCORD_TOKEN`, `OPENAI_API_KEY` 等敏感变量，防止被 coding CLI 读取（ccbot `tmux_manager.py` 第82-93行）
 2. **用户白名单** — 配置 `ALLOWED_USERS` 限制可操作的 Discord User ID 列表
 3. **Guild 白名单** — 配置 `ALLOWED_GUILDS` 限制可操作的 Discord 服务器
 4. **工作目录沙盒** — 可配置 `ALLOWED_PATHS` 限制可绑定的工作目录范围
@@ -1043,7 +1043,7 @@ ghost-in-the-shell/
 
 ```bash
 # === 平台配置 ===
-DISCORD_BOT_TOKEN=your-discord-bot-token
+GITS_DISCORD_TOKEN=your-discord-bot-token
 
 # === 访问控制 ===
 ALLOWED_USERS=123456789,987654321      # Discord User IDs

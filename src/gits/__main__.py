@@ -60,6 +60,9 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
     settings = Settings()
 
+    # Ensure state directory exists
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+
     # Configure logging
     log_level = args.log_level or settings.log_level
     logging.basicConfig(
@@ -75,8 +78,8 @@ def _cmd_start(args: argparse.Namespace) -> None:
     logger.info("Starting Ghost in the Shell v%s", _get_version())
 
     # Validate token
-    if not settings.discord_bot_token:
-        logger.error("DISCORD_BOT_TOKEN not set. Check your .env file.")
+    if not settings.gits_discord_token:
+        logger.error("GITS_DISCORD_TOKEN not set. Check your .env file.")
         sys.exit(1)
 
     # Ensure state directory
@@ -88,7 +91,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
     engine = Engine(settings)
     adapter = DiscordAdapter(
-        token=settings.discord_bot_token,
+        token=settings.gits_discord_token,
         allowed_users=settings.allowed_users,
         allowed_guilds=settings.allowed_guilds,
     )

@@ -38,6 +38,7 @@ class SessionManager:
         self.state_dir = state_dir
         self.state_file = state_dir / "state.json"
         self._bindings: dict[str, SessionBinding] = {}  # channel_id -> binding
+        self._last_mtime: float = 0.0  # track file modifications
         self._load()
 
     def _load(self) -> None:
@@ -45,11 +46,23 @@ class SessionManager:
         if not self.state_file.exists():
             return
         try:
+            self._last_mtime = self.state_file.stat().st_mtime
             with open(self.state_file) as f:
                 data = json.load(f)
+            self._bindings.clear()
             for channel_id, binding_data in data.get("bindings", {}).items():
                 self._bindings[channel_id] = SessionBinding(**binding_data)
         except (json.JSONDecodeError, OSError, TypeError):
+            pass
+
+    def _maybe_reload(self) -> None:
+        """Reload state if the file was modified externally."""
+        try:
+            if self.state_file.exists():
+                mtime = self.state_file.stat().st_mtime
+                if mtime > self._last_mtime:
+                    self._load()
+        except OSError:
             pass
 
     async def _save(self) -> None:
@@ -94,10 +107,12 @@ class SessionManager:
 
     def get_binding(self, channel_id: str) -> SessionBinding | None:
         """Get binding for a channel/thread."""
+        self._maybe_reload()
         return self._bindings.get(channel_id)
 
     def get_binding_by_window(self, window_id: str) -> SessionBinding | None:
         """Find binding by tmux window ID."""
+        self._maybe_reload()
         for b in self._bindings.values():
             if b.window_id == window_id:
                 return b
@@ -105,6 +120,7 @@ class SessionManager:
 
     def list_bindings(self) -> list[SessionBinding]:
         """List all active bindings."""
+        self._maybe_reload()
         return list(self._bindings.values())
 
     def list_channel_threads(self, parent_channel_id: str) -> list[SessionBinding]:

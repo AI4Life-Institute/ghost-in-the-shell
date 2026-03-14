@@ -26,7 +26,7 @@ class FakeInteraction:
 def settings(tmp_path):
     return Settings(
         gits_dir=tmp_path / ".gits",
-        discord_bot_token="test-token",
+        gits_discord_token="test-token",
         tmux_session_name="test-gits",
         coding_cli_command="claude",
     )

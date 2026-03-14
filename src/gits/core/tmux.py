@@ -147,9 +147,12 @@ class TmuxController:
             start_directory=cwd,
             attach=False,
         )
-        if command:
-            pane = w.active_pane
-            if pane:
+        # Unset CLAUDECODE so coding CLIs don't think they're nested
+        pane = w.active_pane
+        if pane:
+            pane.send_keys("unset CLAUDECODE", enter=True)
+            time.sleep(0.3)
+            if command:
                 pane.send_keys(command, enter=True)
         return WindowInfo(
             window_id=w.id or "",

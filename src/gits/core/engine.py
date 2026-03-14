@@ -143,11 +143,27 @@ class Engine:
             if session_id:
                 resume_info = f"\nResuming session `{session_id[:8]}...`"
 
+            # List directory contents for user orientation
+            try:
+                entries = sorted(p.iterdir())
+                dirs = [e.name + "/" for e in entries if e.is_dir() and not e.name.startswith(".")]
+                files = [e.name for e in entries if e.is_file() and not e.name.startswith(".")]
+                listing_items = dirs + files
+                if listing_items:
+                    listing = "\n".join(f"  {item}" for item in listing_items[:30])
+                    if len(listing_items) > 30:
+                        listing += f"\n  ... and {len(listing_items) - 30} more"
+                    dir_info = f"\n```\n{listing}\n```"
+                else:
+                    dir_info = "\n*(empty directory)*"
+            except Exception:
+                dir_info = ""
+
             await self._reply(
                 interaction,
                 f"Bound **#{window_name}** → `{p}`\n"
                 f"tmux window: `{win.window_id}` | CLI: `{cli}`"
-                f"{resume_info}",
+                f"{resume_info}{dir_info}",
             )
         else:
             # No path — for now, tell user to provide one

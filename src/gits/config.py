@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     # ── Platform ──────────────────────────────────────────────────────
-    discord_bot_token: str = ""
+    gits_discord_token: str = ""
 
     # ── Access control ────────────────────────────────────────────────
     allowed_users: list[int] = []
