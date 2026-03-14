@@ -524,17 +524,42 @@ Discord                              tmux session "gits"
 
 **Thread 生命周期**（不需要手动关闭）：
 
-Thread 的结束是自然发生的，不应该是用户刻意去做的操作：
+Thread 的结束是自然发生的，不应该是用户刻意去做的操作。
 
-| 触发事件 | 行为 |
-|----------|------|
-| 用户在 Thread 中执行 `/kill` | 杀掉 tmux 窗口进程 → bot 自动归档 Thread |
-| tmux 窗口中的 coding CLI 正常退出 | OutputMonitor 检测到退出 → bot 发消息通知 → 自动归档 Thread |
-| tmux 窗口被外部手动关闭 | OutputMonitor 检测到窗口消失 → bot 发消息通知 → 自动归档 Thread |
-| tmux session 整体崩溃/服务器重启 | HealthMonitor 检测到 → 通知所有关联 Channel/Thread → 尝试自动恢复（见可靠性设计） |
-| Discord Thread 自然沉底（无人说话） | Discord 自动归档（默认 24h），tmux 窗口保留不动 |
+**归档触发方式：**
 
-**归档 ≠ 删除**：Discord Thread 归档后仍可重新打开，对应的 tmux 窗口如果还在，自动恢复绑定。
+| 触发事件 | 归档方式 | 具体实现 |
+|----------|----------|----------|
+| 用户在 Thread 中执行 `/kill` | **Bot 主动归档** | 杀掉 tmux 窗口进程 → `thread.edit({ archived: true })`（参考 claude-on-discord `kill-command.ts`） |
+| tmux 窗口中的 coding CLI 正常退出 | **Bot 主动归档** | OutputMonitor 检测到退出 → 发消息通知 → `thread.edit({ archived: true })` |
+| tmux 窗口被外部手动关闭 | **Bot 主动归档** | OutputMonitor 检测到窗口消失 → 发消息通知 → `thread.edit({ archived: true })` |
+| tmux session 整体崩溃/服务器重启 | **不归档，尝试恢复** | HealthMonitor 检测到 → 通知 → 尝试自动恢复（见可靠性设计） |
+| Thread 无人说话超时 | **Discord 自动归档** | Discord 内置机制，按 `autoArchiveDuration` 设定自动触发 |
+
+**Discord Thread 自动归档机制**（Discord 平台内置）：
+
+Thread 创建时设置 `autoArchiveDuration`，无人发言超过此时间后 Discord 自动归档：
+- 60 分钟（1 小时）
+- 1440 分钟（1 天）— **GITS 默认值**
+- 4320 分钟（3 天）— 需要服务器 Boost
+- 10080 分钟（7 天）— 需要服务器 Boost
+
+"活动"的定义：发送消息、取消归档、或修改归档时间。
+
+```python
+# /fork 创建 Thread 时设置自动归档时间
+thread = await channel.create_thread(
+    name=title,
+    auto_archive_duration=1440,  # 默认 1 天无活动后归档
+)
+```
+
+**归档 ≠ 删除**：
+- Discord Thread 归档后仍可随时重新打开（unarchive）
+- 重新打开时，bot 监听 `threadUpdate` 事件检测 `archived: true → false`
+- 如果对应的 tmux 窗口还在 → 自动恢复绑定
+- 如果 tmux 窗口已不在 → 提示用户可 `/fork` 重建
+- 参考 claude-on-discord：`client.on("threadUpdate")` 监听归档/取消归档事件
 
 ---
 
