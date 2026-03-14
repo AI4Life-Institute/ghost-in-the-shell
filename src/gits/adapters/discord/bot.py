@@ -53,9 +53,16 @@ class DiscordAdapter(PlatformAdapter):
             intents=intents,
         )
 
-        # Register event handlers — names MUST match discord.py event names
+        # Register event handlers.
+        # _handle_message is our handler but discord.py requires the name
+        # "on_message" — we use a thin wrapper to avoid colliding with the
+        # PlatformAdapter.on_message() callback-registration method.
         self.bot.event(self.on_ready)
-        self.bot.event(self.on_message)
+
+        @self.bot.event
+        async def on_message(message: discord.Message) -> None:
+            await self._handle_message(message)
+
         self.bot.event(self.on_interaction)
 
         # We'll register slash commands in _setup_commands()
@@ -190,11 +197,12 @@ class DiscordAdapter(PlatformAdapter):
         except Exception:
             logger.exception("Failed to sync slash commands")
 
-    async def on_message(self, message: discord.Message) -> None:
+    async def _handle_message(self, message: discord.Message) -> None:
         """Handle incoming Discord messages (non-command text).
 
-        The method name MUST be ``on_message`` — discord.py registers event
-        handlers by function name.
+        Named ``_handle_message`` (not ``on_message``) to avoid shadowing
+        ``PlatformAdapter.on_message()`` which registers callbacks.
+        Registered with discord.py via a wrapper in ``__init__``.
         """
         # Ignore bot's own messages
         if message.author == self.bot.user:
@@ -208,6 +216,13 @@ class DiscordAdapter(PlatformAdapter):
         guild_id = message.guild.id if message.guild else None
         if not self._check_access(message.author.id, guild_id):
             return
+
+        logger.debug(
+            "on_message from %s in %s: %s",
+            message.author,
+            message.channel.id,
+            (message.content or "")[:80],
+        )
 
         # Convert to IncomingMessage
         incoming = IncomingMessage(
