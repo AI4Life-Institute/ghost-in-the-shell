@@ -1,18 +1,18 @@
 ## ADDED Requirements
 
-### Requirement: Screenshot Navigation Keyboard
-The system SHALL display a button grid below screenshots for terminal navigation.
+### Requirement: Prompt Option Buttons
+The system SHALL display detected Claude Code prompt options as Discord buttons.
 
-#### Scenario: Screenshot with buttons
-- **WHEN** a screenshot is sent to Discord (manual or auto-triggered)
-- **THEN** it SHALL include a button grid with: Esc, Up, Enter, Left, Down, Right, Ctrl-C, Space, Tab, and Refresh
+#### Scenario: Multi-choice prompt detected
+- **WHEN** a multi-choice prompt is detected (e.g., "1. Yes  2. Yes, allow...  3. No")
+- **THEN** the system SHALL send a Discord message with the tool context description and one button per option
 
-#### Scenario: Refresh button
-- **WHEN** the user clicks the Refresh button
-- **THEN** the system SHALL re-capture the screenshot without sending any keys to tmux
+#### Scenario: Button click selects option
+- **WHEN** a user clicks an option button
+- **THEN** the system SHALL send the corresponding number key to the tmux pane
 
 ### Requirement: Interrupt and Abort Buttons
-The system SHALL provide quick-access interrupt controls on output messages.
+The system SHALL provide quick-access interrupt controls.
 
 #### Scenario: Interrupt button
 - **WHEN** the user clicks the Interrupt button
@@ -21,14 +21,3 @@ The system SHALL provide quick-access interrupt controls on output messages.
 #### Scenario: Abort button
 - **WHEN** the user clicks the Abort button
 - **THEN** the system SHALL send Ctrl-C to the tmux pane
-
-### Requirement: Claude Code Hook Integration
-The system SHALL automatically capture coding CLI session IDs via the hook mechanism and update bindings.
-
-#### Scenario: Hook captures session ID
-- **WHEN** Claude Code starts a new session in a tmux window managed by GITS
-- **THEN** the `gits hook` command SHALL record the TMUX_PANE → session_id mapping
-
-#### Scenario: Bot notified of new session
-- **WHEN** a new session mapping is written to `session_map.json`
-- **THEN** the running bot SHALL update the corresponding binding and notify the Discord channel with the session ID

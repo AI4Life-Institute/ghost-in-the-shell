@@ -1,53 +1,38 @@
-## 1. Output Monitor — Pane Polling
-- [ ] 1.1 Implement `PanePoller` in `src/gits/core/monitor.py` — periodic `tmux capture-pane` diffing, detect new output lines
-- [ ] 1.2 Detect status line changes (spinner animation, working state text)
-- [ ] 1.3 Callback system to notify engine of pane changes
-- [ ] 1.4 Integrate into engine lifecycle (start/stop with bind/unbind)
-- [ ] 1.5 Tests for pane polling and diff detection
+## 1. Terminal Prompt Detection
+- [ ] 1.1 `src/gits/core/terminal_parser.py` — 正则解析 Claude Code 交互提示
+- [ ] 1.2 检测多选提示：`❯ 1. Yes  2. Yes, allow...  3. No` → 提取选项列表
+- [ ] 1.3 检测工具调用上下文：Bash command / Edit file / Read file 等描述块
+- [ ] 1.4 检测状态行：idle (❯ prompt) / busy (spinner/Thinking) / waiting (选项提示)
+- [ ] 1.5 单元测试：每种提示类型的检测
 
-## 2. Output Monitor — JSONL Polling
-- [ ] 2.1 Implement `JsonlPoller` in `src/gits/core/monitor.py` — watch `~/.claude/projects/<hash>/*.jsonl` with byte-offset tracking
-- [ ] 2.2 Parse JSONL events: assistant.text, tool_use, tool_result
-- [ ] 2.3 mtime cache to skip unchanged files
-- [ ] 2.4 Callback to engine with structured output events
-- [ ] 2.5 Tests for JSONL parsing and incremental reads
+## 2. Discord Prompt Buttons
+- [ ] 2.1 `PromptBridge` — 将检测到的选项转为 Discord Button 行
+- [ ] 2.2 显示工具上下文（命令/文件名）+ 选项按钮
+- [ ] 2.3 按钮点击 → 发送数字键选择对应选项到 tmux
+- [ ] 2.4 Interrupt 按钮（Escape）和 Abort 按钮（Ctrl-C）
+- [ ] 2.5 单元测试
 
-## 3. Terminal UI Detection
-- [ ] 3.1 Implement `TerminalParser` in `src/gits/core/terminal_parser.py` — regex matching for Claude Code interactive prompts
-- [ ] 3.2 Detect: PermissionPrompt, AskUserQuestion, BashApproval, ExitPlanMode, RestoreCheckpoint
-- [ ] 3.3 Detect idle/busy/waiting states from status line
-- [ ] 3.4 Tests for each prompt type detection
+## 3. Pane Output Polling
+- [ ] 3.1 `PanePoller` in `src/gits/core/monitor.py` — 定时 capture-pane + diff
+- [ ] 3.2 过滤掉状态行/spinner 噪音，只推送有意义的新输出
+- [ ] 3.3 检测到交互提示时触发 Prompt Bridge（步骤 2）
+- [ ] 3.4 引擎生命周期：bind 时启动，unbind/kill 时停止
+- [ ] 3.5 单元测试
 
-## 4. Terminal UI Bridge
-- [ ] 4.1 Implement `UIBridge` in `src/gits/core/ui_bridge.py` — convert detected prompts to button layouts
-- [ ] 4.2 On prompt detection: auto-screenshot + push screenshot with navigation keyboard to Discord
-- [ ] 4.3 Handle button clicks → send corresponding keys to tmux → re-screenshot after 500ms
-- [ ] 4.4 Tests for button mapping and click handling
+## 4. JSONL Output Polling
+- [ ] 4.1 `JsonlPoller` in `src/gits/core/monitor.py` — 字节偏移增量读取
+- [ ] 4.2 解析 assistant.text → 推送文本；tool_use → 推送工具调用摘要
+- [ ] 4.3 mtime 缓存跳过未变文件
+- [ ] 4.4 单元测试
 
-## 5. Message Formatting
-- [ ] 5.1 Implement `MessageChunker` in `src/gits/adapters/discord/formatter.py` — split at 2000 chars
-- [ ] 5.2 Code fence awareness: auto-close/reopen fenced code blocks across chunks
-- [ ] 5.3 Tool use formatting: "🔧 Using `<tool>`..." prefix
-- [ ] 5.4 Tests for chunking edge cases (mid-codeblock, mid-line, empty)
+## 5. Message Formatting + Streaming
+- [ ] 5.1 `MessageChunker` in `src/gits/adapters/discord/formatter.py` — 2000 字符分块
+- [ ] 5.2 代码块感知：跨块自动闭合/重开 ``` fence
+- [ ] 5.3 Debounced message edit — 300ms 内批量更新，编辑已有消息而非发新消息
+- [ ] 5.4 Discord 429 rate limit → 指数退避
+- [ ] 5.5 单元测试
 
-## 6. Discord Buttons & Navigation
-- [ ] 6.1 Implement screenshot navigation keyboard in `src/gits/adapters/discord/buttons.py` — Esc, arrows, Enter, Ctrl-C, Space, Tab, Refresh
-- [ ] 6.2 Interrupt/Abort buttons on output messages
-- [ ] 6.3 Wire button interactions in DiscordAdapter → engine → tmux
-- [ ] 6.4 Refresh button: re-screenshot without sending keys
-
-## 7. Streaming Message Updates
-- [ ] 7.1 Implement debounced message editing in DiscordAdapter — batch output updates, edit existing message instead of sending new ones
-- [ ] 7.2 Rate limit handling (Discord 429) with exponential backoff
-- [ ] 7.3 Fallback to new message if edit fails or content exceeds limit
-
-## 8. Claude Code Hook Enhancement
-- [ ] 8.1 Enhance `gits hook` to read session info from stdin JSON (Claude Code passes context)
-- [ ] 8.2 Map TMUX_PANE → session_id in `~/.gits/session_map.json`
-- [ ] 8.3 Notify running bot process via file watch or IPC
-- [ ] 8.4 Engine updates binding with discovered session ID and notifies Discord channel
-
-## 9. Integration
-- [ ] 9.1 Wire OutputMonitor into Engine — start monitors on bind, stop on unbind/kill
-- [ ] 9.2 Route monitor events through formatter → Discord adapter
-- [ ] 9.3 End-to-end manual testing with real tmux + Discord
+## 6. Integration + E2E
+- [ ] 6.1 Engine 中串联：Monitor → Parser → PromptBridge/Formatter → Discord
+- [ ] 6.2 按钮回调链路：Discord button click → Engine → tmux send_keys
+- [ ] 6.3 本机 E2E 测试：bind → 发消息 → Claude 回复出现在 Discord → 权限提示变按钮 → 点击按钮
