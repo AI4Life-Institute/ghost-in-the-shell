@@ -286,11 +286,11 @@ def test_compute_new_lines_simple():
 
 
 def test_compute_new_lines_no_overlap():
-    """When content completely changes, return all current content."""
+    """When content completely changes (big scroll), return empty to avoid noise."""
     prev = "old stuff"
     curr = "totally new"
     result = PaneMonitor._compute_new_lines(prev, curr)
-    assert "totally new" in result
+    assert result == ""
 
 
 def test_compute_new_lines_strips_whitespace():

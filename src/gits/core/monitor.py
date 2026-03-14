@@ -187,48 +187,47 @@ class PaneMonitor:
 
     @staticmethod
     def _compute_new_lines(prev: str, current: str) -> str:
-        """Compute new lines that appear in current but not in prev.
+        """Compute new lines added at the end of current vs prev.
 
-        Uses a simple suffix-matching approach: find the longest suffix
-        of prev that appears in current, then return everything after it.
+        Uses a simple approach: find the last line of prev in current,
+        then return everything after it. Only returns genuinely new content.
+        Returns empty string if no clear new content is found.
         """
-        prev_lines = prev.split("\n")
+        prev_lines = [l for l in prev.split("\n") if l.strip()]
         current_lines = current.split("\n")
 
-        # Find how many lines at the end of prev match lines in current
-        # by looking for the last N lines of prev at the start of current
-        # Actually, simpler: find where prev content ends in current
-        # by matching trailing lines of prev to lines in current.
+        if not prev_lines:
+            return ""  # No baseline — skip
 
-        # Strategy: find the longest common suffix between prev_lines
-        # and a prefix of current_lines, then return the rest.
-        # But tmux scrolls, so we match trailing prev lines to current.
-
-        # Find the best match: look for prev's last lines in current
-        match_start = -1
-        # Try matching decreasing amounts of prev's tail
-        for start in range(len(prev_lines)):
-            tail = prev_lines[start:]
-            tail_len = len(tail)
-            if tail_len > len(current_lines):
-                continue
-            # Check if tail matches the beginning of current
-            if current_lines[:tail_len] == tail:
-                match_start = tail_len
+        # Find the last non-empty line of prev in current (search from end)
+        anchor = prev_lines[-1]
+        anchor_idx = -1
+        for i in range(len(current_lines) - 1, -1, -1):
+            if current_lines[i] == anchor:
+                anchor_idx = i
                 break
 
-        if match_start >= 0:
-            new = current_lines[match_start:]
-        else:
-            # No overlap found — treat everything as new only if content
-            # has genuinely changed (not just a minor chrome update)
-            # To avoid noise, only return content if there's substantial change
-            new = current_lines
+        if anchor_idx < 0:
+            # Anchor not found — content scrolled significantly.
+            # Try matching the last few lines as a group.
+            for group_size in range(min(3, len(prev_lines)), 0, -1):
+                tail = prev_lines[-group_size:]
+                for i in range(len(current_lines) - group_size, -1, -1):
+                    if current_lines[i : i + group_size] == tail:
+                        anchor_idx = i + group_size - 1
+                        break
+                if anchor_idx >= 0:
+                    break
 
-        # Strip trailing empty lines
+        if anchor_idx < 0:
+            # No overlap found — probably a big scroll. Don't dump everything.
+            return ""
+
+        new = current_lines[anchor_idx + 1 :]
+
+        # Strip trailing/leading empty lines
         while new and not new[-1].strip():
             new.pop()
-        # Strip leading empty lines
         while new and not new[0].strip():
             new.pop(0)
 
