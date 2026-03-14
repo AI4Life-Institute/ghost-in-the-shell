@@ -291,8 +291,9 @@ _RE_OPTION = re.compile(r"^\s*[\u276f\s]*(\d+)\.\s+(.+)$")
 def extract_prompt_options(pane_text: str) -> PromptInfo | None:
     """Parse numbered options and tool context from a permission prompt.
 
-    Scans the pane text for lines like:
-        > 1. Yes
+    First detects the interactive UI region using ``extract_interactive_content``,
+    then scans only within that region for numbered options like:
+        ❯ 1. Yes
           2. Yes, allow reading from tmp/ from this project
           3. No
 
@@ -307,11 +308,21 @@ def extract_prompt_options(pane_text: str) -> PromptInfo | None:
     if not pane_text:
         return None
 
-    lines = pane_text.strip().split("\n")
+    # First, detect the interactive UI region so we only parse options
+    # within the prompt — not from regular output that happens to have
+    # numbered lines (e.g. "1. 先用 /bind /tmp 绑定一个目录").
+    ui_content = extract_interactive_content(pane_text)
 
-    # -- Extract numbered options --
+    # Determine which lines to scan for options
+    if ui_content:
+        option_lines = ui_content.content.strip().split("\n")
+    else:
+        # Fallback: scan full pane (but this is less reliable)
+        option_lines = pane_text.strip().split("\n")
+
+    # -- Extract numbered options from the prompt region only --
     options: list[PromptOption] = []
-    for line in lines:
+    for line in option_lines:
         m = _RE_OPTION.match(line)
         if m:
             options.append(PromptOption(number=int(m.group(1)), label=m.group(2).strip()))
@@ -320,7 +331,8 @@ def extract_prompt_options(pane_text: str) -> PromptInfo | None:
         return None
 
     # -- Extract tool context (lines above "Do you want to proceed?") --
-    tool_context = _extract_tool_context(lines)
+    all_lines = pane_text.strip().split("\n")
+    tool_context = _extract_tool_context(all_lines)
 
     return PromptInfo(options=options, tool_context=tool_context)
 

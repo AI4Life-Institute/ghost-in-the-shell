@@ -567,10 +567,11 @@ class Engine:
         """
         text = tool_context or "Claude Code is waiting for input."
 
-        # Build option buttons (one row)
+        # Build option buttons — Discord allows max 5 buttons per row
         option_buttons = [
             Button(
-                label=label,
+                # Truncate long labels (Discord max 80 chars)
+                label=label[:76] + "..." if len(label) > 80 else label,
                 callback_data=f"prompt_opt:{window_id}:{number}",
             )
             for number, label in options
@@ -586,10 +587,11 @@ class Engine:
             callback_data=f"prompt_abort:{window_id}",
         )
 
-        # Layout: option buttons in first row, cancel/abort in second row
+        # Layout: split option buttons into rows of max 3 (leave room),
+        # then add cancel/abort row. Discord max is 5 per row, 5 rows total.
         button_rows: list[list[Button]] = []
-        if option_buttons:
-            button_rows.append(option_buttons)
+        for i in range(0, len(option_buttons), 3):
+            button_rows.append(option_buttons[i : i + 3])
         button_rows.append([cancel_button, abort_button])
 
         return OutgoingMessage(text=text, buttons=button_rows)
