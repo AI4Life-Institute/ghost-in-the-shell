@@ -444,80 +444,117 @@ class CodingCLIHook:
 
 ## Discord 交互设计
 
-以下交互基于 ccbot 和 claude-on-discord **功能交集**——即两个项目都实现了的核心功能，外加 tmux 绑定管理。
+以 **claude-on-discord 的命令集为蓝本**，适配 tmux 架构，并新增终端截屏功能。
 
 ### 设计逻辑
 
-ccbot (Telegram) 和 claude-on-discord (Discord) 都实现了以下核心能力：
+claude-on-discord 有 20 个 slash commands，我们按以下原则筛选：
 
-| 核心能力 | ccbot 实现 | claude-on-discord 实现 | GITS 方案 |
-|----------|-----------|----------------------|-----------|
-| 发消息给 AI | 普通文本 → tmux | 普通文本 → SDK | 普通文本 → tmux |
-| 执行 bash | `!command` 前缀 | `/bash` + `!command` | `!command` 前缀 |
-| 截屏 | `/screenshot` → ANSI→PNG | `/screenshot` → 网页截屏 | `/screenshot` → ANSI→PNG |
-| 重置会话 | `/clear` | `/new` | `/new` |
-| 中断执行 | `/esc` | `/stop` + Abort 按钮 | `Esc` 按钮 + `/stop` |
-| 上下文压缩 | `/compact` | `/compact` | `/compact` |
-| 查看成本 | `/usage` | `/cost` | `/cost` |
-| 切换模型 | `/model` | `/model` | `/model` |
-| 交互式 UI | 终端解析→按钮 | SDK 回调→按钮 | 终端解析→按钮 |
-| 输出推送 | JSONL + pane 轮询 | SDK 流式回调 | JSONL + pane 轮询 |
+- ✅ **保留** — 通过 tmux 转发即可实现的命令（大部分会话管理类）
+- ✅ **新增** — tmux 绑定管理（`/bind`, `/unbind`）和终端截屏（`/screenshot`）
+- ❌ **不做** — 依赖 Claude Agent SDK 的功能（fork/merge 线程分支）、git 高级工作流（worktree/branches/pr/diff）、SDK 权限管理（mode）
 
-在此交集之上，我们新增 **tmux 绑定管理**（`/bind`, `/unbind`, `/windows`），因为 ccbot 用 Telegram topic 自动映射而我们需要显式绑定。
+| claude-on-discord 命令 | GITS 处理 | 说明 |
+|------------------------|-----------|------|
+| `/project <path>` | → **`/bind <path>`** | 我们需要 tmux 绑定，功能合并 |
+| `/new` | ✅ **保留** | 重置会话 |
+| `/compact` | ✅ **保留** | 压缩上下文 |
+| `/bash <cmd>` | ✅ **保留** | 执行 shell 命令 |
+| `/screenshot` | ✅ **改造** | 改为终端 ANSI→PNG 截屏（原项目是网页截屏） |
+| `/model <name>` | ✅ **保留** | 切换模型 |
+| `/status` | ✅ **保留** | 查看会话信息 |
+| `/cost` | ✅ **保留** | 查看花费 |
+| `/stop` | ✅ **保留** | 中断执行 |
+| `/kill` | ✅ **保留** | 终止会话 |
+| `/systemprompt` | → **`/cc memory`** | 通过 CLI 转发实现 |
+| `/persona` | ❌ 不做 | SDK 专属 |
+| `/mentions` | ❌ 不做 | 多用户频道策略，MVP 不需要 |
+| `/mode` | ❌ 不做 | SDK 权限模式 |
+| `/fork` | ❌ 不做 | SDK 线程分支 |
+| `/merge` | ❌ 不做 | SDK 线程合并 |
+| `/branches` | ❌ 不做 | git 工作流 |
+| `/diff` | ❌ 不做 | git 工作流 |
+| `/pr` | ❌ 不做 | git 工作流 |
+| `/worktree` | ❌ 不做 | git 工作流 |
+| (无) | ✅ **新增 `/bind`** | tmux 绑定管理 |
+| (无) | ✅ **新增 `/unbind`** | tmux 绑定管理 |
 
 ---
 
-### 交互方式总览
+### 命令与交互总览
 
 | # | 方式 | 说明 |
 |---|------|------|
-| 1 | **Slash Commands** (7个) | `/bind`, `/unbind`, `/windows`, `/screenshot`, `/new`, `/stop`, `/compact` |
-| 2 | **CLI 转发命令** (1个) | `/cc <cmd>` — 转发任意 CLI 斜杠命令 (/cost, /model, /memory 等) |
-| 3 | **普通文本** | 直接发文字 → 转发到 tmux pane |
-| 4 | **!bash 命令** | `!git status` → 执行 bash 并返回输出 |
-| 5 | **按钮交互** | 截屏导航键盘 + 交互式 UI 导航 |
-| 6 | **输出推送** | 后台 JSONL + pane 轮询 → 自动推送到频道 |
+| 1 | **Slash Commands** (12个) | 会话管理 + tmux 绑定 + 截屏 |
+| 2 | **普通文本** | 直接发文字 → 转发到 tmux pane |
+| 3 | **`!bash` 命令** | `!git status` → 直接执行 bash 返回输出 |
+| 4 | **按钮交互** | 截屏导航键盘 + 交互式 UI 按钮 |
+| 5 | **输出推送** | 后台 JSONL + pane 轮询 → 自动推送到频道 |
 
 ---
 
-### 1. Slash Commands
+### 1. Slash Commands (12 个)
+
+#### tmux 绑定管理（新增）
 
 **`/bind <path>`**
 - 将当前频道绑定到工作目录：创建 tmux 窗口 → cd 到目录 → 启动 coding CLI
-- 频道已绑定时提示先 `/unbind`
+- 对应 claude-on-discord 的 `/project`，但额外管理 tmux 窗口
 
 **`/unbind`**
-- 解除绑定，保留 tmux 窗口（窗口中的进程不受影响）
+- 解除频道绑定，保留 tmux 窗口
 
-**`/windows`**
-- 列出 tmux session 中所有窗口及其绑定状态
-- 示例输出：
-  ```
-  🟢 0: main → #claude-main (/data/projects/myapp)
-  ⚪ 1: debug (unbound)
-  ```
-
-**`/screenshot`**
-- 截取绑定窗口的终端画面，渲染 ANSI→PNG 发送到频道
-- 附带**导航键盘按钮**（见下文）
+#### 会话管理（对应 claude-on-discord 同名命令）
 
 **`/new`**
 - 重置会话：退出当前 coding CLI → 重新启动
+- 对应 claude-on-discord 的 `/new`
 
 **`/stop`**
-- 向绑定窗口发送 `Escape` + `Escape`（中断当前操作）
+- 中断当前操作（向 tmux 发送 `Escape Escape`）
+- 对应 claude-on-discord 的 `/stop`
+
+**`/kill`**
+- 终止会话：杀掉 tmux 窗口中的进程
+- 对应 claude-on-discord 的 `/kill`
 
 **`/compact`**
-- 向绑定窗口发送 `/compact` + Enter（压缩上下文）
+- 向 tmux 转发 `/compact` + Enter
+- 对应 claude-on-discord 的 `/compact`
 
-### 2. CLI 转发命令
+**`/status`**
+- 显示当前频道绑定的窗口、工作目录、CLI 状态等
+- 对应 claude-on-discord 的 `/status`
+
+**`/cost`**
+- 向 tmux 转发 `/cost` + Enter，输出通过 OutputMonitor 推送回频道
+- 对应 claude-on-discord 的 `/cost`
+
+**`/model <name>`**
+- 向 tmux 转发 `/model <name>` + Enter
+- 对应 claude-on-discord 的 `/model`
+
+#### 工具命令
+
+**`/bash <command>`**
+- 在绑定窗口的工作目录下直接执行 shell 命令（subprocess，不经过 tmux）
+- 对应 claude-on-discord 的 `/bash`
+
+**`/screenshot`**
+- **终端截屏**：捕获 tmux pane 的 ANSI 内容 → 渲染为 PNG → 发送到频道
+- 附带**导航键盘按钮**
+- 对应 claude-on-discord 的 `/screenshot`，但改为终端截屏（原项目是网页截屏）
+
+#### CLI 命令转发
 
 **`/cc <command>`**
-- 向绑定窗口发送 `/<command>` + Enter
-- 用于转发任何 coding CLI 原生命令：`/cc cost`, `/cc model sonnet`, `/cc memory`, `/cc help` 等
-- 这样不需要为每个 CLI 命令都做一个 slash command
+- 向 tmux 转发 `/<command>` + Enter
+- 用于转发任何 coding CLI 原生命令：`/cc memory`, `/cc help`, `/cc doctor` 等
+- 兜底方案，覆盖所有我们没有单独实现的 CLI 命令
 
-### 3. 普通文本
+---
+
+### 2. 普通文本
 
 用户在绑定频道发送文本 → `TmuxController.send_text()` 转发到 tmux pane。
 
@@ -525,13 +562,14 @@ ccbot (Telegram) 和 claude-on-discord (Discord) 都实现了以下核心能力�
 用户: "帮我修复这个 bug"
   → pane.send_keys("帮我修复这个 bug", literal=True)
   → pane.send_keys("Enter")
-  → 回复: "⚡ Sent"
   → OutputMonitor 轮询输出变化 → 推送回频道
 ```
 
-### 4. !bash 命令
+与 claude-on-discord 的普通文本消息处理一致，区别在于我们走 tmux 而非 SDK。
 
-以 `!` 开头的消息作为 bash 命令在绑定窗口的工作目录下执行（subprocess，不经过 tmux）。
+### 3. !bash 命令
+
+与 claude-on-discord 的 `!command` 快捷语法一致：以 `!` 开头的消息作为 bash 命令直接执行。
 
 ```
 用户: !git status
@@ -543,9 +581,9 @@ ccbot (Telegram) 和 claude-on-discord (Discord) 都实现了以下核心能力�
     (exit 0)
 ```
 
-### 5. 按钮交互
+### 4. 按钮交互
 
-#### 5.1 截屏导航键盘
+#### 4.1 截屏导航键盘（新增）
 
 `/screenshot` 截图下方附带导航按钮，可在 Discord 中操控终端：
 
@@ -562,22 +600,28 @@ ccbot (Telegram) 和 claude-on-discord (Discord) 都实现了以下核心能力�
 
 `🔄 Refresh` 仅刷新截图不发送任何按键。
 
-#### 5.2 交互式 UI 检测
+#### 4.2 中断/终止按钮（对应 claude-on-discord）
 
-pane 轮询检测到 Claude Code 的交互式 UI 时（参考 ccbot `terminal_parser.py`），自动截屏并附带导航键盘推送到频道：
+claude-on-discord 的 Interrupt/Abort 按钮映射为：
+- **Interrupt** → 向 tmux 发送 `Escape`（软中断）
+- **Abort** → 向 tmux 发送 `C-c`（硬中断）
 
-| UI 类型 | 触发条件 | 典型场景 |
-|---------|----------|----------|
-| PermissionPrompt | pane 中出现权限请求文本 | Claude 要执行 bash/编辑文件 |
-| AskUserQuestion | pane 中出现 ☐/✔/☒ 选项 | Claude 问用户多选题 |
-| BashApproval | pane 中出现 bash 命令审批 | 高风险命令需确认 |
-| ExitPlanMode | pane 中出现计划确认提示 | 退出计划模式 |
+#### 4.3 交互式 UI 检测（来自 ccbot）
+
+pane 轮询检测到 Claude Code 的交互式 UI 时，自动截屏并附带导航键盘推送到频道：
+
+| UI 类型 | 典型场景 |
+|---------|----------|
+| PermissionPrompt | Claude 要执行 bash/编辑文件，需要权限确认 |
+| AskUserQuestion | Claude 问用户多选题 |
+| BashApproval | 高风险命令需确认 |
+| ExitPlanMode | 退出计划模式 |
 
 检测到后发送截屏 + 导航键盘，用户通过方向键/Enter/Esc 操作即可。
 
-### 6. 输出推送
+### 5. 输出推送
 
-后台双通道监控，将 coding CLI 输出推送到 Discord：
+后台双通道监控，将 coding CLI 输出推送到 Discord（对应 claude-on-discord 的 SDK 流式回调，我们用 ccbot 的轮询方案替代）：
 
 **JSONL 轮询**（结构化）— 解析 `~/.claude/projects/<hash>/*.jsonl`：
 - `assistant.text` → Markdown 文本消息
@@ -588,7 +632,7 @@ pane 轮询检测到 Claude Code 的交互式 UI 时（参考 ccbot `terminal_pa
 - 状态行变化 → 更新状态消息
 - 交互式 UI → 触发截屏 + 按钮推送
 
-**消息分块**：超过 2000 字符自动分块，代码块感知（跨块自动闭合/重开围栏）。
+**消息分块**：超过 2000 字符自动分块，代码块感知（跨块自动闭合/重开围栏），与 claude-on-discord 的 `chunker.ts` 逻辑一致。
 
 ---
 
@@ -597,12 +641,15 @@ pane 轮询检测到 Claude Code 的交互式 UI 时（参考 ccbot `terminal_pa
 ```
 Discord 频道
     │
-    ├── /screenshot  → 截屏 + 导航键盘
-    ├── /bind /unbind /windows /new /stop /compact → tmux 操作
-    ├── /cc <cmd>    → 转发 /<cmd> 到 tmux
-    ├── "普通文字"   → send_text 到 tmux pane
-    ├── !bash cmd    → subprocess 执行, 返回输出
-    └── 按钮点击     → send_keys 到 tmux + 刷新截屏
+    ├── /bind /unbind                → tmux 窗口管理
+    ├── /new /stop /kill /compact    → 会话控制 (→ tmux 按键)
+    ├── /status                      → 查询状态
+    ├── /cost /model /cc <cmd>       → 转发 CLI 命令 (→ tmux 文本)
+    ├── /bash <cmd>                  → subprocess 执行, 返回输出
+    ├── /screenshot                  → 截屏 + 导航键盘
+    ├── "普通文字"                   → send_text 到 tmux pane
+    ├── !bash cmd                    → subprocess 执行, 返回输出
+    └── 按钮点击                     → send_keys 到 tmux + 刷新截屏
                            │
                            ▼
                      ┌──────────┐
