@@ -758,14 +758,44 @@ class HealthMonitor:
         ...
 ```
 
+### Coding CLI Session Resume 支持
+
+tmux 恢复时，不只是重新启动 CLI，还可以尝试恢复之前的对话上下文。不同 CLI 的 resume 机制不同：
+
+| Coding CLI | Resume 方式 | 命令 |
+|------------|-------------|------|
+| **Claude Code** | `--resume <session_id>` 按 session ID 恢复；`--continue` 恢复当前目录最近会话 | `claude --resume <id>` |
+| 其他 CLI | 待调研，各 CLI 可能有不同的 session 持久化机制 | — |
+
+**恢复流程（以 Claude Code 为例）：**
+
+1. Hook 机制已记录 `tmux_window_id → claude_session_id` 到 `~/.gits/session_map.json`
+2. tmux 窗口恢复时，查找该窗口对应的 `claude_session_id`
+3. 若有 session ID → 启动 `claude --resume <session_id>`（恢复对话上下文）
+4. 若无 session ID 或 resume 失败 → 降级为 `claude`（全新会话）
+
+```python
+class CodingCLILauncher:
+    """Coding CLI 启动器 — 支持 session resume"""
+
+    async def launch(self, window_id: str, work_dir: str, cli: str = "claude") -> None:
+        session_id = self.session_map.get(window_id)
+        if cli == "claude" and session_id:
+            # 尝试恢复之前的对话
+            command = f"claude --resume {session_id}"
+        else:
+            command = cli
+        await self.tmux.send_text(window_id, command)
+```
+
 ### 故障场景与恢复策略
 
 | 故障场景 | 检测方式 | 恢复行为 |
 |----------|----------|----------|
 | **单个 tmux 窗口消失** | OutputMonitor 发现 window_id 不存在 | 通知对应 Channel/Thread → 提示用户可 `/bind` 或 `/fork` 重建 |
-| **tmux session 整体消失** | HealthMonitor 定期探活失败 | 自动重建 session → 遍历所有 binding 重建窗口 → cd 到原目录 → 重启 coding CLI → 通知各 Channel |
+| **tmux session 整体消失** | HealthMonitor 定期探活失败 | 自动重建 session → 遍历所有 binding 重建窗口 → cd 到原目录 → 尝试 resume CLI session → 通知各 Channel |
 | **tmux server 挂掉** | HealthMonitor 连接 libtmux.Server() 失败 | 等待 tmux server 恢复（可能是重启中）→ 重试 N 次 → 超时后走 session 重建流程 |
-| **服务器重启** | bot 启动时发现无 tmux | 自动创建 session → 从 `state.json` 恢复所有 binding → 通知各 Channel「已恢复」 |
+| **服务器重启** | bot 启动时发现无 tmux | 自动创建 session → 从 `state.json` 恢复所有 binding → 尝试 resume CLI session → 通知各 Channel |
 
 ### 状态持久化保障
 
@@ -778,9 +808,9 @@ class SessionBinding:
     work_dir: str           # 工作目录 — 恢复时 cd 到此目录
     coding_cli: str         # CLI 命令 — 恢复时重新启动
     window_name: str        # 窗口名 — 恢复时重建同名窗口
-    # 恢复不需要的字段（会重新生成）：
-    # window_id — tmux 重建后 ID 会变
-    # claude_session_id — 新 CLI 实例会有新 session
+    claude_session_id: str | None  # ⬅ 恢复时用于 --resume，由 Hook 自动填充
+    # 恢复后会变化的字段：
+    # window_id — tmux 重建后 ID 会变，需要更新
 ```
 
 ### 恢复后的用户体验
@@ -789,15 +819,14 @@ class SessionBinding:
 📢 @channel
 ⚠️ tmux session 已断开，正在自动恢复...
 ✅ 已恢复 3 个工作窗口：
-  • #my-app → /data/projects/my-app (claude)
-  • Thread:fix-auth → /data/projects/my-app (claude)
-  • Thread:frontend → /data/projects/my-app/frontend (claude)
-⚠️ 注意：coding CLI 已重启，之前的对话上下文已丢失。
+  • #my-app → /data/projects/my-app (claude --resume abc123) ✅ 上下文已恢复
+  • Thread:fix-auth → /data/projects/my-app (claude --resume def456) ✅ 上下文已恢复
+  • Thread:frontend → /data/projects/my-app/frontend (claude) ⚠️ 无历史 session，全新启动
 ```
 
 ### 核心设计原则补充
 
-5. **可恢复性** — tmux 挂掉不是终点，bot 能从 `state.json` 自动重建所有会话，用户无需手动干预
+5. **可恢复性** — tmux 挂掉不是终点，bot 能从 `state.json` 自动重建所有会话并尝试恢复 CLI 对话上下文，用户无需手动干预
 
 ---
 
