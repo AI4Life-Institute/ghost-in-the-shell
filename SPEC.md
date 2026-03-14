@@ -140,6 +140,7 @@ Ghost in the Shell (GITS) 是一个 **社交平台 ↔ tmux 桥接工具**，让
 2. **平台无关的核心** — Core Engine 不感知具体聊天平台，通过 Adapter 接口解耦
 3. **Coding CLI 无关** — 不绑定 Claude Code SDK，通过 tmux 间接操控任何 coding CLI
 4. **渐进式** — 先做 Discord + tmux + 手动截屏，功能逐步增加
+5. **可恢复性** — tmux 挂掉不是终点，bot 能从持久化状态自动重建所有会话
 
 ---
 
@@ -503,6 +504,7 @@ Thread 的结束是自然发生的，不应该是用户刻意去做的操作：
 | 用户在 Thread 中执行 `/kill` | 杀掉 tmux 窗口进程 → bot 自动归档 Thread |
 | tmux 窗口中的 coding CLI 正常退出 | OutputMonitor 检测到退出 → bot 发消息通知 → 自动归档 Thread |
 | tmux 窗口被外部手动关闭 | OutputMonitor 检测到窗口消失 → bot 发消息通知 → 自动归档 Thread |
+| tmux session 整体崩溃/服务器重启 | HealthMonitor 检测到 → 通知所有关联 Channel/Thread → 尝试自动恢复（见可靠性设计） |
 | Discord Thread 自然沉底（无人说话） | Discord 自动归档（默认 24h），tmux 窗口保留不动 |
 
 **归档 ≠ 删除**：Discord Thread 归档后仍可重新打开，对应的 tmux 窗口如果还在，自动恢复绑定。
@@ -746,6 +748,67 @@ Discord Server
 
 ---
 
+## 可靠性设计
+
+tmux 是整个系统的核心依赖，它本身也可能崩溃（OOM、服务器重启、进程被杀等），需要完整的容错机制。
+
+### tmux 健康监控
+
+```python
+class HealthMonitor:
+    """tmux 健康监控器 — 定期探活 + 自动恢复"""
+
+    async def check_loop(self, interval: float = 5.0) -> None:
+        """定期检查 tmux 健康状态"""
+        # 1. tmux server 是否存活 — libtmux.Server() 能否连接
+        # 2. gits session 是否存在 — server.sessions 中是否有目标 session
+        # 3. 各绑定窗口是否存在 — 遍历 SessionManager 的 bindings 逐一验证
+        ...
+```
+
+### 故障场景与恢复策略
+
+| 故障场景 | 检测方式 | 恢复行为 |
+|----------|----------|----------|
+| **单个 tmux 窗口消失** | OutputMonitor 发现 window_id 不存在 | 通知对应 Channel/Thread → 提示用户可 `/bind` 或 `/fork` 重建 |
+| **tmux session 整体消失** | HealthMonitor 定期探活失败 | 自动重建 session → 遍历所有 binding 重建窗口 → cd 到原目录 → 重启 coding CLI → 通知各 Channel |
+| **tmux server 挂掉** | HealthMonitor 连接 libtmux.Server() 失败 | 等待 tmux server 恢复（可能是重启中）→ 重试 N 次 → 超时后走 session 重建流程 |
+| **服务器重启** | bot 启动时发现无 tmux | 自动创建 session → 从 `state.json` 恢复所有 binding → 通知各 Channel「已恢复」 |
+
+### 状态持久化保障
+
+恢复的前提是状态文件 (`~/.gits/state.json`) 中保存了足够的信息：
+
+```python
+@dataclass
+class SessionBinding:
+    # ... 原有字段 ...
+    work_dir: str           # 工作目录 — 恢复时 cd 到此目录
+    coding_cli: str         # CLI 命令 — 恢复时重新启动
+    window_name: str        # 窗口名 — 恢复时重建同名窗口
+    # 恢复不需要的字段（会重新生成）：
+    # window_id — tmux 重建后 ID 会变
+    # claude_session_id — 新 CLI 实例会有新 session
+```
+
+### 恢复后的用户体验
+
+```
+📢 @channel
+⚠️ tmux session 已断开，正在自动恢复...
+✅ 已恢复 3 个工作窗口：
+  • #my-app → /data/projects/my-app (claude)
+  • Thread:fix-auth → /data/projects/my-app (claude)
+  • Thread:frontend → /data/projects/my-app/frontend (claude)
+⚠️ 注意：coding CLI 已重启，之前的对话上下文已丢失。
+```
+
+### 核心设计原则补充
+
+5. **可恢复性** — tmux 挂掉不是终点，bot 能从 `state.json` 自动重建所有会话，用户无需手动干预
+
+---
+
 ## 实现路线图
 
 ### Phase 1: MVP — Discord + tmux + 手动截屏 (2-3 周)
@@ -760,6 +823,7 @@ Discord Server
 - [ ] 基础命令：`/bind`, `/unbind`, `/screenshot`, `/windows`, `/send-keys`
 - [ ] 消息转发：Discord 文本 → tmux 输入
 - [ ] 输出监控：tmux pane 轮询 → Discord 消息推送
+- [ ] HealthMonitor — tmux 健康探活 + 启动时自动恢复绑定
 - [ ] 字体文件打包（JetBrainsMono + NotoSansCJK + Symbola）
 
 ### Phase 2: 智能输出 + 交互式 UI (1-2 周)
@@ -785,7 +849,7 @@ Discord Server
 
 ### Phase 4: 高级功能 (持续迭代)
 
-- [ ] Guardian 进程监督器（参考 claude-on-discord `guardian/supervisor.ts` 的心跳+自愈设计）
+- [ ] Guardian 进程监督器 — 升级版：HTTP 控制 API + 多实例管理（Phase 1 已有基础 HealthMonitor）
 - [ ] 多用户权限管理
 - [ ] Webhook 通知（任务完成/错误告警）
 - [ ] 目录浏览器 UI（参考 ccbot `directory_browser.py`）
@@ -812,6 +876,7 @@ ghost-in-the-shell/
 │       │   ├── tmux.py            # TmuxController (libtmux)
 │       │   ├── screenshot.py      # ScreenshotEngine (Pillow ANSI→PNG)
 │       │   ├── monitor.py         # OutputMonitor (JSONL + pane 轮询)
+│       │   ├── health.py          # HealthMonitor (tmux 探活 + 自动恢复)
 │       │   ├── terminal_parser.py # 终端 UI 检测 (正则匹配)
 │       │   ├── ui_bridge.py       # InteractiveUIBridge
 │       │   └── hook.py            # Coding CLI Hook
