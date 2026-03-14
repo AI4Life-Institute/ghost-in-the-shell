@@ -762,29 +762,43 @@ class HealthMonitor:
 
 tmux 恢复时，不只是重新启动 CLI，还可以尝试恢复之前的对话上下文。不同 CLI 的 resume 机制不同：
 
-| Coding CLI | Resume 方式 | 命令 |
-|------------|-------------|------|
-| **Claude Code** | `--resume <session_id>` 按 session ID 恢复；`--continue` 恢复当前目录最近会话 | `claude --resume <id>` |
-| 其他 CLI | 待调研，各 CLI 可能有不同的 session 持久化机制 | — |
+三个目标 CLI 都支持 session resume，但命令格式各不相同：
 
-**恢复流程（以 Claude Code 为例）：**
+| Coding CLI | 按 session ID 恢复 | 恢复当前目录最近会话 | Session 存储位置 |
+|------------|-------------------|---------------------|-----------------|
+| **Claude Code** | `claude --resume <session_id>` | `claude --continue` | `~/.claude/projects/` |
+| **Codex CLI** | `codex resume <session_id>` | `codex resume --last` | `~/.codex/sessions/` |
+| **OpenCode** | `opencode --session <session_id>` | `opencode --continue` | SQLite 数据库 |
 
-1. Hook 机制已记录 `tmux_window_id → claude_session_id` 到 `~/.gits/session_map.json`
-2. tmux 窗口恢复时，查找该窗口对应的 `claude_session_id`
-3. 若有 session ID → 启动 `claude --resume <session_id>`（恢复对话上下文）
-4. 若无 session ID 或 resume 失败 → 降级为 `claude`（全新会话）
+**统一恢复流程：**
+
+1. Hook / 状态文件记录 `binding → cli_session_id` 映射
+2. tmux 恢复时，根据 `coding_cli` 类型选择对应的 resume 命令格式
+3. 若有 session ID → 按上表格式拼接 resume 命令
+4. 若无 session ID → 尝试「恢复最近会话」（`--continue` / `--last`）
+5. 若 resume 失败 → 降级为全新启动
 
 ```python
 class CodingCLILauncher:
     """Coding CLI 启动器 — 支持 session resume"""
 
+    # 各 CLI 的 resume 命令模板
+    RESUME_TEMPLATES = {
+        "claude":   {"by_id": "claude --resume {id}",         "latest": "claude --continue"},
+        "codex":    {"by_id": "codex resume {id}",            "latest": "codex resume --last"},
+        "opencode": {"by_id": "opencode --session {id}",      "latest": "opencode --continue"},
+    }
+
     async def launch(self, window_id: str, work_dir: str, cli: str = "claude") -> None:
         session_id = self.session_map.get(window_id)
-        if cli == "claude" and session_id:
-            # 尝试恢复之前的对话
-            command = f"claude --resume {session_id}"
+        templates = self.RESUME_TEMPLATES.get(cli)
+
+        if templates and session_id:
+            command = templates["by_id"].format(id=session_id)
+        elif templates:
+            command = templates["latest"]  # 尝试恢复最近会话
         else:
-            command = cli
+            command = cli  # 未知 CLI，直接启动
         await self.tmux.send_text(window_id, command)
 ```
 
