@@ -480,23 +480,47 @@ Discord                              tmux session "gits"
 
 **Channel 行为（`/bind`）：**
 1. 创建 tmux 窗口，以频道名命名
-2. cd 到工作目录，启动 coding CLI
-3. Hook 捕获 CLI session ID → 记录到 `state.json`
-4. 设置 Discord 频道 topic：`project=<name> dir=<path>`（参考 claude-on-discord `topic.ts`）
-5. 回复确认消息（含 session ID）：
+2. cd 到工作目录
+3. **扫描已有 CLI session**（见下方 Session 发现机制），发现可用 session 列表
+4. 启动 coding CLI：有可恢复 session → resume；无 → 全新启动
+5. Hook 捕获 CLI session ID → 记录到 `state.json`
+6. 设置 Discord 频道 topic：`project=<name> dir=<path>`（参考 claude-on-discord `topic.ts`）
+7. 回复确认消息（含 session ID + 是否恢复）：
    ```
    ✅ 已绑定 #my-app → /data/projects/my-app
    🖥 tmux: window "my-app" | 🤖 claude | 📋 session: abc12345
+   🔄 已恢复上次会话 (2h ago)
    ```
-6. 后续该频道的所有消息转发到此 tmux 窗口
+   或：
+   ```
+   ✅ 已绑定 #my-app → /data/projects/my-app
+   🖥 tmux: window "my-app" | 🤖 claude | 📋 session: def67890
+   🆕 全新会话
+   ```
+8. 后续该频道的所有消息转发到此 tmux 窗口
 
 **Thread 行为（`/fork`）：**
 1. 在 Discord 中创建 Thread
 2. 创建新的 tmux 窗口，以 thread 名命名
 3. cd 到工作目录：默认 = 父频道项目根目录；可选 `-d <subdir>` 指定子目录
-4. 启动独立的 coding CLI 会话
+4. 启动全新 coding CLI 会话（Thread 通常是新任务，不 resume）
 5. Hook 捕获 session ID → 记录 → 回复确认消息（含 session ID）
 6. Thread 内的消息转发到这个独立窗口
+
+**Session 发现机制：**
+
+`/bind` 时自动扫描目标目录下已有的 coding CLI session，让用户选择恢复还是新建：
+
+| Coding CLI | Session 存储 | 发现方式 |
+|------------|-------------|----------|
+| **Claude Code** | `~/.claude/projects/<dir-hash>/` | 扫描目录下 `*.jsonl`，按 mtime 排序，读取 session UUID |
+| **Codex CLI** | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | 扫描 JSONL 文件，过滤 cwd 匹配目标目录的 session |
+| **OpenCode** | SQLite 数据库 | 查询数据库中 cwd 匹配的最近 session |
+
+启动策略（按优先级）：
+1. `state.json` 中有此目录之前的 session ID → `--resume <id>`
+2. 扫描到该目录下有最近的 session → 提示用户选择恢复或新建
+3. 无历史 session → 全新启动
 
 **Thread 生命周期**（不需要手动关闭）：
 
