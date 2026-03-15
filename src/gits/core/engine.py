@@ -318,6 +318,11 @@ class Engine:
         if interaction:
             await self._reply(interaction, "Bound successfully.")
 
+        # Auto-screenshot after CLI starts up
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding:
+            await self._auto_screenshot(channel_id, binding, interaction, delay=2.0)
+
     # ------------------------------------------------------------------
     # Session Picker helpers
     # ------------------------------------------------------------------
