@@ -509,7 +509,11 @@ class DiscordAdapter(PlatformAdapter):
         if not current or current == ".":
             # Show cwd and its subdirectories
             base = Path.cwd()
-            choices.append(app_commands.Choice(name=f". ({base.name}/)", value=str(base)))
+            choices.append(app_commands.Choice(name=f"✅ . ({base.name}/)", value=str(base)))
+            if base.parent != base:
+                choices.append(
+                    app_commands.Choice(name=f".. ({base.parent.name or '/'}/)", value=str(base.parent))
+                )
             try:
                 for entry in sorted(base.iterdir()):
                     if entry.is_dir() and not entry.name.startswith("."):
@@ -542,6 +546,14 @@ class DiscordAdapter(PlatformAdapter):
                 choices.append(
                     app_commands.Choice(name=f"✅ {p.name or str(p)}/", value=str(p))
                 )
+                # Offer parent directory
+                if p.parent != p:
+                    choices.append(
+                        app_commands.Choice(
+                            name=f".. ({p.parent.name or '/'}/)",
+                            value=str(p.parent),
+                        )
+                    )
 
             try:
                 for entry in sorted(parent.iterdir()):
