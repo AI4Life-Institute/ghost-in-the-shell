@@ -98,6 +98,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         token=settings.gits_discord_token,
         allowed_users=settings.allowed_users,
         allowed_guilds=settings.allowed_guilds,
+        bind_root=settings.bind_root,
     )
 
     # Wire adapter <-> engine

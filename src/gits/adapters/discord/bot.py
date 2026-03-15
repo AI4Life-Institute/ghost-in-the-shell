@@ -34,10 +34,14 @@ class DiscordAdapter(PlatformAdapter):
         token: str,
         allowed_users: list[int] | None = None,
         allowed_guilds: list[int] | None = None,
+        bind_root: "Path | None" = None,
     ):
+        from pathlib import Path
+
         self.token = token
         self.allowed_users = set(allowed_users or [])
         self.allowed_guilds = set(allowed_guilds or [])
+        self.bind_root: Path = (bind_root or Path.cwd()).expanduser().resolve()
 
         # Message / button callbacks (set by Core Engine)
         self._message_callbacks: list[MessageCallback] = []
@@ -541,7 +545,7 @@ class DiscordAdapter(PlatformAdapter):
 
         # Resolve the current input to an absolute path
         if not current or current == ".":
-            target = Path.cwd()
+            target = self.bind_root
         else:
             p = Path(current).expanduser()
             if not p.is_absolute():

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     # ── Directories ───────────────────────────────────────────────────
     gits_dir: Path = Path("~/.gits")
+    bind_root: Path | None = None
     log_level: str = "INFO"
 
     # ── Thread ────────────────────────────────────────────────────────
