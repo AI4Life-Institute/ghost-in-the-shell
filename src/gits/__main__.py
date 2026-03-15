@@ -46,6 +46,11 @@ def main() -> None:
         action="store_true",
         help="Install the hook into ~/.copilot/hooks/hooks.json",
     )
+    hook_p.add_argument(
+        "--install-codex",
+        action="store_true",
+        help="Install the hook into ~/.codex/hooks.json and enable codex_hooks feature",
+    )
 
     # gits status
     sub.add_parser("status", help="Show current bindings")
@@ -159,6 +164,10 @@ def _cmd_hook(args: argparse.Namespace) -> None:
         logger.info("Hook install requested (Copilot)")
         sys.exit(_install_copilot_hook())
 
+    if args.install_codex:
+        logger.info("Hook install requested (Codex)")
+        sys.exit(_install_codex_hook())
+
     # --- Normal hook processing: read JSON from stdin ---
     logger.debug("Processing hook event from stdin")
     try:
@@ -188,7 +197,8 @@ def _cmd_hook(args: argparse.Namespace) -> None:
         logger.warning("cwd is not absolute: %s", cwd)
         return
 
-    if event != "SessionStart":
+    # Accept both Claude's "SessionStart" and Codex's "session_start"
+    if event not in ("SessionStart", "session_start"):
         logger.debug("Ignoring non-SessionStart event: %s", event)
         return
 
@@ -402,6 +412,91 @@ def _install_copilot_hook() -> int:
         "timeout": 5000,
     })
     hooks["sessionStart"] = session_start
+
+    try:
+        hooks_file.write_text(
+            json.dumps(hooks, indent=2, ensure_ascii=False) + "\n"
+        )
+    except OSError as e:
+        print(f"Error writing {hooks_file}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Hook installed successfully in {hooks_file}")
+    return 0
+
+
+def _install_codex_hook() -> int:
+    """Install the gits hook into Codex's hooks.json and enable codex_hooks feature.
+
+    Codex CLI uses ~/.codex/hooks.json with session_start event hooks,
+    and requires the codex_hooks feature flag in ~/.codex/config.toml.
+    """
+    from pathlib import Path
+
+    # 1. Enable codex_hooks feature in config.toml
+    config_file = Path.home() / ".codex" / "config.toml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    config_text = ""
+    if config_file.exists():
+        try:
+            config_text = config_file.read_text()
+        except OSError as e:
+            print(f"Error reading {config_file}: {e}", file=sys.stderr)
+            return 1
+
+    if "codex_hooks" not in config_text:
+        # Add [features] section with codex_hooks = true
+        if "[features]" in config_text:
+            config_text = config_text.replace(
+                "[features]", "[features]\ncodex_hooks = true"
+            )
+        else:
+            config_text += "\n[features]\ncodex_hooks = true\n"
+        try:
+            config_file.write_text(config_text)
+            print(f"Enabled codex_hooks feature in {config_file}")
+        except OSError as e:
+            print(f"Error writing {config_file}: {e}", file=sys.stderr)
+            return 1
+    else:
+        print(f"codex_hooks feature already in {config_file}")
+
+    # 2. Install hook in hooks.json
+    hooks_file = Path.home() / ".codex" / "hooks.json"
+
+    hooks: dict = {}
+    if hooks_file.exists():
+        try:
+            hooks = json.loads(hooks_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Error reading {hooks_file}: {e}", file=sys.stderr)
+            return 1
+
+    # Check if already installed
+    gits_path = _find_gits_path()
+    hook_command = f"{gits_path} hook"
+
+    if "hooks" not in hooks:
+        hooks["hooks"] = {}
+    session_start = hooks["hooks"].get("session_start", [])
+
+    for entry in session_start:
+        if isinstance(entry, dict):
+            for h in entry.get("hooks", []):
+                if isinstance(h, dict) and h.get("command", "").endswith("gits hook"):
+                    print(f"Hook already installed in {hooks_file}")
+                    return 0
+
+    session_start.append({
+        "hooks": [
+            {
+                "command": hook_command,
+                "timeout_sec": 5,
+            }
+        ]
+    })
+    hooks["hooks"]["session_start"] = session_start
 
     try:
         hooks_file.write_text(

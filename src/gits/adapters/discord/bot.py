@@ -114,6 +114,10 @@ class DiscordAdapter(PlatformAdapter):
             pass
 
         sent = await channel.send(**kwargs)
+        logger.info(
+            "Discord POST ch=%s msg_id=%s content=%s",
+            channel_id, sent.id, (msg.text or "")[:60],
+        )
         return str(sent.id)
 
     async def edit_message(

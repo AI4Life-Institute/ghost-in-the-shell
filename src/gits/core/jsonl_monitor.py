@@ -290,7 +290,7 @@ class JsonlMonitor:
                 else:
                     await self._check_binding(binding)
             except Exception:
-                logger.debug(
+                logger.warning(
                     "Error checking output for channel %s", binding.channel_id,
                     exc_info=True,
                 )
@@ -338,6 +338,10 @@ class JsonlMonitor:
         if file_key not in self._offsets:
             self._offsets[file_key] = stat.st_size
             self._mtimes[file_key] = stat.st_mtime
+            logger.info(
+                "JSONL first-seen for ch=%s: %s (size=%d)",
+                binding.channel_id, jsonl_path.name, stat.st_size,
+            )
             return
 
         # Detect file truncation
@@ -364,11 +368,19 @@ class JsonlMonitor:
 
         # Fire callbacks
         if new_texts and self._on_message:
+            logger.info(
+                "JSONL new content for ch=%s: %d texts, offset %d->%d",
+                binding.channel_id, len(new_texts), last_offset, new_size,
+            )
             for text in new_texts:
                 if len(text) > MAX_MESSAGE_LENGTH:
                     text = text[:MAX_MESSAGE_LENGTH] + "\n\u2026 (truncated)"
                 try:
                     await self._on_message(binding.channel_id, text)
+                    logger.info(
+                        "JSONL forwarded to Discord ch=%s: %s",
+                        binding.channel_id, text[:80],
+                    )
                 except Exception:
                     logger.exception("JsonlMonitor message callback error")
 
@@ -433,16 +445,53 @@ class JsonlMonitor:
         Codex filenames are like:
             rollout-2026-03-14T18-38-36-019cef25-2ae6-73f0-97fc-795524e3cdbe.jsonl
         The session_id is the UUID suffix after the timestamp prefix.
+
+        If the exact session_id match fails (e.g. Codex restarted with a new
+        session), fall back to the most recently modified JSONL whose
+        ``session_meta.cwd`` matches the binding's work_dir.
         """
         codex_dir = Path.home() / ".codex" / "sessions"
         if not codex_dir.exists():
             return None
 
         sid = binding.cli_session_id
-        # Match files ending with the session_id (glob *{sid}.jsonl)
+        # Strategy 1: exact match by session_id in filename
         for jsonl_file in codex_dir.rglob(f"*{sid}.jsonl"):
             return jsonl_file
-        return None
+
+        # Strategy 2: find most recent JSONL for this work_dir.
+        # Check the first line (session_meta) for matching cwd.
+        resolved_work_dir = str(Path(binding.work_dir).resolve())
+        best: Path | None = None
+        best_mtime: float = 0.0
+
+        for jsonl_file in codex_dir.rglob("rollout-*.jsonl"):
+            try:
+                stat = jsonl_file.stat()
+                if stat.st_mtime <= best_mtime:
+                    continue
+                # Read only the first line for session_meta
+                with open(jsonl_file) as f:
+                    first_line = f.readline()
+                data = json.loads(first_line)
+                if data.get("type") != "session_meta":
+                    continue
+                cwd = data.get("payload", {}).get("cwd", "")
+                if cwd and str(Path(cwd).resolve()) == resolved_work_dir:
+                    best = jsonl_file
+                    best_mtime = stat.st_mtime
+                    # Update binding session_id to match
+                    new_sid = data.get("payload", {}).get("id", "")
+                    if new_sid and new_sid != sid:
+                        logger.info(
+                            "Codex session_id changed for ch=%s: %s -> %s",
+                            binding.channel_id, sid, new_sid,
+                        )
+                        binding.cli_session_id = new_sid
+            except (json.JSONDecodeError, OSError, ValueError):
+                continue
+
+        return best
 
     def _find_copilot_jsonl(self, binding: Any) -> Path | None:
         """Find Copilot JSONL: ~/.copilot/session-state/{id}/events.jsonl"""

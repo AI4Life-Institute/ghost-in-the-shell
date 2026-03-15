@@ -73,6 +73,10 @@ class Engine:
     async def start(self) -> None:
         """Start the engine: ensure tmux session, start health monitor."""
         self.settings.state_dir.mkdir(parents=True, exist_ok=True)
+
+        # Auto-install Claude Code SessionStart hook if not present
+        self._ensure_hooks_installed()
+
         await self.tmux.ensure_session()
         await self.health.start()
 
@@ -98,6 +102,20 @@ class Engine:
         self.jsonl_monitor.stop()
         await self.health.stop()
         logger.info("Engine stopped")
+
+    # ------------------------------------------------------------------
+    # Hook auto-install
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ensure_hooks_installed() -> None:
+        """Auto-install CLI hooks (Claude, Copilot) if not already present."""
+        try:
+            from ..__main__ import _install_hook
+
+            _install_hook()
+        except Exception:
+            logger.warning("Failed to auto-install Claude hook", exc_info=True)
 
     # ------------------------------------------------------------------
     # Message handler (plain text forwarding)
