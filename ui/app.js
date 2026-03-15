@@ -651,25 +651,78 @@ function _renderFleetDrawer(agentId) {
     </div>`;
   }).join('');
 
-  const chromeBanner = a.type === 'Browser Agent' ? `
-    <div class="ag-chrome-banner">
-      <div class="ag-chrome-banner-inner">🌐 Real Chrome · ${esc(a.profile)} — your sessions, your cookies, no re-logging in</div>
-    </div>` : '';
+  // live browser screenshot view (Browser Agents only)
+  const liveView = a.type === 'Browser Agent' ? _mockBrowserScreen(a) : '';
 
-  bodyEl.innerHTML = `
+  // two-column bottom section
+  const colLeft = `
     <div class="drawer-col-left">
-      ${chromeBanner}
       <div class="ag-run-bar"><div class="ag-run-status">${runProgress}</div></div>
       <div class="ag-actions">
         <button class="ag-btn">⏸ Pause</button>
         <button class="ag-btn">▶ Run Now</button>
         <button class="ag-btn link" onclick="setMode('data')">View in Data →</button>
       </div>
-    </div>
+    </div>`;
+  const colRight = `
     <div class="drawer-col-right">
       <div class="ag-log-hd">— Execution Log</div>
       <div class="ag-log-scroll">${logRows || '<div style="color:rgba(0,0,0,.30);font-size:12px;padding:8px 0">No log entries yet.</div>'}</div>
     </div>`;
+
+  if (liveView) {
+    // browser agents: top = live view (full width), bottom = two cols
+    bodyEl.innerHTML = `
+      <div class="drawer-live-wrap">
+        ${liveView}
+        <div class="drawer-bottom-row">${colLeft}${colRight}</div>
+      </div>`;
+  } else {
+    bodyEl.innerHTML = colLeft + colRight;
+  }
+}
+
+function _mockBrowserScreen(a) {
+  // pick mock content based on agent
+  const isRunning = a.detail.running;
+  const currentUrl = isRunning ? 'nash-ai.cn/reports/list' : 'nash-ai.cn/reports';
+  const liveLbl = isRunning
+    ? `<span class="live-dot"></span> Live · 2s ago`
+    : `<span style="color:rgba(0,0,0,.35)">Last frame · 18s ago</span>`;
+
+  // fake page content
+  const pageContent = isRunning ? `
+    <div class="mock-site-header">
+      <div class="mock-site-logo">Nash<span>AI</span></div>
+      <div class="mock-site-nav">Reports &nbsp;·&nbsp; Portfolio &nbsp;·&nbsp; Settings</div>
+    </div>
+    <div class="mock-site-body">
+      <div class="mock-site-title">Research Reports</div>
+      <div class="mock-site-row sel">
+        <div class="mock-site-row-ico">📄</div>
+        <div class="mock-site-row-name">Goldman Sachs Q2 2024 Analysis</div>
+        <div class="mock-site-row-meta">2.4 MB · PDF</div>
+        <div class="mock-download-bar"><div class="mock-download-fill"></div></div>
+      </div>
+      <div class="mock-site-row dim"><div class="mock-site-row-ico">📄</div><div class="mock-site-row-name">Morgan Stanley Q2 2024</div><div class="mock-site-row-meta">1.8 MB</div></div>
+      <div class="mock-site-row dim"><div class="mock-site-row-ico">📄</div><div class="mock-site-row-name">JP Morgan Macro Outlook</div><div class="mock-site-row-meta">3.1 MB</div></div>
+    </div>` : `
+    <div class="mock-site-header">
+      <div class="mock-site-logo">Nash<span>AI</span></div>
+    </div>
+    <div class="mock-site-body" style="opacity:.7">
+      <div class="mock-site-title">Research Reports · 47 items</div>
+      <div class="mock-site-row dim"><div class="mock-site-row-ico">📄</div><div class="mock-site-row-name">Goldman Sachs Q2 2024 Analysis</div><div class="mock-site-row-meta">✓ Downloaded</div></div>
+    </div>`;
+
+  return `<div class="live-browser">
+    <div class="live-browser-bar">
+      <div class="live-browser-dots"><span></span><span></span><span></span></div>
+      <div class="live-browser-url">🔒 ${currentUrl}</div>
+      <div class="live-browser-badge">${liveLbl}</div>
+    </div>
+    <div class="live-browser-screen">${pageContent}</div>
+  </div>`;
 }
 
 // ── Data file tree ──────────────────────────────────────────────────────────
