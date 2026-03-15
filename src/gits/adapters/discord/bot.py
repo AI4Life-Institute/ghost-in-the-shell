@@ -501,70 +501,68 @@ class DiscordAdapter(PlatformAdapter):
 
         Starts from the bot's working directory (cwd). As the user types,
         lists subdirectories matching the input. Returns up to 25 choices.
+
+        IMPORTANT: Discord fills the input field with the choice's ``value``
+        on selection. We use absolute paths as values so that subsequent
+        autocomplete calls can resolve them correctly.  The ``name``
+        (display label) is kept short: ``path_tail/`` with max 100 chars.
         """
         from pathlib import Path
 
         choices: list[app_commands.Choice[str]] = []
 
+        def _label(p: Path, prefix: str = "") -> str:
+            """Short display label (Discord max 100 chars for name)."""
+            short = f"{prefix}{p.name}/"
+            if len(short) > 95:
+                short = short[:92] + "..."
+            return short
+
+        def _add(label: str, value: str) -> None:
+            # Discord: name max 100 chars, value max 100 chars
+            if len(value) > 100:
+                value = value[:100]
+            choices.append(app_commands.Choice(name=label[:100], value=value))
+
+        # Resolve the current input to an absolute path
         if not current or current == ".":
-            # Show cwd and its subdirectories
-            base = Path.cwd()
-            choices.append(app_commands.Choice(name=f"✅ . ({base.name}/)", value=str(base)))
-            if base.parent != base:
-                choices.append(
-                    app_commands.Choice(name=f".. ({base.parent.name or '/'}/)", value=str(base.parent))
-                )
+            target = Path.cwd()
+        else:
+            p = Path(current).expanduser()
+            if not p.is_absolute():
+                p = Path.cwd() / p
+            target = p.resolve() if p.exists() else p
+
+        if target.is_dir():
+            # Show: select current, parent, then subdirectories
+            _add(f"✅ Select: {target.name or str(target)}/", str(target))
+
+            if target.parent != target:
+                _add(f"⬆ .. ({target.parent.name or '/'}/) ", str(target.parent))
+
             try:
-                for entry in sorted(base.iterdir()):
+                for entry in sorted(target.iterdir()):
                     if entry.is_dir() and not entry.name.startswith("."):
-                        choices.append(
-                            app_commands.Choice(
-                                name=entry.name + "/", value=str(entry)
-                            )
-                        )
+                        _add(f"📁 {entry.name}/", str(entry))
                         if len(choices) >= 25:
                             break
             except OSError:
                 pass
-        else:
-            # User is typing a path — complete it
-            p = Path(current).expanduser()
-            if not p.is_absolute():
-                p = Path.cwd() / p
 
-            if p.is_dir():
-                # List contents of this directory
-                parent = p
-            else:
-                # Partial name — list parent dir, filter by prefix
-                parent = p.parent
+        elif target.parent.is_dir():
+            # Partial name typed — filter parent's children
+            parent = target.parent
+            prefix = target.name.lower()
 
-            prefix = p.name if not p.is_dir() else ""
-
-            # Always offer the typed path itself if it's a valid dir
-            if p.is_dir():
-                choices.append(
-                    app_commands.Choice(name=f"✅ {p.name or str(p)}/", value=str(p))
-                )
-                # Offer parent directory
-                if p.parent != p:
-                    choices.append(
-                        app_commands.Choice(
-                            name=f".. ({p.parent.name or '/'}/)",
-                            value=str(p.parent),
-                        )
-                    )
+            _add(f"⬆ .. ({parent.name or '/'}/) ", str(parent))
 
             try:
                 for entry in sorted(parent.iterdir()):
                     if not entry.is_dir() or entry.name.startswith("."):
                         continue
-                    if prefix and not entry.name.lower().startswith(prefix.lower()):
+                    if prefix and not entry.name.lower().startswith(prefix):
                         continue
-                    display = entry.name + "/"
-                    choices.append(
-                        app_commands.Choice(name=display, value=str(entry))
-                    )
+                    _add(f"📁 {entry.name}/", str(entry))
                     if len(choices) >= 25:
                         break
             except OSError:
