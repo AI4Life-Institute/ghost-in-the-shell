@@ -286,18 +286,22 @@ class TestHandleModel:
 
 
 class TestHandleBash:
-    def test_bash_runs_command(self, engine, tmp_path):
+    def test_bash_sends_to_tmux(self, engine, tmp_path):
         async def _test():
             project_dir = tmp_path / "proj"
             project_dir.mkdir()
             await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
 
             interaction = FakeInteraction()
-            await engine.handle_bash("ch-1", "echo hello", interaction)
+            await engine.handle_bash("ch-1", "git status", interaction)
+
+            # Should send !command to tmux
+            engine.tmux.send_text.assert_called()
+            call_args = engine.tmux.send_text.call_args
+            assert "!git status" in str(call_args)
 
             reply = interaction.followup.send.call_args[0][0]
-            assert "hello" in reply
-            assert "Exit code: 0" in reply
+            assert "!git status" in reply
 
         asyncio.run(_test())
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -587,33 +586,21 @@ class Engine:
     async def handle_bash(
         self, channel_id: str, command: str, interaction: Any
     ) -> None:
-        """Handle /bash — run shell command in working directory."""
+        """Handle /bash — send a !command to the coding CLI via tmux.
+
+        Sends the command with a ``!`` prefix which triggers the CLI's
+        bash execution mode (Claude Code runs it directly).
+        """
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound.")
             return
 
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=binding.work_dir,
-            )
-            output = result.stdout + result.stderr
-            if len(output) > 1900:
-                output = output[:1900] + "\n... (truncated)"
-            await self._reply(
-                interaction,
-                f"```\n$ {command}\n{output}\n```\nExit code: {result.returncode}",
-            )
-        except subprocess.TimeoutExpired:
-            await self._reply(interaction, f"Command timed out (30s): `{command}`")
-        except Exception as e:
-            await self._reply(interaction, f"Error: {e}")
+        # Send as !command — triggers Claude Code's bash mode
+        bash_cmd = f"!{command}"
+        submit = _submit_keys_for_cli(binding.coding_cli)
+        await self.tmux.send_text(binding.window_id, bash_cmd, submit_keys=submit)
+        await self._reply(interaction, f"Sent to tmux: `{bash_cmd}`")
 
     async def handle_model(
         self, channel_id: str, name: str | None, interaction: Any
@@ -663,11 +650,12 @@ class Engine:
             await self._reply(interaction, "Not bound.")
             return
 
-        # Ensure command starts with /
-        if not command.startswith("/"):
-            command = f"/{command}"
+        # Ensure command starts with exactly one /
+        command = command.lstrip("/")
+        command = f"/{command}"
 
-        await self.tmux.send_text(binding.window_id, command)
+        submit = _submit_keys_for_cli(binding.coding_cli)
+        await self.tmux.send_text(binding.window_id, command, submit_keys=submit)
         await self._reply(interaction, f"Forwarded: `{command}`")
 
     # ------------------------------------------------------------------
