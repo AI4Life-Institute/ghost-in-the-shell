@@ -147,23 +147,19 @@ class Engine:
                 await self._reply(interaction, "Path not in allowed paths.")
                 return
 
-            # Discover existing sessions
-            sessions = self.launcher.discover_sessions(str(p))
-
-            # Create tmux window
+            # Create tmux window — always start a fresh CLI session.
+            # The hook will capture the new session ID automatically.
             channel = interaction.channel if interaction else None
             window_name = channel.name if channel else f"ch-{channel_id[:8]}"
             cli = self.settings.coding_cli_command
 
-            # Pick session to resume (most recent, if any)
-            session_id = sessions[0].session_id if sessions else None
-            cmd = self.launcher.build_launch_command(cli=cli, session_id=session_id)
+            cmd = self.launcher.build_launch_command(cli=cli)
 
             win = await self.tmux.create_window(
                 name=window_name, cwd=str(p), command=cmd
             )
 
-            # Create binding
+            # Create binding (no cli_session_id yet — the hook will set it)
             await self.session_mgr.bind(
                 platform="discord",
                 channel_id=channel_id,
@@ -171,15 +167,10 @@ class Engine:
                 window_name=window_name,
                 work_dir=str(p),
                 coding_cli=cli,
-                cli_session_id=session_id,
             )
 
             # Start pane polling for the new binding
             self.monitor.start_polling(channel_id, win.window_id)
-
-            resume_info = ""
-            if session_id:
-                resume_info = f"\nResuming session `{session_id[:8]}...`"
 
             # List directory contents for user orientation
             try:
@@ -201,7 +192,8 @@ class Engine:
                 interaction,
                 f"Bound **#{window_name}** → `{p}`\n"
                 f"tmux window: `{win.window_id}` | CLI: `{cli}`"
-                f"{resume_info}{dir_info}",
+                f"\nFresh session (hook will capture session ID)"
+                f"{dir_info}",
             )
         else:
             # No path — for now, tell user to provide one

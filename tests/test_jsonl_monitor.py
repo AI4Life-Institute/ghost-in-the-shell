@@ -681,3 +681,200 @@ class TestReadNewEntries:
 
         result = JsonlMonitor._read_new_entries(jsonl_file, 0)
         assert result == ["valid"]
+
+
+# -- _find_jsonl_file robustness --------------------------------------------
+
+
+class TestFindJsonlFile:
+    """Test the robust JSONL file finder with various dir-hash formats."""
+
+    def test_exact_dir_hash_match(self, monitor, tmp_path):
+        """Exact dir-hash (slashes replaced by dashes) should work."""
+        projects = tmp_path / "projects"
+        monitor._projects_path = projects
+
+        work_dir = "/data/projects/my-app"
+        dir_hash = "-data-projects-my-app"
+        session_id = "aaaa-bbbb-cccc-dddd"
+
+        project_dir = projects / dir_hash
+        project_dir.mkdir(parents=True)
+        jsonl_file = project_dir / f"{session_id}.jsonl"
+        jsonl_file.write_text("{}\n")
+
+        binding = _make_binding(
+            cli_session_id=session_id, work_dir=work_dir
+        )
+
+        result = monitor._find_jsonl_file(binding)
+        assert result == jsonl_file
+
+    def test_scan_fallback_when_hash_differs(self, monitor, tmp_path):
+        """When dir-hash doesn't match exactly, scanning should find it."""
+        projects = tmp_path / "projects"
+        monitor._projects_path = projects
+
+        # Real path has underscore, but Claude Code stored it with dash
+        work_dir = "/Volumes/Crucial_8T/src/project"
+        session_id = "1111-2222-3333-4444"
+
+        # Create dir with dashes (as Claude Code actually does)
+        actual_dir = projects / "-Volumes-Crucial-8T-src-project"
+        actual_dir.mkdir(parents=True)
+        jsonl_file = actual_dir / f"{session_id}.jsonl"
+        jsonl_file.write_text("{}\n")
+
+        binding = _make_binding(
+            cli_session_id=session_id, work_dir=work_dir
+        )
+
+        result = monitor._find_jsonl_file(binding)
+        assert result == jsonl_file
+
+    def test_no_projects_dir(self, monitor, tmp_path):
+        """Missing projects directory should return None."""
+        monitor._projects_path = tmp_path / "nonexistent"
+        binding = _make_binding()
+        assert monitor._find_jsonl_file(binding) is None
+
+    def test_no_session_id(self, monitor, tmp_path):
+        """Binding without session_id should return None."""
+        monitor._projects_path = tmp_path
+        binding = _make_binding(cli_session_id=None)
+        assert monitor._find_jsonl_file(binding) is None
+
+    def test_no_matching_file(self, monitor, tmp_path):
+        """No matching JSONL file should return None."""
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        monitor._projects_path = projects
+
+        binding = _make_binding(cli_session_id="nonexistent-session")
+        assert monitor._find_jsonl_file(binding) is None
+
+
+# -- Session map integration ------------------------------------------------
+
+
+class TestSessionMapIntegration:
+    """Test that session_map.json updates flow through to JSONL monitoring."""
+
+    @pytest.mark.asyncio
+    async def test_session_map_updates_binding(self, tmp_path):
+        """Session map with matching window_id should update binding's session."""
+        # Set up session_map.json
+        gits_dir = tmp_path / ".gits"
+        gits_dir.mkdir()
+        session_map = {
+            "gits:@5": {
+                "session_id": "new-session-abc",
+                "cwd": "/tmp/project",
+            }
+        }
+        (gits_dir / "session_map.json").write_text(json.dumps(session_map))
+
+        # Set up monitor with patched session_map location
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/project")
+        binding.window_id = "@5"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor._read_session_map = lambda: session_map
+
+        await monitor._poll_once()
+
+        session_mgr.update_cli_session_id.assert_called_once_with(
+            binding.channel_id, "new-session-abc"
+        )
+        assert binding.cli_session_id == "new-session-abc"
+
+    @pytest.mark.asyncio
+    async def test_session_map_with_different_tmux_session_name(self, tmp_path):
+        """Session map key with non-'gits' prefix should still match by window_id suffix."""
+        session_map = {
+            "my-custom-session:@7": {
+                "session_id": "sess-xyz",
+                "cwd": "/tmp/project",
+            }
+        }
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/project")
+        binding.window_id = "@7"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor._read_session_map = lambda: session_map
+
+        await monitor._poll_once()
+
+        session_mgr.update_cli_session_id.assert_called_once_with(
+            binding.channel_id, "sess-xyz"
+        )
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_session_map_to_jsonl_callback(self, tmp_path):
+        """End-to-end: session_map provides session_id, then JSONL file is monitored."""
+        projects = tmp_path / "projects"
+        session_id = "e2e-session-1234"
+
+        # Create JSONL file in a project directory
+        project_dir = projects / "-tmp-project"
+        project_dir.mkdir(parents=True)
+        jsonl_file = project_dir / f"{session_id}.jsonl"
+        # Write initial content (will be skipped on first poll)
+        _make_jsonl_file(jsonl_file, [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "old"}]},
+            }
+        ])
+
+        session_map = {
+            "gits:@10": {
+                "session_id": session_id,
+                "cwd": "/tmp/project",
+            }
+        }
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/project")
+        binding.window_id = "@10"
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr,
+            poll_interval=0.05,
+            projects_path=projects,
+        )
+        monitor.on_message(callback)
+        monitor._read_session_map = lambda: session_map
+
+        # Poll 1: picks up session_id from session_map, skips JSONL to end
+        await monitor._poll_once()
+        assert binding.cli_session_id == session_id
+        callback.assert_not_called()  # first poll skips to end
+
+        # Append new content to JSONL
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "Hello from the new session!"}]
+                },
+            }) + "\n")
+
+        # Poll 2: should detect new content and fire callback
+        await monitor._poll_once()
+        callback.assert_called_once()
+        assert callback.call_args[0][0] == binding.channel_id
+        assert callback.call_args[0][1] == "Hello from the new session!"

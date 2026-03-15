@@ -33,7 +33,7 @@ class TestBuildLaunchCommand:
 
     def test_claude_without_session_id(self, launcher):
         cmd = launcher.build_launch_command(cli="claude")
-        assert cmd == "claude --continue"
+        assert cmd == "claude"
 
     def test_codex_with_session_id(self, launcher):
         cmd = launcher.build_launch_command(cli="codex", session_id="xyz")
@@ -41,7 +41,7 @@ class TestBuildLaunchCommand:
 
     def test_codex_without_session_id(self, launcher):
         cmd = launcher.build_launch_command(cli="codex")
-        assert cmd == "codex resume --last"
+        assert cmd == "codex"
 
     def test_opencode_with_session_id(self, launcher):
         cmd = launcher.build_launch_command(cli="opencode", session_id="sess1")
@@ -49,7 +49,7 @@ class TestBuildLaunchCommand:
 
     def test_opencode_without_session_id(self, launcher):
         cmd = launcher.build_launch_command(cli="opencode")
-        assert cmd == "opencode --continue"
+        assert cmd == "opencode"
 
     def test_unknown_cli(self, launcher):
         cmd = launcher.build_launch_command(cli="unknown-cli")

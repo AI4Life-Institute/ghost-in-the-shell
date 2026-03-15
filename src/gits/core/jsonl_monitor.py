@@ -200,15 +200,21 @@ class JsonlMonitor:
         """
         bindings = self._session_mgr.list_bindings()
 
-        # Try to pick up session IDs from session_map.json
+        # Try to pick up session IDs from session_map.json.
+        # The hook writes keys as "{tmux_session_name}:{window_id}".
+        # Rather than guessing the session name we search all keys for
+        # a suffix matching ":{window_id}".
         session_map = self._read_session_map()
         if session_map:
             for binding in bindings:
                 if not binding.window_id:
                     continue
-                # session_map keys use "gits:{window_id}" format
-                map_key = f"gits:{binding.window_id}"
-                entry = session_map.get(map_key)
+                # Find matching entry by window_id suffix
+                entry = None
+                for key, val in session_map.items():
+                    if key.endswith(f":{binding.window_id}"):
+                        entry = val
+                        break
                 if not entry or not isinstance(entry, dict):
                     continue
                 new_sid = entry.get("session_id", "")
@@ -315,7 +321,11 @@ class JsonlMonitor:
         Claude Code stores sessions at:
             ~/.claude/projects/<dir-hash>/<session_id>.jsonl
 
-        where dir-hash is the work_dir path with / replaced by -.
+        The dir-hash format is the work_dir path with ``/`` replaced by
+        ``-``.  However the exact escaping can vary (e.g. underscores
+        may or may not be replaced), so we try the exact hash first and
+        fall back to scanning all project directories for a matching
+        session file.
         """
         if not binding.cli_session_id or not binding.work_dir:
             return None
@@ -324,16 +334,38 @@ class JsonlMonitor:
         if not claude_projects.exists():
             return None
 
-        # Claude Code directory hash: path with / replaced by -
+        session_filename = f"{binding.cli_session_id}.jsonl"
+
+        # Strategy 1: exact dir-hash (fast path)
         dir_hash = binding.work_dir.replace("/", "-")
         project_dir = claude_projects / dir_hash
+        candidate = project_dir / session_filename
+        if candidate.exists():
+            return candidate
 
-        if not project_dir.exists():
-            return None
+        # Strategy 2: strip leading dash variant
+        dir_hash_stripped = dir_hash.lstrip("-")
+        if dir_hash_stripped != dir_hash:
+            candidate = claude_projects / dir_hash_stripped / session_filename
+            if candidate.exists():
+                return candidate
 
-        jsonl_file = project_dir / f"{binding.cli_session_id}.jsonl"
-        if jsonl_file.exists():
-            return jsonl_file
+        # Strategy 3: scan all project directories for the session file.
+        # This handles cases where the dir-hash format differs from our
+        # expectation (e.g. underscores replaced with dashes).
+        try:
+            for d in claude_projects.iterdir():
+                if not d.is_dir():
+                    continue
+                candidate = d / session_filename
+                if candidate.exists():
+                    logger.debug(
+                        "Found JSONL via scan: %s (expected dir_hash=%s, actual=%s)",
+                        candidate, dir_hash, d.name,
+                    )
+                    return candidate
+        except OSError:
+            pass
 
         return None
 

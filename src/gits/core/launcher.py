@@ -61,12 +61,16 @@ class CodingCLILauncher:
         session_id: str | None = None,
         work_dir: str | None = None,
     ) -> str:
-        """Build the CLI launch/resume command string."""
+        """Build the CLI launch/resume command string.
+
+        When *session_id* is provided the CLI is launched in resume mode.
+        When it is ``None`` or empty, a **fresh** session is started
+        (just the bare CLI command — no ``--continue``).
+        """
         templates = RESUME_TEMPLATES.get(cli)
         if templates and session_id:
             return templates["by_id"].format(id=session_id)
-        if templates:
-            return templates["latest"]
+        # No session_id → start fresh (don't use --continue)
         return cli
 
     def discover_sessions(self, work_dir: str, cli: str = "claude") -> list[CLISession]:
@@ -83,12 +87,32 @@ class CodingCLILauncher:
         if not claude_projects.exists():
             return []
 
-        # Claude Code uses directory path with / replaced by - as hash
+        # Claude Code uses directory path with / replaced by - as hash.
+        # The exact escaping may vary, so try exact match first then scan.
         dir_hash = work_dir.replace("/", "-")
 
         project_dir = claude_projects / dir_hash
         if not project_dir.exists():
-            return []
+            # Try without leading dash
+            alt = claude_projects / dir_hash.lstrip("-")
+            if alt.exists():
+                project_dir = alt
+            else:
+                # Scan for a project dir whose name roughly matches
+                try:
+                    for d in claude_projects.iterdir():
+                        if not d.is_dir():
+                            continue
+                        # Normalise both to lowercase dashes for comparison
+                        norm_d = d.name.lower().replace("_", "-")
+                        norm_hash = dir_hash.lower().replace("_", "-").lstrip("-")
+                        if norm_d == norm_hash or norm_d.lstrip("-") == norm_hash:
+                            project_dir = d
+                            break
+                    else:
+                        return []
+                except OSError:
+                    return []
 
         sessions: list[CLISession] = []
         for jsonl_file in project_dir.glob("*.jsonl"):
