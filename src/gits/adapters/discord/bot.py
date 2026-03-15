@@ -279,8 +279,8 @@ class DiscordAdapter(PlatformAdapter):
         # ── A. Native Commands ────────────────────────────────────────
 
         @tree.command(name="bind", description="Bind this channel to a project directory")
-        @app_commands.describe(path="Project directory path (optional)")
-        async def cmd_bind(interaction: discord.Interaction, path: str | None = None):
+        @app_commands.describe(path="Project directory path")
+        async def cmd_bind(interaction: discord.Interaction, path: str):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
                     "Access denied.", ephemeral=True
@@ -291,6 +291,13 @@ class DiscordAdapter(PlatformAdapter):
                 await self._engine.handle_bind(
                     str(interaction.channel_id), path, interaction
                 )
+
+        @cmd_bind.autocomplete("path")
+        async def _bind_path_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
+            """Autocomplete directory paths as the user types."""
+            return self._autocomplete_paths(current)
 
         @tree.command(name="unbind", description="Unbind this channel")
         async def cmd_unbind(interaction: discord.Interaction):
@@ -484,6 +491,74 @@ class DiscordAdapter(PlatformAdapter):
     def _check_interaction_access(self, interaction: discord.Interaction) -> bool:
         guild_id = interaction.guild_id
         return self._check_access(interaction.user.id, guild_id)
+
+    # ------------------------------------------------------------------
+    # Path autocomplete
+    # ------------------------------------------------------------------
+
+    def _autocomplete_paths(self, current: str) -> list[app_commands.Choice[str]]:
+        """Build autocomplete choices for directory paths.
+
+        Starts from the bot's working directory (cwd). As the user types,
+        lists subdirectories matching the input. Returns up to 25 choices.
+        """
+        from pathlib import Path
+
+        choices: list[app_commands.Choice[str]] = []
+
+        if not current or current == ".":
+            # Show cwd and its subdirectories
+            base = Path.cwd()
+            choices.append(app_commands.Choice(name=f". ({base.name}/)", value=str(base)))
+            try:
+                for entry in sorted(base.iterdir()):
+                    if entry.is_dir() and not entry.name.startswith("."):
+                        choices.append(
+                            app_commands.Choice(
+                                name=entry.name + "/", value=str(entry)
+                            )
+                        )
+                        if len(choices) >= 25:
+                            break
+            except OSError:
+                pass
+        else:
+            # User is typing a path — complete it
+            p = Path(current).expanduser()
+            if not p.is_absolute():
+                p = Path.cwd() / p
+
+            if p.is_dir():
+                # List contents of this directory
+                parent = p
+            else:
+                # Partial name — list parent dir, filter by prefix
+                parent = p.parent
+
+            prefix = p.name if not p.is_dir() else ""
+
+            # Always offer the typed path itself if it's a valid dir
+            if p.is_dir():
+                choices.append(
+                    app_commands.Choice(name=f"✅ {p.name or str(p)}/", value=str(p))
+                )
+
+            try:
+                for entry in sorted(parent.iterdir()):
+                    if not entry.is_dir() or entry.name.startswith("."):
+                        continue
+                    if prefix and not entry.name.lower().startswith(prefix.lower()):
+                        continue
+                    display = entry.name + "/"
+                    choices.append(
+                        app_commands.Choice(name=display, value=str(entry))
+                    )
+                    if len(choices) >= 25:
+                        break
+            except OSError:
+                pass
+
+        return choices[:25]
 
     # ------------------------------------------------------------------
     # Button builder
