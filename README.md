@@ -61,6 +61,14 @@ gits hook --install-opencode  # OpenCode (plugin in opencode.json config)
 gits start
 ```
 
+### Dev mode
+
+Auto-restart on source file changes:
+
+```bash
+gits start --dev
+```
+
 ## Usage
 
 ### Basic workflow

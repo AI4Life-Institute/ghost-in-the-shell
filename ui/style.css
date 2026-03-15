@@ -460,6 +460,77 @@ table.dbt tbody td.status{font-weight:500}
 .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:rgba(0,0,0,.30)}
 .empty-ico{font-size:36px}
 .empty-txt{font-size:13px}
+.empty-sub{font-size:12px;color:rgba(0,0,0,.28)}
+
+/* ── Pane focus mode ── */
+.ws-panel.focus{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column}
+.wsp-head .focus-exit-btn{margin-left:auto;padding:2px 8px;border-radius:6px;background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.10);font-size:11px;color:rgba(0,0,0,.50);cursor:pointer;transition:background .15s;flex-shrink:0}
+.wsp-head .focus-exit-btn:hover{background:rgba(0,0,0,.12);color:rgba(0,0,0,.75)}
+
+/* ── Build empty state ── */
+.build-empty-state{position:absolute;inset:38px 0 0;display:flex;align-items:center;justify-content:center;z-index:10;pointer-events:none}
+.build-empty-state[style*="display:none"]{display:none!important}
+.build-empty-inner{display:flex;flex-direction:column;align-items:center;gap:16px;pointer-events:all;max-width:500px;width:100%;padding:0 20px}
+.build-empty-title{font-size:20px;font-weight:700;color:rgba(0,0,0,.70);text-align:center}
+.build-empty-hints{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.build-hint-chip{padding:5px 12px;border-radius:20px;background:rgba(255,255,255,.75);border:1px solid rgba(0,0,0,.11);font-size:12px;color:rgba(0,0,0,.55);cursor:pointer;transition:all .15s;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.build-hint-chip:hover{background:rgba(255,255,255,.95);color:rgba(0,0,0,.80);border-color:rgba(99,102,241,.30)}
+.build-empty-row{display:flex;gap:7px;align-items:center;width:100%;background:rgba(255,255,255,.88);border:1px solid rgba(0,0,0,.10);border-radius:18px;padding:7px 7px 7px 14px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.build-empty-inp{flex:1;background:transparent;border:none;outline:none;font-family:inherit;font-size:13.5px;color:rgba(0,0,0,.80)}
+.build-empty-inp::placeholder{color:rgba(0,0,0,.26)}
+
+/* ── Agents empty state ── */
+.agents-empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+
+/* ── Auto-repair badge (Loop Agent card) ── */
+.fleet-repaired-badge{font-size:10px;font-weight:600;color:#16a34a;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.20);border-radius:6px;padding:2px 7px;margin-top:3px;display:inline-flex;align-items:center;gap:4px}
+
+/* ── Skill run action row (after stream) ── */
+.sk-stream-actions{display:flex;align-items:center;gap:8px;padding:8px 0 4px}
+.sk-copy-btn{padding:4px 11px;border-radius:7px;background:rgba(255,255,255,.80);border:1px solid rgba(0,0,0,.12);font-family:inherit;font-size:12px;font-weight:500;color:rgba(0,0,0,.60);cursor:pointer;transition:background .15s}
+.sk-copy-btn:hover{background:rgba(255,255,255,.96);color:rgba(0,0,0,.80)}
+.sk-data-link{font-size:12px;font-weight:600;color:#4f46e5;cursor:pointer;background:none;border:none;font-family:inherit;padding:0}
+.sk-data-link:hover{text-decoration:underline}
+.sk-done-label{font-size:12px;font-weight:700;color:#16a34a;display:flex;align-items:center;gap:4px}
+
+/* ── Run history: expand arrow + replay ── */
+.sk-run-item{cursor:pointer}
+.sk-run-expand{width:16px;height:16px;border-radius:4px;background:rgba(0,0,0,.06);display:flex;align-items:center;justify-content:center;font-size:10px;color:rgba(0,0,0,.40);flex-shrink:0;transition:background .12s}
+.sk-run-item:hover .sk-run-expand{background:rgba(0,0,0,.10)}
+.sk-run-detail{display:none;padding:8px 12px 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:6px}
+.sk-run-detail.open{display:block}
+.sk-run-replay{padding:3px 9px;border-radius:6px;background:rgba(99,102,241,.10);border:1px solid rgba(99,102,241,.18);font-family:inherit;font-size:11px;font-weight:600;color:#4f46e5;cursor:pointer;transition:background .15s;margin-top:6px}
+.sk-run-replay:hover{background:rgba(99,102,241,.18)}
+
+/* ── New Skill modal ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.32);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:600;display:none;align-items:center;justify-content:center}
+.modal-overlay.on{display:flex}
+.modal-box{background:rgba(255,255,255,.97);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border:1px solid rgba(0,0,0,.12);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.20);width:480px;max-width:90vw;overflow:hidden}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px;border-bottom:1px solid rgba(0,0,0,.07)}
+.modal-title{font-size:14px;font-weight:700;color:rgba(0,0,0,.85)}
+.modal-close-btn{width:26px;height:26px;border-radius:7px;background:rgba(0,0,0,.07);border:none;cursor:pointer;font-size:13px;color:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;transition:background .15s}
+.modal-close-btn:hover{background:rgba(0,0,0,.12)}
+.modal-body{padding:16px 20px}
+.modal-lbl{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.38);margin-bottom:8px}
+.modal-ta{width:100%;background:rgba(255,255,255,.88);border:1px solid rgba(0,0,0,.11);border-radius:10px;padding:9px 12px;font-family:inherit;font-size:13px;color:rgba(0,0,0,.80);outline:none;resize:none;transition:border-color .15s;line-height:1.5}
+.modal-ta:focus{border-color:rgba(99,102,241,.42);box-shadow:0 0 0 2px rgba(99,102,241,.09)}
+.modal-ta::placeholder{color:rgba(0,0,0,.30)}
+.modal-gen-btn{margin-top:12px;padding:8px 18px;border-radius:10px;background:#6366f1;border:none;font-family:inherit;font-size:13px;font-weight:700;color:#fff;cursor:pointer;box-shadow:0 2px 10px rgba(99,102,241,.32);transition:background .15s}
+.modal-gen-btn:hover{background:#5254cc}
+.modal-sep{height:1px;background:rgba(0,0,0,.07);margin:0 20px}
+.modal-preview-box{margin:14px 20px 0;padding:12px 14px;background:rgba(248,250,252,.95);border:1px solid rgba(0,0,0,.10);border-radius:10px;font-size:12.5px;color:rgba(0,0,0,.75);line-height:1.6}
+.modal-preview-box strong{color:rgba(0,0,0,.85);font-weight:600}
+.modal-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:14px 20px 16px}
+.modal-btn-sec{padding:7px 16px;border-radius:9px;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.10);font-family:inherit;font-size:12.5px;font-weight:500;color:rgba(0,0,0,.60);cursor:pointer;transition:background .15s}
+.modal-btn-sec:hover{background:rgba(0,0,0,.10)}
+
+/* ── Data source header ── */
+.db-source-badge{font-size:11px;color:rgba(0,0,0,.40);font-weight:400;margin-left:10px}
+.db-source-badge a{color:#4f46e5;cursor:pointer;text-decoration:none;font-weight:500}
+.db-source-badge a:hover{text-decoration:underline}
+
+/* ── Data empty state (inline in table) ── */
+.db-empty-row td{text-align:center;padding:40px!important;color:rgba(0,0,0,.30);font-style:italic}
 
 /* ── Live browser screenshot view ── */
 .drawer-live-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden}

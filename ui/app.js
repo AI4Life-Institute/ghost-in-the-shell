@@ -92,6 +92,23 @@ const AGENTS = {
         ],
         hitl: null,
       }
+    },
+    {
+      id: 'weather-reporter',
+      name: 'Weather Reporter',
+      status: 'running',
+      autoRepaired: true,
+      sub: 'Every 4h · next 2h',
+      type: 'Loop Agent',
+      detail: {
+        running: true,
+        steps: 2, totalSteps: 4, elapsed: '1s',
+        log: [
+          {ico:'⚡', action:'Evaluate', desc:'GET /api/weather/today', out:'→ 18°C, partly cloudy', ts:'16:00:00', done:true},
+          {ico:'💾', action:'Save', desc:'INSERT weather_log', out:'→ ok', ts:'16:00:01', done:true},
+        ],
+        hitl: null,
+      }
     }
   ],
   reactive: [
@@ -99,13 +116,28 @@ const AGENTS = {
       id: 'discord-webhook',
       name: 'Discord Webhook',
       status: 'listening',
-      sub: 'Listening · #dev channel',
+      sub: 'Trigger: Discord · #dev · ● Connected',
       type: 'Reactive Agent',
       detail: {
         running: false,
         steps: 0, totalSteps: 0, elapsed: '—',
         log: [],
         hitl: null,
+      }
+    },
+    {
+      id: 'notion-trigger',
+      name: 'Notion Page Watcher',
+      status: 'waiting',
+      sub: 'Trigger: Notion webhook · ⚠ Needs approval',
+      type: 'Reactive Agent',
+      detail: {
+        running: false,
+        steps: 1, totalSteps: 3, elapsed: '4s',
+        log: [
+          {ico:'🔔', action:'Triggered', desc:'Page "Week 12" updated in Notion', out:'', ts:'14:45:10', done:true},
+        ],
+        hitl: {msg: 'Export "Week 12" page as PDF and save to Data?', pending:true},
       }
     }
   ]
@@ -175,18 +207,27 @@ const SKILLS = {
 
 const DB_COLLECTIONS = {
   fromAgents: [
-    {id:'btc_prices',    name:'btc_prices',    rows:128, updated:'2m ago', icon:'📊', table:'btc_prices'},
-    {id:'hn_links',      name:'hn_links',       rows:340, updated:'2h ago', icon:'🔗', table:'hn_links'},
-    {id:'nash_reports',  name:'nash_reports',   rows:47,  updated:'10m ago',icon:'📄', table:'nash_reports'},
+    {id:'btc_prices',    name:'btc_prices',    rows:128, updated:'2m ago', icon:'📊', table:'btc_prices',   sourceAgent:'btc-monitor'},
+    {id:'hn_links',      name:'hn_links',       rows:340, updated:'2h ago', icon:'🔗', table:'hn_links',     sourceAgent:'hn-digest-loop'},
+    {id:'nash_reports',  name:'nash_reports',   rows:47,  updated:'10m ago',icon:'📄', table:'nash_reports', sourceAgent:'nash-reporter'},
   ],
   fromSkills: [
-    {id:'market_scans',  name:'market_scans',   rows:86,  updated:'14m ago',icon:'📈', table:'market_scans'},
-    {id:'screenshots',   name:'screenshots',    rows:12,  updated:'1h ago', icon:'🖼', table:'screenshots'},
+    {id:'market_scans',  name:'market_scans',   rows:86,  updated:'14m ago',icon:'📈', table:'market_scans', sourceSkill:'market'},
+    {id:'screenshots',   name:'screenshots',    rows:12,  updated:'1h ago', icon:'🖼', table:'screenshots',  sourceSkill:'screenshot'},
   ],
   manual: [
     {id:'notes',         name:'notes',          rows:8,   updated:'3d ago', icon:'📝', table:'notes'},
   ]
 };
+
+// Map table IDs to source info for the data view header
+const TABLE_SOURCE_MAP = {};
+DB_COLLECTIONS.fromAgents.forEach(c => {
+  TABLE_SOURCE_MAP[c.table] = {type:'agent', id:c.sourceAgent};
+});
+DB_COLLECTIONS.fromSkills.forEach(c => {
+  TABLE_SOURCE_MAP[c.table] = {type:'skill', id:c.sourceSkill};
+});
 
 const DB = {
   tasks: {
@@ -262,6 +303,7 @@ const DATA_FILES = [
 let curMode = 'build';
 let activeWsTab = 0;
 let devMode = false;
+let paneFocused = false;
 let curAgentId = 'nash-reporter';
 let curProfileId = 'personal-chrome';
 let curSkill = 'market';
@@ -270,6 +312,7 @@ let sortCol = null, sortDir = 1;
 let filterText = '';
 let slashMenuOpen = false;
 let toastTimer = null;
+let skillRunExpanded = {}; // tracks which run history entries are expanded
 
 // ── Utility ───────────────────────────────────────────────────────────────
 function esc(s) {
@@ -300,8 +343,21 @@ function countRunningAgents() {
   let n = 0;
   AGENTS.browser.profiles.forEach(p => p.agents.forEach(a => { if (a.status === 'running') n++; }));
   AGENTS.loop.forEach(a => { if (a.status === 'running') n++; });
-  AGENTS.reactive.forEach(a => { if (a.status === 'listening') n++; });
+  AGENTS.reactive.forEach(a => { if (a.status === 'listening' || a.status === 'running') n++; });
   return n;
+}
+
+function countWaitingAgents() {
+  let n = 0;
+  AGENTS.browser.profiles.forEach(p => p.agents.forEach(a => { if (a.status === 'waiting') n++; }));
+  AGENTS.loop.forEach(a => { if (a.status === 'waiting') n++; });
+  AGENTS.reactive.forEach(a => { if (a.status === 'waiting') n++; });
+  return n;
+}
+
+function updateAgentsWarnBadge() {
+  const warnEl = document.querySelector('.mode[data-mode="agents"] .mode-badge.warn');
+  if (warnEl) warnEl.style.display = countWaitingAgents() > 0 ? '' : 'none';
 }
 
 // ── Titlebar ───────────────────────────────────────────────────────────────
@@ -333,6 +389,32 @@ function toggleDevMode() {
     const inp = document.querySelector(`#wsp-${activeWsTab} .wsp-tinp`);
     if (inp) setTimeout(() => inp.focus(), 50);
   }
+}
+
+function paneFocus(idx) {
+  if (paneFocused) return;
+  paneFocused = true;
+  const panel = document.getElementById('wsp-' + idx);
+  if (!panel) return;
+  panel.classList.add('focus');
+  // add exit button to pane header
+  const head = panel.querySelector('.wsp-head');
+  if (head && !head.querySelector('.focus-exit-btn')) {
+    const btn = document.createElement('button');
+    btn.className = 'focus-exit-btn';
+    btn.innerHTML = '⤢ Exit focus';
+    btn.onclick = e => { e.stopPropagation(); paneFocusExit(); };
+    head.appendChild(btn);
+  }
+}
+
+function paneFocusExit() {
+  paneFocused = false;
+  document.querySelectorAll('.ws-panel.focus').forEach(p => {
+    p.classList.remove('focus');
+    const btn = p.querySelector('.focus-exit-btn');
+    if (btn) btn.remove();
+  });
 }
 
 function addWindow() {
@@ -458,8 +540,34 @@ let ri = 0;
 
 function ar(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 100) + 'px'; }
 
+function buildHint(el) {
+  const inp = document.getElementById('build-empty-inp');
+  if (inp) { inp.value = el.textContent; inp.focus(); }
+}
+
+function buildEmptyKey(e) {
+  if (e.key === 'Enter') { e.preventDefault(); buildEmptySend(); }
+}
+
+function buildEmptySend() {
+  const inp = document.getElementById('build-empty-inp');
+  const txt = inp ? inp.value.trim() : '';
+  if (!txt) return;
+  // Switch to build pane and inject the message
+  document.getElementById('build-empty').style.display = 'none';
+  const ta = document.getElementById('build-inp');
+  if (ta) { ta.value = txt; send(); }
+}
+
+function checkBuildEmpty() {
+  const panels = document.querySelectorAll('.ws-panel:not(.ws-panel-add)');
+  const emptyEl = document.getElementById('build-empty');
+  if (emptyEl) emptyEl.style.display = panels.length === 0 ? 'flex' : 'none';
+}
+
 function hk(e) {
   if (e.key === 'Escape') {
+    if (paneFocused) { paneFocusExit(); return; }
     const menu = document.getElementById('slash-menu-0');
     if (menu) menu.classList.remove('on');
     return;
@@ -543,6 +651,9 @@ function _fleetCardHTML(a) {
     waiting:  ['fleet-badge-waiting',  '⚠ Waiting'],
   };
   const [badgeCls, badgeTxt] = badgeMap[a.status] || ['fleet-badge-idle', a.status];
+  const repairBadge = a.autoRepaired
+    ? `<div class="fleet-repaired-badge">🤖 Auto-repaired by Build Agent</div>`
+    : '';
   return `<div class="fleet-card ${a.status}${curAgentId===a.id?' on':''}" onclick="openFleetDrawer(this,'${a.id}')">
     <div class="fleet-card-top">
       <div class="fleet-card-name">${esc(a.name)}</div>
@@ -550,10 +661,19 @@ function _fleetCardHTML(a) {
     </div>
     <div class="fleet-card-sub">${esc(a.sub)}</div>
     <div class="fleet-card-type">${esc(a.type)}</div>
+    ${repairBadge}
   </div>`;
 }
 
 function renderFleet() {
+  // empty state check
+  const totalAgents = AGENTS.browser.profiles.reduce((n,p)=>n+p.agents.length,0)
+    + AGENTS.loop.length + AGENTS.reactive.length;
+  const emptyEl = document.getElementById('agents-empty');
+  const scrollEl = document.getElementById('fleet-scroll');
+  if (emptyEl) emptyEl.style.display = totalAgents === 0 ? 'flex' : 'none';
+  if (scrollEl) scrollEl.style.display = totalAgents === 0 ? 'none' : '';
+
   // Profile cards
   const profileRow = document.getElementById('profile-row');
   if (profileRow) {
@@ -654,13 +774,25 @@ function _renderFleetDrawer(agentId) {
   // live browser screenshot view (Browser Agents only)
   const liveView = a.type === 'Browser Agent' ? _mockBrowserScreen(a) : '';
 
+  // Chrome profile banner for Browser Agents (tasks 1.15 + 1.16)
+  const chromeBanner = a.type === 'Browser Agent' ? `
+    <div class="ag-chrome-banner">
+      <div class="ag-chrome-banner-inner">
+        <span>🌐</span>
+        <strong>Real Chrome · ${esc(a.profile || 'Personal Chrome')}</strong>
+      </div>
+      <div style="font-size:11px;color:rgba(0,0,0,.45);margin-top:3px">Your sessions. Your cookies. No re-logging in.</div>
+    </div>` : '';
+
   // two-column bottom section
   const colLeft = `
     <div class="drawer-col-left">
+      ${chromeBanner}
       <div class="ag-run-bar"><div class="ag-run-status">${runProgress}</div></div>
       <div class="ag-actions">
         <button class="ag-btn">⏸ Pause</button>
         <button class="ag-btn">▶ Run Now</button>
+        <button class="ag-btn" style="color:#dc2626;border-color:rgba(220,38,38,.25)" onclick="showToast('Agent deleted (simulated)')">🗑 Delete</button>
         <button class="ag-btn link" onclick="setMode('data')">View in Data →</button>
       </div>
     </div>`;
@@ -808,21 +940,35 @@ function renderSkillDetail(id) {
   const sk = SKILLS[id];
   if (!sk) return;
 
-  const runs = sk.runs.map(r => `
-    <div class="sk-run-item">
+  const runs = sk.runs.map((r, ri) => {
+    const runKey = id + '_' + ri;
+    const isExpanded = !!skillRunExpanded[runKey];
+    const statusLabel = r.status === 'done' ? '✓ Done' : r.status === 'fail' ? '✗ Failed' : '⏳ Running';
+    const debugBlock = r.error ? `
+      <div class="sk-debug">
+        <div class="sk-debug-hd">🤖 AI Debug</div>
+        <div class="sk-debug-msg">${esc(r.error.msg)}</div>
+        <div class="sk-debug-ai">${esc(r.error.ai)}</div>
+        <button class="sk-debug-fix" onclick="setMode('build')">Apply fix in Build →</button>
+      </div>` : '';
+    return `
+    <div class="sk-run-item" onclick="toggleRunExpand('${runKey}','${id}')">
       <div class="sk-run-status sk-run-${r.status}"></div>
       <div class="sk-run-info">
-        <div class="sk-run-ts">${r.ts}</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:11.5px;font-weight:600;color:${r.status==='done'?'#16a34a':r.status==='fail'?'#dc2626':'#4f46e5'}">${statusLabel}</span>
+          <span class="sk-run-ts">${r.ts}</span>
+        </div>
         <div class="sk-run-params-txt">${esc(r.params)}</div>
-        ${r.error ? `
-        <div class="sk-debug">
-          <div class="sk-debug-hd">🤖 AI Debug</div>
-          <div class="sk-debug-msg">${esc(r.error.msg)}</div>
-          <div class="sk-debug-ai">${esc(r.error.ai)}</div>
-          <button class="sk-debug-fix" onclick="setMode('build')">Apply fix in Build →</button>
-        </div>` : ''}
+        <div class="sk-run-detail${isExpanded?' open':''}">
+          ${r.elapsed ? `<div style="font-size:11px;color:rgba(0,0,0,.38);margin-bottom:4px">Elapsed: ${r.elapsed || '—'}</div>` : ''}
+          ${debugBlock}
+          <button class="sk-run-replay" onclick="replayRun(event,'${id}',${ri})">↺ Replay</button>
+        </div>
       </div>
-    </div>`).join('');
+      <div class="sk-run-expand">${isExpanded ? '▲' : '▼'}</div>
+    </div>`;
+  }).join('');
 
   document.getElementById('sk-detail').innerHTML = `
     <div class="sk-detail-head">
@@ -849,16 +995,43 @@ function renderSkillDetail(id) {
     </div>`;
 }
 
+function toggleRunExpand(runKey, skillId) {
+  skillRunExpanded[runKey] = !skillRunExpanded[runKey];
+  renderSkillDetail(skillId);
+}
+
+function replayRun(e, skillId, runIdx) {
+  e.stopPropagation();
+  const sk = SKILLS[skillId];
+  const run = sk.runs[runIdx];
+  if (!run) return;
+  // pre-fill param inputs from run params string
+  const inputs = document.querySelectorAll('#sk-detail .sk-param-inp');
+  const pairs = (run.params || '').split(' ');
+  inputs.forEach((inp, i) => {
+    const pair = pairs[i];
+    if (pair) inp.value = pair.split('=').slice(1).join('=');
+  });
+  showToast('Parameters pre-filled from past run. Click Run to execute.');
+}
+
 function runSkill(id) {
   const sk = SKILLS[id];
-  sk.runs.unshift({status:'run', ts:'Now', params:'...', error:null});
+  const startTime = Date.now();
+  sk.runs.unshift({status:'run', ts:'Now', params:'...', error:null, elapsed:null});
   renderSkillDetail(id);
 
   const streamWrap = document.getElementById('sk-stream-' + id);
   const streamPanel = document.getElementById('sk-stream-panel-' + id);
   if (streamWrap) streamWrap.style.display = 'block';
 
-  const lines = [
+  // simulate either success or failure based on skill
+  const willFail = id === 'csvproc'; // csvproc simulates a failure for demo
+  const lines = willFail ? [
+    {text:'Initializing skill…', cls:'dim'},
+    {text:'Loading ~/Downloads/data.csv…', cls:''},
+    {text:'ERROR: FileNotFoundError: ~/Downloads/data.csv not found', cls:'err'},
+  ] : [
     {text:'Initializing skill…', cls:'dim'},
     {text:'Fetching data…', cls:''},
     {text:'Processing rows…', cls:''},
@@ -870,7 +1043,48 @@ function runSkill(id) {
   const interval = setInterval(() => {
     if (!streamPanel || i >= lines.length) {
       clearInterval(interval);
-      if (sk.runs[0]) { sk.runs[0].status = 'done'; sk.runs[0].ts = 'Just now'; }
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
+      if (willFail) {
+        if (sk.runs[0]) {
+          sk.runs[0].status = 'fail';
+          sk.runs[0].ts = 'Just now';
+          sk.runs[0].elapsed = elapsed;
+          sk.runs[0].error = {
+            msg: 'FileNotFoundError: ~/Downloads/data.csv not found\n  at csv_processor.py:14',
+            ai: 'The file path does not exist. Make sure the CSV file is in your Downloads folder, or update the input path to point to the correct file location.'
+          };
+        }
+        // show auto-expanded debug inline in stream
+        if (streamPanel) {
+          const sep = document.createElement('div');
+          sep.className = 'sk-stream-line err';
+          sep.textContent = '─────────────────────────────';
+          streamPanel.appendChild(sep);
+          const dbg = document.createElement('div');
+          dbg.style.cssText = 'padding:8px 10px;margin-top:6px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.20);border-radius:7px';
+          dbg.innerHTML = `<div style="font-size:11px;font-weight:600;color:#dc2626;margin-bottom:4px">🤖 AI Debug</div>
+<div style="font-size:11.5px;color:rgba(0,0,0,.65);line-height:1.5">The file path does not exist. Make sure the CSV file is in your Downloads folder, or update the <code style="background:rgba(0,0,0,.07);padding:0 3px;border-radius:3px">input</code> path parameter to point to the correct file location.</div>
+<button class="sk-debug-fix" style="margin-top:8px" onclick="setMode('build')">Apply fix in Build →</button>`;
+          streamPanel.appendChild(dbg);
+          streamPanel.scrollTop = streamPanel.scrollHeight;
+        }
+      } else {
+        if (sk.runs[0]) {
+          sk.runs[0].status = 'done';
+          sk.runs[0].ts = 'Just now';
+          sk.runs[0].elapsed = elapsed;
+        }
+        // show success action row below stream
+        if (streamPanel) {
+          const output = streamPanel.textContent;
+          const actRow = document.createElement('div');
+          actRow.className = 'sk-stream-actions';
+          actRow.innerHTML = `<span class="sk-done-label">✓ Done · ${elapsed}</span>
+            <button class="sk-copy-btn" onclick="navigator.clipboard.writeText(${JSON.stringify(output)}).then(()=>showToast('Output copied!'))">Copy output</button>
+            <button class="sk-data-link" onclick="setMode('data')">View in Data →</button>`;
+          streamPanel.after(actRow);
+        }
+      }
       renderSkillDetail(id);
       return;
     }
@@ -880,6 +1094,70 @@ function runSkill(id) {
     if (streamPanel) { streamPanel.appendChild(d); streamPanel.scrollTop = streamPanel.scrollHeight; }
     i++;
   }, 350);
+}
+
+// ── New Skill Modal (task 1.27) ─────────────────────────────────────────────
+function openNewSkillModal() {
+  document.getElementById('new-skill-modal').classList.add('on');
+  const ta = document.getElementById('new-skill-desc');
+  if (ta) { ta.value = ''; setTimeout(() => ta.focus(), 80); }
+  const preview = document.getElementById('new-skill-preview');
+  if (preview) preview.style.display = 'none';
+}
+
+function closeNewSkillModal(e) {
+  if (e && e.target !== document.getElementById('new-skill-modal')) return;
+  document.getElementById('new-skill-modal').classList.remove('on');
+}
+
+function generateNewSkill() {
+  const desc = document.getElementById('new-skill-desc').value.trim();
+  if (!desc) return;
+  const btn = document.querySelector('.modal-gen-btn');
+  if (btn) btn.textContent = '⏳ Generating…';
+  setTimeout(() => {
+    if (btn) btn.textContent = '✨ Generate Skill';
+    // generate a mock skill preview
+    const words = desc.split(' ');
+    const name = words.slice(0,3).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    const preview = document.getElementById('new-skill-preview');
+    const content = document.getElementById('new-skill-preview-content');
+    if (content) content.innerHTML = `<strong>Name:</strong> ${esc(name)}<br>
+<strong>Description:</strong> ${esc(desc)}<br><br>
+<strong>Parameters:</strong><br>
+&nbsp; • <code>symbol</code> — ticker symbol (e.g. AAPL)<br>
+&nbsp; • <code>interval_min</code> — fetch interval in minutes<br><br>
+<strong>Actions:</strong><br>
+&nbsp; 1. Fetch data from API<br>
+&nbsp; 2. Transform and clean rows<br>
+&nbsp; 3. Save to Data`;
+    if (preview) preview.style.display = 'block';
+  }, 900);
+}
+
+function saveNewSkill() {
+  const desc = document.getElementById('new-skill-desc').value.trim();
+  const words = desc.split(' ');
+  const name = words.slice(0,3).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  const newId = 'custom_' + Date.now();
+  SKILLS[newId] = {
+    name,
+    desc,
+    params: [{key:'symbol', label:'Symbol', placeholder:'AAPL'}],
+    runs: []
+  };
+  // add to skill list
+  const scroll = document.getElementById('sk-scroll');
+  if (scroll) {
+    const el = document.createElement('div');
+    el.className = 'ski';
+    el.innerHTML = `<div class="ski-name">${esc(name)}</div><div class="ski-desc">${esc(desc)}</div><span class="ski-tag">custom</span>`;
+    el.onclick = () => { selSkill(el, newId); };
+    scroll.appendChild(el);
+  }
+  closeNewSkillModal();
+  showToast(`✓ Skill "${name}" saved`);
+  setTimeout(() => { setMode('skill'); selSkill(null, newId); }, 400);
 }
 
 // ── Data view ──────────────────────────────────────────────────────────────
@@ -900,6 +1178,22 @@ function renderTable() {
   const tname = document.getElementById('db-tname');
   if (tname) tname.textContent = curTableId;
 
+  // Source badge (task 1.29)
+  const sourceMeta = TABLE_SOURCE_MAP[curTableId];
+  let sourceBadgeHtml = '';
+  if (sourceMeta) {
+    if (sourceMeta.type === 'agent') {
+      const a = _flatAgent(sourceMeta.id);
+      const label = a ? esc(a.name) : esc(sourceMeta.id);
+      sourceBadgeHtml = `<span class="db-source-badge">Source: Agent — <a onclick="setMode('agents')">${label}</a></span>`;
+    } else if (sourceMeta.type === 'skill') {
+      const sk = SKILLS[sourceMeta.id];
+      const label = sk ? esc(sk.name) : esc(sourceMeta.id);
+      sourceBadgeHtml = `<span class="db-source-badge">Source: Skill — <a onclick="setMode('skill')">${label}</a></span>`;
+    }
+  }
+  if (tname) tname.innerHTML = curTableId + sourceBadgeHtml;
+
   let rows = data.rows.filter(r =>
     !filterText || Object.values(r).some(v => v && String(v).toLowerCase().includes(filterText))
   );
@@ -913,6 +1207,15 @@ function renderTable() {
 
   const cnt = document.getElementById('db-count');
   if (cnt) cnt.textContent = `${rows.length} row${rows.length!==1?'s':''}`;
+
+  // empty state (task 1.32)
+  if (rows.length === 0 && !filterText) {
+    const thead = document.getElementById('db-thead');
+    if (thead) thead.innerHTML = '';
+    const tbody = document.getElementById('db-tbody');
+    if (tbody) tbody.innerHTML = `<tr class="db-empty-row"><td colspan="99">No data yet. Run an Agent or Skill to start collecting.</td></tr>`;
+    return;
+  }
 
   const thead = document.getElementById('db-thead');
   if (thead) thead.innerHTML = '<tr>' + data.cols.map(c => {
@@ -1047,9 +1350,21 @@ document.addEventListener('click', e => {
   renderSkillDetail('market');
   renderTable();
   updateAgentBadge();
+  updateAgentsWarnBadge();
 
-  // toast after 3s — simulate agent completing
+  // build empty state check
+  checkBuildEmpty();
+
+  // toast after 3s — simulate agent completing (task 1.34)
   setTimeout(() => {
-    showToast('Nash-AI Reporter · ✓ Done → View in Agents', () => setMode('agents'));
+    showToast('✓ Nash-AI Reporter · Done → View in Agents', () => setMode('agents'));
+    // inject summary into build chat
+    addm('ai', '✓ Nash-AI Reporter finished: downloaded gs_q2_2024.pdf (2.4 MB). Results saved to Data.');
   }, 3000);
+
+  // toast after 7s — simulate HITL waiting (task 1.35)
+  setTimeout(() => {
+    showToast('⚠ Notion Page Watcher needs your input', () => setMode('agents'));
+    updateAgentsWarnBadge();
+  }, 7000);
 })();

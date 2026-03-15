@@ -1,6 +1,7 @@
 """Tests for Core Engine — command handlers with mocked tmux."""
 
 import asyncio
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,7 +9,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gits.config import Settings
-from gits.core.engine import Engine, _format_age
+from gits.core.engine import (
+    Engine,
+    _create_worktree,
+    _format_age,
+    _is_git_repo,
+    _is_worktree,
+    _remove_worktree,
+    _worktree_dirty_files,
+)
 from gits.core.launcher import CLISession
 from gits.core.tmux import WindowInfo
 
@@ -695,3 +704,510 @@ class TestSessionPickerFlow:
         asyncio.run(_test())
 
 
+# ------------------------------------------------------------------
+# /thread tests
+# ------------------------------------------------------------------
+
+
+class TestHandleThread:
+    def test_thread_creates_child_binding(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            adapter.create_thread = AsyncMock(return_value="thread-1")
+            engine.set_adapter(adapter)
+
+            # Bind parent
+            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
+
+            interaction = FakeInteraction()
+            await engine.handle_thread("ch-1", "fix the login bug", interaction)
+
+            # Thread should be created
+            adapter.create_thread.assert_called_once()
+
+            # Child binding should exist
+            b = engine.session_mgr.get_binding("thread-1")
+            assert b is not None
+            assert b.parent_channel_id == "ch-1"
+            assert b.work_dir == str(project_dir)
+
+        asyncio.run(_test())
+
+    def test_thread_unbound_channel(self, engine):
+        async def _test():
+            interaction = FakeInteraction()
+            await engine.handle_thread("ch-999", "hello", interaction)
+
+            reply = interaction.followup.send.call_args[0][0]
+            assert "not bound" in reply.lower()
+
+        asyncio.run(_test())
+
+    def test_thread_title_from_message(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            adapter.create_thread = AsyncMock(return_value="thread-1")
+            engine.set_adapter(adapter)
+
+            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
+            await engine.handle_thread("ch-1", "fix the login bug", FakeInteraction())
+
+            # Thread title should be derived from message
+            title_arg = adapter.create_thread.call_args[0][1]
+            assert "fix the login bug" in title_arg
+
+        asyncio.run(_test())
+
+
+class TestHandleThreadAuto:
+    def test_auto_creates_session_for_bound_parent(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
+
+            await engine.handle_thread_auto("thread-1", "ch-1", "do something")
+
+            b = engine.session_mgr.get_binding("thread-1")
+            assert b is not None
+            assert b.parent_channel_id == "ch-1"
+            assert b.work_dir == str(project_dir)
+
+        asyncio.run(_test())
+
+    def test_auto_ignores_unbound_parent(self, engine):
+        async def _test():
+            await engine.handle_thread_auto("thread-1", "ch-999", "hello")
+
+            # No binding should be created
+            assert engine.session_mgr.get_binding("thread-1") is None
+
+        asyncio.run(_test())
+
+
+# ------------------------------------------------------------------
+# /fork (worktree) tests
+# ------------------------------------------------------------------
+
+
+class TestHandleFork:
+    def test_fork_requires_git_repo(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
+
+            interaction = FakeInteraction()
+            with patch("gits.core.engine._is_git_repo", return_value=False):
+                await engine.handle_fork("ch-1", "refactor", interaction)
+
+            reply = interaction.followup.send.call_args[0][0]
+            assert "git repository" in reply.lower()
+
+        asyncio.run(_test())
+
+    def test_fork_creates_worktree(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+            wt_path = str(project_dir / ".worktrees" / "gits-refactor")
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            adapter.create_thread = AsyncMock(return_value="thread-1")
+            engine.set_adapter(adapter)
+
+            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
+
+            interaction = FakeInteraction()
+            with (
+                patch("gits.core.engine._is_git_repo", return_value=True),
+                patch("gits.core.engine._create_worktree", return_value=wt_path),
+            ):
+                await engine.handle_fork("ch-1", "refactor", interaction)
+
+            # Thread and binding should be created
+            adapter.create_thread.assert_called_once()
+            b = engine.session_mgr.get_binding("thread-1")
+            assert b is not None
+            assert b.work_dir == wt_path
+            assert b.parent_channel_id == "ch-1"
+
+        asyncio.run(_test())
+
+    def test_fork_unbound(self, engine):
+        async def _test():
+            interaction = FakeInteraction()
+            await engine.handle_fork("ch-999", "refactor", interaction)
+
+            reply = interaction.followup.send.call_args[0][0]
+            assert "not bound" in reply.lower()
+
+        asyncio.run(_test())
+
+
+# ------------------------------------------------------------------
+# Worktree utility tests
+# ------------------------------------------------------------------
+
+
+class TestWorktreeUtils:
+    def test_create_and_remove_worktree(self, tmp_path):
+        """Integration test: create a real git repo and worktree."""
+        import subprocess
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--allow-empty", "-m", "init"],
+            capture_output=True,
+        )
+
+        assert _is_git_repo(str(repo))
+
+        wt = _create_worktree(str(repo), "test-branch")
+        assert wt is not None
+        assert Path(wt).exists()
+        assert _is_worktree(wt)
+
+        # Clean worktree
+        assert _worktree_dirty_files(wt) == []
+
+        # Make it dirty
+        (Path(wt) / "newfile.txt").write_text("hello")
+        dirty = _worktree_dirty_files(wt)
+        assert len(dirty) > 0
+
+        # Remove
+        assert _remove_worktree(wt)
+        assert not Path(wt).exists()
+
+    def test_is_git_repo_false(self, tmp_path):
+        assert not _is_git_repo(str(tmp_path))
+
+    def test_is_worktree_false_for_regular_dir(self, tmp_path):
+        assert not _is_worktree(str(tmp_path))
+
+    def test_dirty_files_non_git(self, tmp_path):
+        assert _worktree_dirty_files(str(tmp_path)) == []
+
+
+# ------------------------------------------------------------------
+# Kill with children tests
+# ------------------------------------------------------------------
+
+
+class TestHandleKillWithChildren:
+    def test_kill_parent_kills_children(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            adapter.create_thread = AsyncMock(return_value="thread-1")
+            adapter.archive_thread = AsyncMock()
+            engine.set_adapter(adapter)
+
+            # Bind parent
+            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
+
+            # Manually create child binding
+            await engine.session_mgr.bind(
+                platform="discord",
+                channel_id="thread-1",
+                window_id="@2",
+                window_name="child",
+                work_dir=str(project_dir),
+                coding_cli="claude",
+                parent_channel_id="ch-1",
+            )
+
+            interaction = FakeInteraction()
+            with patch("gits.core.engine._is_worktree", return_value=False):
+                await engine.handle_kill("ch-1", interaction)
+
+            # Both parent and child should be unbound
+            assert engine.session_mgr.get_binding("ch-1") is None
+            assert engine.session_mgr.get_binding("thread-1") is None
+
+        asyncio.run(_test())
+
+
+# ------------------------------------------------------------------
+# E2E tests — full flow with mocked adapter + tmux
+# ------------------------------------------------------------------
+
+
+def _make_git_repo(path: Path) -> None:
+    """Create a real git repo with an initial commit."""
+    path.mkdir(exist_ok=True)
+    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "--allow-empty", "-m", "init"],
+        capture_output=True,
+        check=True,
+    )
+
+
+def _make_e2e_engine(settings, tmp_path):
+    """Create an engine with mocked tmux + adapter for E2E tests."""
+    e = Engine(settings)
+
+    window_counter = {"n": 0}
+
+    def _new_window(**kwargs):
+        window_counter["n"] += 1
+        wid = f"@{window_counter['n']}"
+        return WindowInfo(
+            window_id=wid,
+            name=kwargs.get("name", "win"),
+            cwd=kwargs.get("cwd", str(tmp_path)),
+        )
+
+    e.tmux = MagicMock()
+    e.tmux.ensure_session = AsyncMock()
+    e.tmux.create_window = AsyncMock(side_effect=_new_window)
+    e.tmux.kill_window = AsyncMock(return_value=True)
+    e.tmux.send_text = AsyncMock()
+    e.tmux.send_keys = AsyncMock()
+    e.tmux.window_exists = AsyncMock(return_value=True)
+    e.tmux.capture_pane_ansi = AsyncMock(return_value="test")
+
+    adapter = MagicMock()
+    adapter.send_message = AsyncMock(return_value="msg-1")
+    adapter.create_thread = AsyncMock(return_value="auto-thread-id")
+    adapter.archive_thread = AsyncMock()
+    e.set_adapter(adapter)
+
+    return e, adapter
+
+
+class TestE2EThread:
+    """E2E: /thread creates thread → session starts → initial prompt sent."""
+
+    def test_thread_full_flow(self, settings, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            engine, adapter = _make_e2e_engine(settings, tmp_path)
+
+            # Step 1: Bind parent channel
+            interaction = FakeInteraction()
+            await engine.handle_bind("ch-1", str(project_dir), interaction)
+            assert engine.session_mgr.get_binding("ch-1") is not None
+
+            # Step 2: Create thread with message
+            adapter.create_thread.return_value = "thread-42"
+            interaction2 = FakeInteraction()
+            await engine.handle_thread("ch-1", "fix the login bug", interaction2)
+
+            # Verify: Discord thread created
+            adapter.create_thread.assert_called_once()
+            thread_title = adapter.create_thread.call_args[0][1]
+            assert "fix the login bug" in thread_title
+
+            # Verify: tmux window created for thread (2nd call, 1st was parent)
+            assert engine.tmux.create_window.call_count == 2
+            thread_win_call = engine.tmux.create_window.call_args
+            assert thread_win_call.kwargs["cwd"] == str(project_dir)
+
+            # Verify: child binding exists with correct parent
+            child = engine.session_mgr.get_binding("thread-42")
+            assert child is not None
+            assert child.parent_channel_id == "ch-1"
+            assert child.work_dir == str(project_dir)
+            assert child.coding_cli == "claude"
+
+            # Verify: confirmation sent to thread
+            thread_msgs = [
+                c for c in adapter.send_message.call_args_list
+                if c[0][0] == "thread-42"
+            ]
+            assert len(thread_msgs) >= 1
+            assert "Session started" in thread_msgs[0][0][1].text
+
+            # Verify: initial prompt will be sent (via async task)
+            # Give the background task a moment to fire
+            await asyncio.sleep(2.5)
+            prompt_calls = [
+                c for c in engine.tmux.send_text.call_args_list
+                if "fix the login bug" in str(c)
+            ]
+            assert len(prompt_calls) >= 1
+
+        asyncio.run(_test())
+
+    def test_thread_auto_detect_full_flow(self, settings, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            engine, adapter = _make_e2e_engine(settings, tmp_path)
+
+            # Bind parent
+            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
+
+            # Simulate Discord thread auto-creation (no slash command)
+            await engine.handle_thread_auto(
+                "thread-99", "ch-1", "refactor the database layer"
+            )
+
+            # Child binding
+            child = engine.session_mgr.get_binding("thread-99")
+            assert child is not None
+            assert child.parent_channel_id == "ch-1"
+            assert child.work_dir == str(project_dir)
+
+            # Confirmation in thread
+            thread_msgs = [
+                c for c in adapter.send_message.call_args_list
+                if c[0][0] == "thread-99"
+            ]
+            assert len(thread_msgs) >= 1
+            assert "Auto-session" in thread_msgs[0][0][1].text
+
+            # Wait for initial prompt
+            await asyncio.sleep(2.5)
+            prompt_calls = [
+                c for c in engine.tmux.send_text.call_args_list
+                if "refactor the database" in str(c)
+            ]
+            assert len(prompt_calls) >= 1
+
+        asyncio.run(_test())
+
+
+class TestE2EForkWorktree:
+    """E2E: /fork creates worktree → session in isolated dir → kill cleans up."""
+
+    def test_fork_full_flow(self, settings, tmp_path):
+        async def _test():
+            repo_dir = tmp_path / "repo"
+            _make_git_repo(repo_dir)
+
+            engine, adapter = _make_e2e_engine(settings, tmp_path)
+
+            # Bind parent
+            await engine.handle_bind("ch-1", str(repo_dir), FakeInteraction())
+
+            # Fork with worktree
+            adapter.create_thread.return_value = "fork-thread-1"
+            interaction = FakeInteraction()
+            await engine.handle_fork("ch-1", "auth-refactor", interaction)
+
+            # Verify: worktree was created on disk
+            child = engine.session_mgr.get_binding("fork-thread-1")
+            assert child is not None
+            assert child.parent_channel_id == "ch-1"
+            assert ".worktrees" in child.work_dir
+            assert Path(child.work_dir).exists()
+            assert _is_worktree(child.work_dir)
+
+            # Verify: tmux window cwd is the worktree path
+            fork_win_call = engine.tmux.create_window.call_args_list[-1]
+            assert fork_win_call.kwargs["cwd"] == child.work_dir
+
+            # Verify: confirmation mentions worktree
+            reply = interaction.followup.send.call_args[0][0]
+            assert "worktree" in reply.lower()
+
+            # Step 2: Kill the fork — should clean up worktree
+            wt_path = child.work_dir
+            kill_interaction = FakeInteraction()
+            await engine.handle_kill("fork-thread-1", kill_interaction)
+
+            # Worktree should be gone
+            assert not Path(wt_path).exists()
+            assert engine.session_mgr.get_binding("fork-thread-1") is None
+
+        asyncio.run(_test())
+
+    def test_fork_dirty_worktree_asks_confirmation(self, settings, tmp_path):
+        async def _test():
+            repo_dir = tmp_path / "repo"
+            _make_git_repo(repo_dir)
+
+            engine, adapter = _make_e2e_engine(settings, tmp_path)
+
+            # Bind + fork
+            await engine.handle_bind("ch-1", str(repo_dir), FakeInteraction())
+            adapter.create_thread.return_value = "fork-thread-2"
+            await engine.handle_fork("ch-1", "dirty-test", FakeInteraction())
+
+            child = engine.session_mgr.get_binding("fork-thread-2")
+            assert child is not None
+
+            # Make worktree dirty
+            (Path(child.work_dir) / "dirty.txt").write_text("uncommitted")
+
+            # Try to kill — should show confirmation, NOT delete yet
+            kill_interaction = FakeInteraction()
+            await engine.handle_kill("fork-thread-2", kill_interaction)
+
+            # Binding should still exist (waiting for confirmation)
+            assert engine.session_mgr.get_binding("fork-thread-2") is not None
+            assert Path(child.work_dir).exists()
+
+            # Confirmation message should have been sent with buttons
+            confirm_msgs = [
+                c for c in adapter.send_message.call_args_list
+                if "uncommitted" in str(c).lower() or "dirty" in str(c).lower()
+            ]
+            assert len(confirm_msgs) >= 1
+
+            # Simulate user clicking "Yes, delete worktree"
+            await engine.handle_button_click(
+                "fork-thread-2", "user-1", f"kill_wt_yes:fork-thread-2"
+            )
+
+            # Now it should be gone
+            assert engine.session_mgr.get_binding("fork-thread-2") is None
+            assert not Path(child.work_dir).exists()
+
+        asyncio.run(_test())
+
+    def test_kill_parent_cascades_to_fork_children(self, settings, tmp_path):
+        async def _test():
+            repo_dir = tmp_path / "repo"
+            _make_git_repo(repo_dir)
+
+            engine, adapter = _make_e2e_engine(settings, tmp_path)
+
+            # Bind parent
+            await engine.handle_bind("ch-1", str(repo_dir), FakeInteraction())
+
+            # Create a fork child
+            adapter.create_thread.return_value = "fork-child"
+            await engine.handle_fork("ch-1", "feature-x", FakeInteraction())
+
+            child = engine.session_mgr.get_binding("fork-child")
+            assert child is not None
+            wt_path = child.work_dir
+
+            # Kill parent — should cascade
+            kill_interaction = FakeInteraction()
+            await engine.handle_kill("ch-1", kill_interaction)
+
+            # Both gone
+            assert engine.session_mgr.get_binding("ch-1") is None
+            assert engine.session_mgr.get_binding("fork-child") is None
+            assert not Path(wt_path).exists()
+
+        asyncio.run(_test())

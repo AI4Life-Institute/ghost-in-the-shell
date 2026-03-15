@@ -26,6 +26,7 @@ class SessionBinding:
     cli_session_id: str | None = None  # Coding CLI session ID for resume
     parent_channel_id: str | None = None  # For threads: parent channel ID
     subdir: str | None = None  # For threads: optional subdirectory
+    permission_mode: str | None = None  # e.g. "bypassPermissions", "auto"
     created_at: str = field(
         default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S")
     )
@@ -81,6 +82,7 @@ class SessionManager:
         cli_session_id: str | None = None,
         parent_channel_id: str | None = None,
         subdir: str | None = None,
+        permission_mode: str | None = None,
     ) -> SessionBinding:
         """Create or update a binding."""
         binding = SessionBinding(
@@ -93,6 +95,7 @@ class SessionManager:
             cli_session_id=cli_session_id,
             parent_channel_id=parent_channel_id,
             subdir=subdir,
+            permission_mode=permission_mode,
         )
         self._bindings[channel_id] = binding
         await self._save()

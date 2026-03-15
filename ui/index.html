@@ -106,9 +106,25 @@
         <!-- Build grid -->
         <div class="ws-grid" id="ws-grid">
 
+          <!-- Build empty state -->
+          <div id="build-empty" class="build-empty-state" style="display:none">
+            <div class="build-empty-inner">
+              <div class="build-empty-title">What do you want to build?</div>
+              <div class="build-empty-hints">
+                <span class="build-hint-chip" onclick="buildHint(this)">Create a browser agent to monitor prices</span>
+                <span class="build-hint-chip" onclick="buildHint(this)">Write a loop agent that checks emails daily</span>
+                <span class="build-hint-chip" onclick="buildHint(this)">Build a skill to export data as CSV</span>
+              </div>
+              <div class="build-empty-row">
+                <input id="build-empty-inp" class="build-empty-inp" placeholder="Describe what you want to build…" onkeydown="buildEmptyKey(event)">
+                <button class="wsp-sbtn" onclick="buildEmptySend()">&#8593;</button>
+              </div>
+            </div>
+          </div>
+
           <!-- Pane 0: main — active -->
           <div class="ws-panel active" id="wsp-0">
-            <div class="wsp-head" onclick="selectBuildTab(0)">
+            <div class="wsp-head" onclick="selectBuildTab(0)" ondblclick="paneFocus(0)">
               <div class="pane-status">
                 <span class="pane-dot active"></span>
                 <span class="pane-status-active">&#9654; Active</span>
@@ -189,7 +205,7 @@
 
           <!-- Pane 1: auth — idle -->
           <div class="ws-panel" id="wsp-1">
-            <div class="wsp-head" onclick="selectBuildTab(1)">
+            <div class="wsp-head" onclick="selectBuildTab(1)" ondblclick="paneFocus(1)">
               <div class="pane-status">
                 <span class="pane-dot idle"></span>
                 <span class="pane-status-idle">&#9208; Idle</span>
@@ -246,7 +262,7 @@
 
           <!-- Pane 2: tests — stopped -->
           <div class="ws-panel" id="wsp-2">
-            <div class="wsp-head" onclick="selectBuildTab(2)">
+            <div class="wsp-head" onclick="selectBuildTab(2)" ondblclick="paneFocus(2)">
               <div class="pane-status">
                 <span class="pane-dot stopped"></span>
                 <span class="pane-status-stopped">&#9724; Stopped</span>
@@ -303,6 +319,14 @@
       ══════════════════════════════════════ -->
       <div id="view-agents" class="view">
 
+        <!-- Agents empty state -->
+        <div id="agents-empty" class="empty agents-empty-state" style="display:none">
+          <div class="empty-ico">⚡</div>
+          <div class="empty-txt">No agents running yet.</div>
+          <div class="empty-sub">Ask the Build agent to create one.</div>
+          <button class="sk-run-btn" style="margin-top:10px" onclick="setMode('build')">Go to Build →</button>
+        </div>
+
         <div class="fleet-scroll" id="fleet-scroll">
 
           <!-- Browser Profiles -->
@@ -356,7 +380,7 @@
         <div class="sk-list">
           <div class="sk-list-head">
             <div class="sk-list-title">Skills</div>
-            <button class="sk-new-btn">＋ New Skill</button>
+            <button class="sk-new-btn" onclick="openNewSkillModal()">＋ New Skill</button>
           </div>
           <div class="sk-scroll" id="sk-scroll">
             <div class="ski on" onclick="selSkill(this,'market')">
@@ -451,6 +475,30 @@
   <span id="toast-msg"></span>
   <span class="toast-view" id="toast-view-link" style="display:none">View</span>
   <button class="toast-close" onclick="dismissToast()">&#10005;</button>
+</div>
+
+<!-- New Skill Modal -->
+<div id="new-skill-modal" class="modal-overlay" onclick="closeNewSkillModal(event)">
+  <div class="modal-box" id="new-skill-modal-box">
+    <div class="modal-head">
+      <div class="modal-title">＋ Create New Skill</div>
+      <button class="modal-close-btn" onclick="closeNewSkillModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-lbl">Describe what you want this Skill to do</div>
+      <textarea id="new-skill-desc" class="modal-ta" placeholder="e.g. Every morning, fetch AAPL stock price and save to Data" rows="3"></textarea>
+      <button class="modal-gen-btn" onclick="generateNewSkill()">✨ Generate Skill</button>
+    </div>
+    <div id="new-skill-preview" style="display:none">
+      <div class="modal-sep"></div>
+      <div class="modal-lbl">Preview</div>
+      <div id="new-skill-preview-content" class="modal-preview-box"></div>
+      <div class="modal-footer">
+        <button class="modal-btn-sec" onclick="closeNewSkillModal()">Cancel</button>
+        <button class="modal-gen-btn" onclick="saveNewSkill()">Save Skill</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="app.js"></script>

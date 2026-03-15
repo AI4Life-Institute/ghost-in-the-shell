@@ -33,6 +33,11 @@ def main() -> None:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override log level",
     )
+    start_p.add_argument(
+        "--dev",
+        action="store_true",
+        help="Dev mode: auto-restart on source file changes",
+    )
 
     # gits hook
     hook_p = sub.add_parser("hook", help="Coding CLI session hook")
@@ -75,6 +80,67 @@ def main() -> None:
 
 def _cmd_start(args: argparse.Namespace) -> None:
     """Start the GITS bot."""
+    if args.dev:
+        _cmd_start_dev(args)
+        return
+
+    _cmd_start_normal(args)
+
+
+def _cmd_start_dev(args: argparse.Namespace) -> None:
+    """Start in dev mode with auto-restart on file changes."""
+    import subprocess as _sp
+    from pathlib import Path
+
+    try:
+        import watchfiles
+    except ImportError:
+        print(
+            "watchfiles not installed. Run: uv add watchfiles",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    src_dir = Path(__file__).parent
+    log_level = args.log_level or "INFO"
+    cmd = [sys.executable, "-m", "gits", "start", "--log-level", log_level]
+
+    print(f"[dev] Watching {src_dir} for changes...")
+    print(f"[dev] Press Ctrl-C to stop")
+
+    proc = None
+    try:
+        while True:
+            # Start the bot subprocess
+            print(f"[dev] Starting: {' '.join(cmd)}")
+            proc = _sp.Popen(cmd)
+
+            # Wait for any .py file change
+            for changes in watchfiles.watch(
+                src_dir,
+                watch_filter=lambda change, path: path.endswith(".py"),
+            ):
+                changed_files = [str(p) for _, p in changes]
+                print(f"[dev] File changed: {', '.join(changed_files)}")
+                break
+
+            # Kill and restart
+            print("[dev] Restarting...")
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except _sp.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    except KeyboardInterrupt:
+        print("\n[dev] Shutting down...")
+        if proc and proc.poll() is None:
+            proc.terminate()
+            proc.wait()
+
+
+def _cmd_start_normal(args: argparse.Namespace) -> None:
+    """Start the GITS bot (normal mode)."""
     from .config import Settings
 
     settings = Settings()
