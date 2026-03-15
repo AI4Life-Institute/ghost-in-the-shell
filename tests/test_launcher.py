@@ -17,6 +17,7 @@ class TestResumeTemplates:
     def test_all_clis_present(self):
         assert "claude" in RESUME_TEMPLATES
         assert "codex" in RESUME_TEMPLATES
+        assert "copilot" in RESUME_TEMPLATES
         assert "opencode" in RESUME_TEMPLATES
 
     def test_each_has_by_id_and_latest(self):
@@ -45,11 +46,19 @@ class TestBuildLaunchCommand:
 
     def test_opencode_with_session_id(self, launcher):
         cmd = launcher.build_launch_command(cli="opencode", session_id="sess1")
-        assert cmd == "opencode --session sess1"
+        assert cmd == "opencode -s sess1"
 
     def test_opencode_without_session_id(self, launcher):
         cmd = launcher.build_launch_command(cli="opencode")
         assert cmd == "opencode"
+
+    def test_copilot_with_session_id(self, launcher):
+        cmd = launcher.build_launch_command(cli="copilot", session_id="cp1")
+        assert cmd == "copilot --resume cp1"
+
+    def test_copilot_without_session_id(self, launcher):
+        cmd = launcher.build_launch_command(cli="copilot")
+        assert cmd == "copilot"
 
     def test_unknown_cli(self, launcher):
         cmd = launcher.build_launch_command(cli="unknown-cli")
@@ -124,3 +133,85 @@ class TestDiscoverSessions:
     def test_discover_unknown_cli(self, launcher):
         sessions = launcher.discover_sessions("/some/path", cli="vim")
         assert sessions == []
+
+    def test_discover_codex_sessions(self, tmp_path, launcher):
+        """Test discovering Codex sessions from JSONL files."""
+        work_dir = "/data/projects/my-app"
+        codex_dir = tmp_path / ".codex" / "sessions" / "2026" / "03" / "14"
+        codex_dir.mkdir(parents=True)
+
+        # Create a matching session
+        session_file = codex_dir / "rollout-2026-03-14T17-33-49-test-uuid.jsonl"
+        lines = [
+            json.dumps({
+                "type": "session_meta",
+                "payload": {"id": "test-uuid", "cwd": work_dir},
+            }),
+            json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Fix the bug"}],
+                },
+            }),
+            json.dumps({"type": "event_msg", "payload": {}}),
+        ]
+        session_file.write_text("\n".join(lines) + "\n")
+
+        # Create a non-matching session (different cwd)
+        other_file = codex_dir / "rollout-other.jsonl"
+        other_file.write_text(json.dumps({
+            "type": "session_meta",
+            "payload": {"id": "other", "cwd": "/other/path"},
+        }) + "\n")
+
+        original_home = Path.home
+        try:
+            Path.home = staticmethod(lambda: tmp_path)
+            sessions = launcher.discover_sessions(work_dir, cli="codex")
+        finally:
+            Path.home = original_home
+
+        assert len(sessions) == 1
+        assert sessions[0].session_id == "test-uuid"
+        assert "Fix the bug" in sessions[0].summary
+
+    def test_discover_opencode_sessions(self, tmp_path, launcher):
+        """Test discovering OpenCode sessions from JSON storage."""
+        work_dir = "/data/projects/my-app"
+        storage = tmp_path / ".local" / "share" / "opencode" / "storage"
+
+        # Create project file
+        proj_dir = storage / "project"
+        proj_dir.mkdir(parents=True)
+        proj_data = {"id": "proj123", "worktree": work_dir}
+        (proj_dir / "proj123.json").write_text(json.dumps(proj_data))
+
+        # Create session file
+        sess_dir = storage / "session" / "proj123"
+        sess_dir.mkdir(parents=True)
+        sess_data = {
+            "id": "ses_abc",
+            "projectID": "proj123",
+            "directory": work_dir,
+            "title": "New session - test",
+        }
+        (sess_dir / "ses_abc.json").write_text(json.dumps(sess_data))
+
+        # Create message dir (2 messages)
+        msg_dir = storage / "message" / "ses_abc"
+        msg_dir.mkdir(parents=True)
+        (msg_dir / "msg1.json").write_text("{}")
+        (msg_dir / "msg2.json").write_text("{}")
+
+        original_home = Path.home
+        try:
+            Path.home = staticmethod(lambda: tmp_path)
+            sessions = launcher.discover_sessions(work_dir, cli="opencode")
+        finally:
+            Path.home = original_home
+
+        assert len(sessions) == 1
+        assert sessions[0].session_id == "ses_abc"
+        assert sessions[0].summary == "New session - test"
+        assert sessions[0].message_count == 2

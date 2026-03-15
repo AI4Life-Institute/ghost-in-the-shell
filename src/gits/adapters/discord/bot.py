@@ -285,7 +285,8 @@ class DiscordAdapter(PlatformAdapter):
         @tree.command(name="bind", description="Bind this channel to a project directory")
         @app_commands.describe(
             path="Project directory path",
-            mode="Permission mode for Claude Code",
+            mode="Permission mode for the coding CLI",
+            cli="Coding CLI to use (default: claude)",
         )
         @app_commands.choices(
             mode=[
@@ -293,12 +294,19 @@ class DiscordAdapter(PlatformAdapter):
                 app_commands.Choice(name="acceptEdits (auto-accept edits)", value="acceptEdits"),
                 app_commands.Choice(name="auto (auto-accept most tools)", value="auto"),
                 app_commands.Choice(name="bypassPermissions / yolo (skip all prompts)", value="bypassPermissions"),
-            ]
+            ],
+            cli=[
+                app_commands.Choice(name="Claude Code", value="claude"),
+                app_commands.Choice(name="Codex CLI (OpenAI)", value="codex"),
+                app_commands.Choice(name="Copilot CLI (GitHub)", value="copilot"),
+                app_commands.Choice(name="OpenCode", value="opencode"),
+            ],
         )
         async def cmd_bind(
             interaction: discord.Interaction,
             path: str,
             mode: str | None = None,
+            cli: str | None = None,
         ):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
@@ -308,7 +316,8 @@ class DiscordAdapter(PlatformAdapter):
             await interaction.response.defer()
             if self._engine:
                 await self._engine.handle_bind(
-                    str(interaction.channel_id), path, interaction, mode=mode
+                    str(interaction.channel_id), path, interaction,
+                    mode=mode, cli=cli,
                 )
 
         @cmd_bind.autocomplete("path")

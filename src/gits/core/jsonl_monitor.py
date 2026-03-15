@@ -83,44 +83,89 @@ def format_tool_use_summary(name: str, input_data: dict | Any) -> str:
 def extract_assistant_content(entry: dict) -> list[str]:
     """Extract displayable content from an assistant message entry.
 
+    Supports both Claude Code and Codex CLI JSONL formats:
+    - Claude: type="assistant", message.content[].type="text"/"tool_use"
+    - Codex:  type="response_item", payload.role="assistant",
+              payload.content[].type="output_text"
+
     Returns list of text strings to send as messages.
     Skips thinking blocks, user messages, and summary entries.
     """
     msg_type = entry.get("type")
-    if msg_type != "assistant":
-        return []
 
-    message = entry.get("message")
-    if not isinstance(message, dict):
-        return []
+    # -- Claude Code format --
+    if msg_type == "assistant":
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            return []
 
-    content = message.get("content", [])
-    if not isinstance(content, list):
-        # Sometimes content is a plain string
-        if isinstance(content, str) and content.strip():
-            return [content.strip()]
-        return []
+        content = message.get("content", [])
+        if not isinstance(content, list):
+            if isinstance(content, str) and content.strip():
+                return [content.strip()]
+            return []
 
-    texts: list[str] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type", "")
+        texts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
 
-        if btype == "text":
-            text = block.get("text", "").strip()
+            if btype == "text":
+                text = block.get("text", "").strip()
+                if text:
+                    texts.append(text)
+
+            elif btype == "tool_use":
+                name = block.get("name", "unknown")
+                inp = block.get("input", {})
+                summary = format_tool_use_summary(name, inp)
+                texts.append(summary)
+
+            # Skip "thinking" blocks — internal reasoning
+
+        return texts
+
+    # -- Codex CLI format --
+    if msg_type == "response_item":
+        payload = entry.get("payload", {})
+        if not isinstance(payload, dict) or payload.get("role") != "assistant":
+            return []
+
+        content = payload.get("content", [])
+        if not isinstance(content, list):
+            return []
+
+        texts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+
+            if btype == "output_text":
+                text = block.get("text", "").strip()
+                if text:
+                    texts.append(text)
+
+            elif btype in ("local_shell_call", "computer_call"):
+                cmd = block.get("command", "") or block.get("action", "")
+                if cmd:
+                    texts.append(f"\U0001f527 **Shell**({cmd[:MAX_SUMMARY_LENGTH]})")
+
+            # Skip "reasoning" blocks
+
+        return texts
+
+    # -- Copilot CLI format --
+    if msg_type == "assistant.message":
+        data = entry.get("data", {})
+        if isinstance(data, dict):
+            text = data.get("content", "").strip()
             if text:
-                texts.append(text)
+                return [text]
+        return []
 
-        elif btype == "tool_use":
-            name = block.get("name", "unknown")
-            inp = block.get("input", {})
-            summary = format_tool_use_summary(name, inp)
-            texts.append(summary)
-
-        # Skip "thinking" blocks — internal reasoning
-
-    return texts
+    return []
 
 
 # -- JsonlMonitor class ------------------------------------------------------
@@ -316,20 +361,23 @@ class JsonlMonitor:
                     logger.exception("JsonlMonitor message callback error")
 
     def _find_jsonl_file(self, binding: Any) -> Path | None:
-        """Find the JSONL file for a binding's CLI session.
+        """Find the JSONL/session file for a binding's CLI session.
 
-        Claude Code stores sessions at:
-            ~/.claude/projects/<dir-hash>/<session_id>.jsonl
-
-        The dir-hash format is the work_dir path with ``/`` replaced by
-        ``-``.  However the exact escaping can vary (e.g. underscores
-        may or may not be replaced), so we try the exact hash first and
-        fall back to scanning all project directories for a matching
-        session file.
+        Dispatches to CLI-specific finders based on binding.coding_cli.
         """
         if not binding.cli_session_id or not binding.work_dir:
             return None
 
+        cli = getattr(binding, "coding_cli", "claude")
+        if cli == "codex":
+            return self._find_codex_jsonl(binding)
+        if cli == "copilot":
+            return self._find_copilot_jsonl(binding)
+        # Default: claude (opencode uses JSON not JSONL, skip for now)
+        return self._find_claude_jsonl(binding)
+
+    def _find_claude_jsonl(self, binding: Any) -> Path | None:
+        """Find Claude Code JSONL: ~/.claude/projects/<dir-hash>/<session_id>.jsonl"""
         claude_projects = self._projects_path
         if not claude_projects.exists():
             return None
@@ -351,8 +399,6 @@ class JsonlMonitor:
                 return candidate
 
         # Strategy 3: scan all project directories for the session file.
-        # This handles cases where the dir-hash format differs from our
-        # expectation (e.g. underscores replaced with dashes).
         try:
             for d in claude_projects.iterdir():
                 if not d.is_dir():
@@ -367,6 +413,27 @@ class JsonlMonitor:
         except OSError:
             pass
 
+        return None
+
+    def _find_codex_jsonl(self, binding: Any) -> Path | None:
+        """Find Codex JSONL: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl"""
+        codex_dir = Path.home() / ".codex" / "sessions"
+        if not codex_dir.exists():
+            return None
+
+        # session_id for codex is the rollout filename stem
+        for jsonl_file in codex_dir.rglob(f"{binding.cli_session_id}.jsonl"):
+            return jsonl_file
+        return None
+
+    def _find_copilot_jsonl(self, binding: Any) -> Path | None:
+        """Find Copilot JSONL: ~/.copilot/session-state/{id}/events.jsonl"""
+        copilot_dir = (
+            Path.home() / ".copilot" / "session-state" / binding.cli_session_id
+        )
+        events_file = copilot_dir / "events.jsonl"
+        if events_file.exists():
+            return events_file
         return None
 
     @staticmethod

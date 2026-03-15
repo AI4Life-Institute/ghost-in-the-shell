@@ -136,6 +136,7 @@ class Engine:
         path: str | None,
         interaction: Any,
         mode: str | None = None,
+        cli: str | None = None,
     ) -> None:
         """Handle /bind — bind channel to a project directory.
 
@@ -162,7 +163,7 @@ class Engine:
 
             channel = interaction.channel if interaction else None
             window_name = channel.name if channel else f"ch-{channel_id[:8]}"
-            cli = self.settings.coding_cli_command
+            cli = cli or self.settings.coding_cli_command
 
             # Discover existing sessions
             sessions = self.launcher.discover_sessions(str(p), cli=cli)
@@ -233,9 +234,9 @@ class Engine:
         p = Path(work_dir)
         cmd = self.launcher.build_launch_command(cli=cli, session_id=session_id)
 
-        # Append permission mode flag
+        # Append permission mode flag (CLI-specific)
         if mode and mode != "default":
-            cmd += f" --permission-mode {mode}"
+            cmd = _append_permission_flag(cmd, cli, mode)
 
         win = await self.tmux.create_window(
             name=window_name, cwd=str(p), command=cmd
@@ -922,6 +923,30 @@ class Engine:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
+    """Append the correct permission flag based on CLI type and mode.
+
+    Each CLI has its own flag syntax:
+    - claude: --permission-mode {mode}
+    - codex: --full-auto (for bypass) or --approval-mode {mode}
+    - copilot: similar to claude
+    - opencode: flags TBD
+    """
+    if cli == "codex":
+        if mode == "bypassPermissions":
+            cmd += " --full-auto"
+        elif mode == "auto":
+            cmd += " --full-auto"
+        # codex doesn't have fine-grained modes like acceptEdits
+    elif cli == "copilot":
+        # Copilot uses similar flags to Claude
+        cmd += f" --permission-mode {mode}"
+    else:
+        # claude and others
+        cmd += f" --permission-mode {mode}"
+    return cmd
 
 
 def _format_age(mtime: float) -> str:

@@ -134,6 +134,40 @@ UI_PATTERNS: list[UIPattern] = [
             re.compile(r"^\s*Type to filter"),
         ),
     ),
+    # ── Codex CLI patterns ───────────────────────────────────────────
+    UIPattern(
+        # Codex approval prompt:
+        #   Would you like to run the following command?
+        #   ...
+        #   › 1. Yes, proceed (y)
+        #     2. Yes, and don't ask again ... (p)
+        #     3. No, ... (esc)
+        #   Press enter to confirm or esc to cancel
+        name="CodexApproval",
+        top=(re.compile(r"^\s*Would you like to run the following command\?"),),
+        bottom=(re.compile(r"^\s*Press enter to confirm or esc to cancel"),),
+    ),
+    UIPattern(
+        # Codex numbered choice menu (without "Would you like" preamble)
+        name="CodexApproval",
+        top=(re.compile(r"^\s*\u203a\s*1\.\s*Yes"),),
+        bottom=(re.compile(r"^\s*Press enter to confirm"),),
+        min_gap=2,
+    ),
+    # ── OpenCode patterns ────────────────────────────────────────────
+    UIPattern(
+        # OpenCode permission prompt:
+        #   △ Permission required
+        #     ← Access external directory /tmp
+        #   ...
+        #    Allow once   Allow always   Reject
+        name="OpenCodePermission",
+        top=(re.compile(r"^\s*\u25b3\s*Permission required"),),
+        bottom=(
+            re.compile(r"Allow once.*Allow always.*Reject"),
+            re.compile(r"enter confirm"),
+        ),
+    ),
 ]
 
 
@@ -285,7 +319,8 @@ def strip_pane_chrome(lines: list[str]) -> list[str]:
 
 # -- Prompt option extraction (NEW) -------------------------------------
 
-_RE_OPTION = re.compile(r"^\s*[\u276f\s]*(\d+)\.\s+(.+)$")
+# Matches numbered options: ❯ 1. Yes  /  › 1. Yes, proceed (y)
+_RE_OPTION = re.compile(r"^\s*[\u276f\u203a\s]*(\d+)\.\s+(.+)$")
 
 
 def extract_prompt_options(pane_text: str) -> PromptInfo | None:
@@ -343,7 +378,11 @@ _RE_TOOL_HEADER = re.compile(
 )
 
 # The question line that ends the tool context block
-_RE_QUESTION = re.compile(r"^\s*Do you want to (proceed|make this edit|create|delete)")
+_RE_QUESTION = re.compile(
+    r"^\s*Do you want to (proceed|make this edit|create|delete)"
+    r"|^\s*Would you like to run the following command\?"
+    r"|^\s*\u25b3\s*Permission required"
+)
 
 
 def _extract_tool_context(lines: list[str]) -> str:
