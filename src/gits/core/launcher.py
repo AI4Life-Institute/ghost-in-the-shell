@@ -46,9 +46,10 @@ CLI_SESSION_PATHS: dict[str, str] = {
 class ResolvedCLI(NamedTuple):
     """Resolved alias → concrete CLI info."""
 
-    base_type: str   # "claude" | "codex" | "copilot" | "opencode"
-    cmd: str         # launch command (e.g. "clpy")
-    resume_by_id: str  # resume template, e.g. "clpy --resume {id}"
+    base_type: str        # "claude" | "codex" | "copilot" | "opencode"
+    cmd: str              # launch command (e.g. "clpy")
+    resume_by_id: str     # resume template, e.g. "clpy --resume {id}"
+    session_path: str | None = None  # override session storage dir (e.g. "~/.claude-work/projects")
 
 
 @dataclass
@@ -106,7 +107,8 @@ class CodingCLILauncher:
             cmd = alias_cfg.get("cmd", cli)
             default_resume = RESUME_TEMPLATES.get(base, {}).get("by_id", f"{cli} --resume {{id}}")
             resume = alias_cfg.get("resume_by_id", default_resume.replace(base, cmd, 1))
-            return ResolvedCLI(base_type=base, cmd=cmd, resume_by_id=resume)
+            session_path = alias_cfg.get("session_path") or None
+            return ResolvedCLI(base_type=base, cmd=cmd, resume_by_id=resume, session_path=session_path)
 
         # Built-in CLI — derive from RESUME_TEMPLATES
         templates = RESUME_TEMPLATES.get(cli, {})
@@ -155,9 +157,9 @@ class CodingCLILauncher:
         }
         discoverer = discoverers.get(resolved.base_type)
         if discoverer:
-            sessions = discoverer(work_dir)
+            sessions = discoverer(work_dir, session_path=resolved.session_path)
             for s in sessions:
-                s.source_cli = resolved.base_type
+                s.source_cli = cli  # keep the alias name, not the base_type
             return sessions
         return []
 
@@ -345,9 +347,14 @@ class CodingCLILauncher:
                 continue
         return messages
 
-    def _discover_claude_sessions(self, work_dir: str) -> list[CLISession]:
-        """Scan ~/.claude/projects/<dir-hash>/ for JSONL session files."""
-        claude_projects = Path.home() / ".claude" / "projects"
+    def _discover_claude_sessions(self, work_dir: str, session_path: str | None = None) -> list[CLISession]:
+        """Scan <session_path>/<dir-hash>/ for JSONL session files.
+
+        *session_path* defaults to ``~/.claude/projects`` but can be overridden
+        via the alias ``session_path`` config key to support separate Claude
+        config dirs (e.g. ``~/.claude-work/projects``).
+        """
+        claude_projects = Path(session_path).expanduser() if session_path else Path.home() / ".claude" / "projects"
         if not claude_projects.exists():
             return []
 
@@ -433,7 +440,7 @@ class CodingCLILauncher:
         sessions.sort(key=lambda s: s.mtime, reverse=True)
         return sessions  # caller handles pagination
 
-    def _discover_codex_sessions(self, work_dir: str) -> list[CLISession]:
+    def _discover_codex_sessions(self, work_dir: str, session_path: str | None = None) -> list[CLISession]:
         """Scan ~/.codex/sessions/ for matching Codex CLI sessions.
 
         Codex stores sessions at ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.
@@ -532,7 +539,7 @@ class CodingCLILauncher:
         sessions.sort(key=lambda s: s.mtime, reverse=True)
         return sessions  # caller handles pagination
 
-    def _discover_copilot_sessions(self, work_dir: str) -> list[CLISession]:
+    def _discover_copilot_sessions(self, work_dir: str, session_path: str | None = None) -> list[CLISession]:
         """Scan ~/.copilot/session-state/ for matching Copilot CLI sessions.
 
         Copilot stores sessions at ~/.copilot/session-state/{session-id}/
@@ -640,7 +647,7 @@ class CodingCLILauncher:
         sessions.sort(key=lambda s: s.mtime, reverse=True)
         return sessions  # caller handles pagination
 
-    def _discover_opencode_sessions(self, work_dir: str) -> list[CLISession]:
+    def _discover_opencode_sessions(self, work_dir: str, session_path: str | None = None) -> list[CLISession]:
         """Scan ~/.local/share/opencode/storage/ for matching OpenCode sessions.
 
         anomalyco/opencode stores sessions as JSON files:
