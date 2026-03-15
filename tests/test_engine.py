@@ -92,13 +92,27 @@ class TestHandleBind:
 
         asyncio.run(_test())
 
-    def test_bind_no_path(self, engine):
+    def test_bind_no_path_launches_browser(self, engine):
         async def _test():
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
             interaction = FakeInteraction()
             await engine.handle_bind("ch-1", None, interaction)
 
-            reply = interaction.followup.send.call_args[0][0]
-            assert "Usage" in reply or "path" in reply.lower()
+            # Should send browser message via adapter
+            adapter.send_message.assert_called_once()
+            browser_msg = adapter.send_message.call_args[0][1]
+            assert "Select Working Directory" in browser_msg.text
+            assert browser_msg.buttons is not None
+
+            # Should store pending browse state
+            assert "ch-1" in engine._pending_binds
+            assert engine._pending_binds["ch-1"]["type"] == "browse"
+
+            # Interaction should get acknowledgement
+            interaction.followup.send.assert_called_once()
 
         asyncio.run(_test())
 
@@ -685,5 +699,380 @@ class TestSessionPickerFlow:
             adapter.send_message.assert_called_once()
             msg = adapter.send_message.call_args[0][1]
             assert "invalid" in msg.text.lower()
+
+        asyncio.run(_test())
+
+
+# ------------------------------------------------------------------
+# Directory Browser tests
+# ------------------------------------------------------------------
+
+
+class TestBuildDirBrowserMessage:
+    def test_message_shows_current_dir(self, engine, tmp_path):
+        # Create some subdirs
+        (tmp_path / "alpha").mkdir()
+        (tmp_path / "beta").mkdir()
+
+        msg = engine._build_dir_browser_message(str(tmp_path), "ch-1", page=0)
+
+        assert msg.text is not None
+        assert "Select Working Directory" in msg.text
+        assert str(tmp_path) in msg.text
+
+    def test_message_has_dir_buttons(self, engine, tmp_path):
+        (tmp_path / "alpha").mkdir()
+        (tmp_path / "beta").mkdir()
+        (tmp_path / "gamma").mkdir()
+
+        msg = engine._build_dir_browser_message(str(tmp_path), "ch-1", page=0)
+
+        assert msg.buttons is not None
+        # Flatten all buttons
+        all_buttons = [btn for row in msg.buttons for btn in row]
+        dir_buttons = [b for b in all_buttons if b.callback_data.startswith("browse:")]
+        assert len(dir_buttons) == 3
+        labels = [b.label for b in dir_buttons]
+        assert "alpha" in labels
+        assert "beta" in labels
+        assert "gamma" in labels
+
+    def test_skips_hidden_dirs(self, engine, tmp_path):
+        (tmp_path / ".hidden").mkdir()
+        (tmp_path / "visible").mkdir()
+
+        msg = engine._build_dir_browser_message(str(tmp_path), "ch-1", page=0)
+
+        all_buttons = [btn for row in msg.buttons for btn in row]
+        dir_buttons = [b for b in all_buttons if b.callback_data.startswith("browse:")]
+        assert len(dir_buttons) == 1
+        assert dir_buttons[0].label == "visible"
+
+    def test_pagination_with_many_dirs(self, engine, tmp_path):
+        # Create 10 subdirs
+        for i in range(10):
+            (tmp_path / f"dir{i:02d}").mkdir()
+
+        # Page 0 should show first 6
+        msg0 = engine._build_dir_browser_message(str(tmp_path), "ch-1", page=0)
+        all_buttons = [btn for row in msg0.buttons for btn in row]
+        dir_buttons = [b for b in all_buttons if b.callback_data.startswith("browse:")]
+        assert len(dir_buttons) == 6
+
+        # Should have paging buttons
+        page_buttons = [b for b in all_buttons if b.callback_data.startswith("browse_page:")]
+        assert len(page_buttons) >= 1  # at least Next
+
+        # Page 1 should show remaining 4
+        msg1 = engine._build_dir_browser_message(str(tmp_path), "ch-1", page=1)
+        all_buttons1 = [btn for row in msg1.buttons for btn in row]
+        dir_buttons1 = [b for b in all_buttons1 if b.callback_data.startswith("browse:")]
+        assert len(dir_buttons1) == 4
+
+    def test_has_select_and_cancel_buttons(self, engine, tmp_path):
+        msg = engine._build_dir_browser_message(str(tmp_path), "ch-1", page=0)
+
+        all_buttons = [btn for row in msg.buttons for btn in row]
+        select_buttons = [b for b in all_buttons if b.callback_data.startswith("browse_select:")]
+        cancel_buttons = [b for b in all_buttons if b.callback_data.startswith("browse_cancel:")]
+        parent_buttons = [b for b in all_buttons if b.callback_data.startswith("browse_parent:")]
+
+        assert len(select_buttons) == 1
+        assert len(cancel_buttons) == 1
+        assert len(parent_buttons) == 1
+
+    def test_callback_data_within_100_chars(self, engine, tmp_path):
+        for i in range(10):
+            (tmp_path / f"dir{i:02d}").mkdir()
+
+        long_channel = "1234567890" * 5
+        msg = engine._build_dir_browser_message(str(tmp_path), long_channel, page=0)
+
+        for row in msg.buttons:
+            for btn in row:
+                assert len(btn.callback_data) <= 100, (
+                    f"callback_data too long ({len(btn.callback_data)}): {btn.callback_data}"
+                )
+
+    def test_empty_dir_still_has_nav(self, engine, tmp_path):
+        msg = engine._build_dir_browser_message(str(tmp_path), "ch-1", page=0)
+
+        assert msg.buttons is not None
+        # Should still have nav row + action row even with no dirs
+        all_buttons = [btn for row in msg.buttons for btn in row]
+        assert any(b.callback_data.startswith("browse_parent:") for b in all_buttons)
+        assert any(b.callback_data.startswith("browse_select:") for b in all_buttons)
+
+
+class TestBrowseButtonHandlers:
+    def test_browse_enter_subdir(self, engine, tmp_path):
+        async def _test():
+            (tmp_path / "subA").mkdir()
+            (tmp_path / "subB").mkdir()
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            engine._pending_binds["ch-1"] = {
+                "type": "browse",
+                "current_dir": str(tmp_path),
+                "page": 0,
+                "window_name": "test-channel",
+                "cli": "claude",
+            }
+
+            # subA is index 0 in sorted list (subA, subB)
+            await engine.handle_button_click("ch-1", "user-1", "browse:ch-1:0:0")
+
+            # State should be updated to the subdir
+            assert engine._pending_binds["ch-1"]["current_dir"] == str(tmp_path / "subA")
+
+            # Should send updated browser message
+            adapter.send_message.assert_called_once()
+            msg = adapter.send_message.call_args[0][1]
+            assert "subA" in msg.text
+
+        asyncio.run(_test())
+
+    def test_browse_parent(self, engine, tmp_path):
+        async def _test():
+            child = tmp_path / "child"
+            child.mkdir()
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            engine._pending_binds["ch-1"] = {
+                "type": "browse",
+                "current_dir": str(child),
+                "page": 0,
+                "window_name": "test-channel",
+                "cli": "claude",
+            }
+
+            await engine.handle_button_click("ch-1", "user-1", "browse_parent:ch-1")
+
+            assert engine._pending_binds["ch-1"]["current_dir"] == str(tmp_path)
+            adapter.send_message.assert_called_once()
+
+        asyncio.run(_test())
+
+    def test_browse_parent_blocked_by_allowed_paths(self, engine, tmp_path):
+        async def _test():
+            child = tmp_path / "child"
+            child.mkdir()
+
+            engine.settings.allowed_paths = [str(child)]
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            engine._pending_binds["ch-1"] = {
+                "type": "browse",
+                "current_dir": str(child),
+                "page": 0,
+                "window_name": "test-channel",
+                "cli": "claude",
+            }
+
+            await engine.handle_button_click("ch-1", "user-1", "browse_parent:ch-1")
+
+            # Should stay at child, not go to parent
+            assert engine._pending_binds["ch-1"]["current_dir"] == str(child)
+
+            # Should send error message
+            adapter.send_message.assert_called_once()
+            msg = adapter.send_message.call_args[0][1]
+            assert "allowed" in msg.text.lower()
+
+        asyncio.run(_test())
+
+    def test_browse_page_navigation(self, engine, tmp_path):
+        async def _test():
+            for i in range(10):
+                (tmp_path / f"dir{i:02d}").mkdir()
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            engine._pending_binds["ch-1"] = {
+                "type": "browse",
+                "current_dir": str(tmp_path),
+                "page": 0,
+                "window_name": "test-channel",
+                "cli": "claude",
+            }
+
+            await engine.handle_button_click("ch-1", "user-1", "browse_page:ch-1:1")
+
+            assert engine._pending_binds["ch-1"]["page"] == 1
+            adapter.send_message.assert_called_once()
+
+        asyncio.run(_test())
+
+    def test_browse_select_no_sessions(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "my-project"
+            project_dir.mkdir()
+
+            engine.launcher.discover_sessions = MagicMock(return_value=[])
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            engine._pending_binds["ch-1"] = {
+                "type": "browse",
+                "current_dir": str(project_dir),
+                "page": 0,
+                "window_name": "test-channel",
+                "cli": "claude",
+            }
+
+            await engine.handle_button_click("ch-1", "user-1", "browse_select:ch-1")
+
+            # Should create tmux window directly
+            engine.tmux.create_window.assert_called_once()
+
+            # Should create binding
+            b = engine.session_mgr.get_binding("ch-1")
+            assert b is not None
+            assert b.work_dir == str(project_dir)
+
+            # Pending browse should be cleaned up
+            assert "ch-1" not in engine._pending_binds
+
+        asyncio.run(_test())
+
+    def test_browse_select_with_sessions(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "my-project"
+            project_dir.mkdir()
+
+            sessions = _make_sessions(2)
+            engine.launcher.discover_sessions = MagicMock(return_value=sessions)
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            engine._pending_binds["ch-1"] = {
+                "type": "browse",
+                "current_dir": str(project_dir),
+                "page": 0,
+                "window_name": "test-channel",
+                "cli": "claude",
+            }
+
+            await engine.handle_button_click("ch-1", "user-1", "browse_select:ch-1")
+
+            # Should NOT create tmux window yet (session picker shown)
+            engine.tmux.create_window.assert_not_called()
+
+            # Should show session picker
+            adapter.send_message.assert_called_once()
+            msg = adapter.send_message.call_args[0][1]
+            assert "Resume Session?" in msg.text
+
+            # Pending bind should transition to session picker state
+            assert "ch-1" in engine._pending_binds
+            assert "sessions" in engine._pending_binds["ch-1"]
+
+        asyncio.run(_test())
+
+    def test_browse_cancel(self, engine):
+        async def _test():
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            engine._pending_binds["ch-1"] = {
+                "type": "browse",
+                "current_dir": "/tmp",
+                "page": 0,
+                "window_name": "test-channel",
+                "cli": "claude",
+            }
+
+            await engine.handle_button_click("ch-1", "user-1", "browse_cancel:ch-1")
+
+            # Pending browse should be cleaned up
+            assert "ch-1" not in engine._pending_binds
+
+            # Should send cancellation message
+            adapter.send_message.assert_called_once()
+            msg = adapter.send_message.call_args[0][1]
+            assert "cancelled" in msg.text.lower()
+
+        asyncio.run(_test())
+
+    def test_browse_expired_state(self, engine):
+        async def _test():
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            # No pending bind
+            await engine.handle_button_click("ch-1", "user-1", "browse_select:ch-1")
+
+            adapter.send_message.assert_called_once()
+            msg = adapter.send_message.call_args[0][1]
+            assert "expired" in msg.text.lower()
+
+        asyncio.run(_test())
+
+    def test_bind_no_path_with_allowed_paths(self, engine, tmp_path):
+        async def _test():
+            engine.settings.allowed_paths = [str(tmp_path)]
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            interaction = FakeInteraction()
+            await engine.handle_bind("ch-1", None, interaction)
+
+            # Should start browsing at the first allowed path
+            assert "ch-1" in engine._pending_binds
+            assert engine._pending_binds["ch-1"]["current_dir"] == str(tmp_path)
+
+        asyncio.run(_test())
+
+    def test_browse_enter_blocked_by_allowed_paths(self, engine, tmp_path):
+        async def _test():
+            allowed = tmp_path / "allowed"
+            allowed.mkdir()
+            forbidden = tmp_path / "forbidden"
+            forbidden.mkdir()
+
+            engine.settings.allowed_paths = [str(allowed)]
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            engine.set_adapter(adapter)
+
+            # Start browsing at tmp_path (which contains both)
+            engine._pending_binds["ch-1"] = {
+                "type": "browse",
+                "current_dir": str(tmp_path),
+                "page": 0,
+                "window_name": "test-channel",
+                "cli": "claude",
+            }
+
+            # Try to enter 'forbidden' — sorted: ['allowed', 'forbidden'], index 1
+            await engine.handle_button_click("ch-1", "user-1", "browse:ch-1:0:1")
+
+            # Should remain at tmp_path
+            assert engine._pending_binds["ch-1"]["current_dir"] == str(tmp_path)
+
+            # Should send error
+            adapter.send_message.assert_called_once()
+            msg = adapter.send_message.call_args[0][1]
+            assert "allowed" in msg.text.lower()
 
         asyncio.run(_test())
