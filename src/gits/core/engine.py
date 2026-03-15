@@ -1509,7 +1509,7 @@ def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
         default           → (nothing)
         acceptEdits       → --permission-mode acceptEdits
         auto              → --permission-mode auto
-        bypassPermissions → --permission-mode bypassPermissions
+        bypassPermissions → --dangerously-skip-permissions
       codex:
         default           → (nothing)
         acceptEdits       → (not supported, skip)
@@ -1544,7 +1544,10 @@ def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
         pass  # no permission flags supported
     else:
         # claude and others
-        cmd += f" --permission-mode {mode}"
+        if mode == "bypassPermissions":
+            cmd += " --dangerously-skip-permissions"
+        else:
+            cmd += f" --permission-mode {mode}"
     return cmd
 
 
