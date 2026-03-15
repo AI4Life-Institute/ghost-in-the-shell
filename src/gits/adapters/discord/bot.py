@@ -244,6 +244,10 @@ class DiscordAdapter(PlatformAdapter):
         if message.author == self.bot.user:
             return
 
+        # Ignore Discord system messages (e.g. "started a thread", pins, etc.)
+        if message.type != discord.MessageType.default and message.type != discord.MessageType.reply:
+            return
+
         # Ignore slash command interactions (handled separately)
         if message.content.startswith("/"):
             return
@@ -505,6 +509,31 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), title, interaction
                 )
 
+        @tree.command(name="mode", description="Switch permission mode (resumes session with new flag)")
+        @app_commands.describe(mode="Permission mode to switch to")
+        @app_commands.choices(
+            mode=[
+                app_commands.Choice(name="普通 (需要確認)", value="default"),
+                app_commands.Choice(name="YOLO (全自動)", value="bypassPermissions"),
+                app_commands.Choice(name="Auto (自動執行工具)", value="auto"),
+                app_commands.Choice(name="AcceptEdits (自動編輯)", value="acceptEdits"),
+            ]
+        )
+        async def cmd_mode(
+            interaction: discord.Interaction,
+            mode: str,
+        ):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_mode(
+                    str(interaction.channel_id), mode, interaction
+                )
+
         @tree.command(name="screenshot", description="Take a terminal screenshot")
         async def cmd_screenshot(interaction: discord.Interaction):
             if not self._check_interaction_access(interaction):
@@ -528,6 +557,19 @@ class DiscordAdapter(PlatformAdapter):
             await interaction.response.defer()
             if self._engine:
                 await self._engine.handle_status(
+                    str(interaction.channel_id), interaction
+                )
+
+        @tree.command(name="resume", description="Show the resume command for the current CLI session")
+        async def cmd_resume(interaction: discord.Interaction):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_resume(
                     str(interaction.channel_id), interaction
                 )
 
@@ -558,7 +600,8 @@ class DiscordAdapter(PlatformAdapter):
                 )
 
         @tree.command(name="new", description="Reset the coding CLI session")
-        async def cmd_new(interaction: discord.Interaction):
+        @app_commands.describe(message="Optional initial message to send to the new session")
+        async def cmd_new(interaction: discord.Interaction, message: str | None = None):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
                     "Access denied.", ephemeral=True
@@ -567,7 +610,7 @@ class DiscordAdapter(PlatformAdapter):
             await interaction.response.defer()
             if self._engine:
                 await self._engine.handle_new(
-                    str(interaction.channel_id), interaction
+                    str(interaction.channel_id), interaction, message=message
                 )
 
         @tree.command(name="bash", description="Run a shell command in the working directory")
@@ -641,7 +684,33 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), name, interaction
                 )
 
-        # ── B. CLI Forwarding Commands ────────────────────────────────
+        # ── B. Browser Agent ──────────────────────────────────────────
+
+        @tree.command(name="browse", description="Run a browser agent task")
+        @app_commands.describe(
+            goal="Natural language goal for the browser agent",
+            profile="Chrome profile to use (default: Personal Chrome)",
+        )
+        async def cmd_browse(
+            interaction: discord.Interaction,
+            goal: str,
+            profile: str = "Personal Chrome",
+        ):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_browse(
+                    goal=goal,
+                    profile=profile,
+                    channel_id=str(interaction.channel_id),
+                    interaction=interaction,
+                )
+
+        # ── C. CLI Forwarding Commands ────────────────────────────────
 
         for cmd_name, description in [
             ("compact", "Compact the context window"),
@@ -654,7 +723,7 @@ class DiscordAdapter(PlatformAdapter):
         ]:
             self._register_forward_command(tree, cmd_name, description)
 
-        # ── C. Universal Forwarder ────────────────────────────────────
+        # ── D. Universal Forwarder ────────────────────────────────────
 
         @tree.command(name="cc", description="Forward any command to the coding CLI")
         @app_commands.describe(command="CLI command to forward (without leading /)")
