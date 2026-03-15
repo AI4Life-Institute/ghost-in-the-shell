@@ -126,4 +126,4 @@ See [docs/architecture.md](docs/architecture.md) for architecture, internals, an
 
 ## License
 
-Community License — free for individuals and organizations with annual revenue under $1M. Commercial use above that threshold requires a separate license — contact license@ai4life.institute. © 2026 [ai4life institute](https://github.com/AI4Life-Institute)
+Community License — free for individuals and organizations with annual revenue under $1M. Commercial use above that threshold requires a separate license — contact admins@ai4life.com. © 2026 [ai4life institute](https://github.com/AI4Life-Institute)
