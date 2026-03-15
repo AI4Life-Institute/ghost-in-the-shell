@@ -560,8 +560,8 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), interaction
                 )
 
-        @tree.command(name="info", description="Show the resume command for the current CLI session")
-        async def cmd_info(interaction: discord.Interaction):
+        @tree.command(name="esc", description="Send Escape key")
+        async def cmd_esc(interaction: discord.Interaction):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
                     "Access denied.", ephemeral=True
@@ -569,7 +569,7 @@ class DiscordAdapter(PlatformAdapter):
                 return
             await interaction.response.defer()
             if self._engine:
-                await self._engine.handle_resume(
+                await self._engine.handle_esc(
                     str(interaction.channel_id), interaction
                 )
 

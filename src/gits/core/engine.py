@@ -736,44 +736,23 @@ class Engine:
             f"CLI: `{binding.coding_cli}`",
             f"tmux window: `{binding.window_id}`",
         ]
-        if binding.cli_session_id:
-            lines.append(f"Session ID: `{binding.cli_session_id[:16]}...`")
         if binding.parent_channel_id:
             lines.append(f"Parent: <#{binding.parent_channel_id}>")
         if binding.subdir:
             lines.append(f"Subdir: `{binding.subdir}`")
         lines.append(f"Created: `{binding.created_at}`")
 
-        await self._reply(interaction, "\n".join(lines))
+        # Resume command
+        if binding.cli_session_id:
+            from .launcher import RESUME_TEMPLATES
+            cli = binding.coding_cli or "claude"
+            templates = RESUME_TEMPLATES.get(cli)
+            if templates:
+                resume_cmd = templates["by_id"].format(id=binding.cli_session_id)
+            else:
+                resume_cmd = f"{cli} --resume {binding.cli_session_id}"
+            lines.append(f"\n**Resume:**\n```\ncd {binding.work_dir}\n{resume_cmd}\n```")
 
-    async def handle_resume(self, channel_id: str, interaction: Any) -> None:
-        """Handle /resume — show the resume command for the current CLI session."""
-        from .launcher import RESUME_TEMPLATES
-
-        binding = self.session_mgr.get_binding(channel_id)
-        if binding is None:
-            await self._reply(interaction, "Not bound.")
-            return
-
-        if not binding.cli_session_id:
-            await self._reply(interaction, "No session ID recorded yet (session may still be starting).")
-            return
-
-        cli = binding.coding_cli or "claude"
-        templates = RESUME_TEMPLATES.get(cli)
-        if templates:
-            resume_cmd = templates["by_id"].format(id=binding.cli_session_id)
-        else:
-            resume_cmd = f"{cli} --resume {binding.cli_session_id}"
-
-        lines = [
-            f"**Resume command for `{cli}`:**",
-            f"```",
-            f"cd {binding.work_dir}",
-            f"{resume_cmd}",
-            f"```",
-            f"Session ID: `{binding.cli_session_id}`",
-        ]
         await self._reply(interaction, "\n".join(lines))
 
     async def handle_keys(
@@ -797,18 +776,17 @@ class Engine:
         await self._reply(interaction, f"Sent: `{keys}`")
         await self._auto_screenshot(channel_id, binding, interaction)
 
-    async def handle_stop(self, channel_id: str, interaction: Any) -> None:
-        """Handle /stop — send Escape to interrupt."""
+    async def handle_esc(self, channel_id: str, interaction: Any) -> None:
+        """Handle /esc — send a single Escape key."""
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound.")
             return
 
         await self.tmux.send_keys(binding.window_id, "Escape")
-        await asyncio.sleep(0.2)
-        await self.tmux.send_keys(binding.window_id, "Escape")
-        await self._reply(interaction, "Sent `Escape Escape` — operation interrupted.")
+        await self._reply(interaction, "Sent `Escape`.")
         await self._auto_screenshot(channel_id, binding, interaction)
+
 
     async def handle_kill(
         self,
