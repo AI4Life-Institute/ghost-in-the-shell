@@ -27,6 +27,33 @@ MAX_MESSAGE_LENGTH = 1900
 MAX_SUMMARY_LENGTH = 200
 
 
+# -- Message splitting -------------------------------------------------------
+
+
+def split_message(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
+    """Split a long message into chunks that fit within *limit* characters.
+
+    Splits on newline boundaries when possible, falling back to hard cuts.
+    Returns a list with at least one element.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        # Try to split at last newline within limit
+        split_pos = text.rfind("\n", 0, limit)
+        if split_pos <= 0:
+            # No good newline — hard cut
+            split_pos = limit
+        chunks.append(text[:split_pos])
+        text = text[split_pos:].lstrip("\n")
+    return chunks
+
+
 # -- JSONL parsing helpers ---------------------------------------------------
 
 
@@ -373,16 +400,16 @@ class JsonlMonitor:
                 binding.channel_id, len(new_texts), last_offset, new_size,
             )
             for text in new_texts:
-                if len(text) > MAX_MESSAGE_LENGTH:
-                    text = text[:MAX_MESSAGE_LENGTH] + "\n\u2026 (truncated)"
-                try:
-                    await self._on_message(binding.channel_id, text)
-                    logger.info(
-                        "JSONL forwarded to Discord ch=%s: %s",
-                        binding.channel_id, text[:80],
-                    )
-                except Exception:
-                    logger.exception("JsonlMonitor message callback error")
+                chunks = split_message(text, MAX_MESSAGE_LENGTH)
+                for chunk in chunks:
+                    try:
+                        await self._on_message(binding.channel_id, chunk)
+                        logger.info(
+                            "JSONL forwarded to Discord ch=%s: %s",
+                            binding.channel_id, chunk[:80],
+                        )
+                    except Exception:
+                        logger.exception("JsonlMonitor message callback error")
 
     def _find_jsonl_file(self, binding: Any) -> Path | None:
         """Find the JSONL/session file for a binding's CLI session.
@@ -538,12 +565,12 @@ class JsonlMonitor:
         # Fire callbacks
         if new_texts and self._on_message:
             for text in new_texts:
-                if len(text) > MAX_MESSAGE_LENGTH:
-                    text = text[:MAX_MESSAGE_LENGTH] + "\n\u2026 (truncated)"
-                try:
-                    await self._on_message(binding.channel_id, text)
-                except Exception:
-                    logger.exception("OpenCode monitor callback error")
+                chunks = split_message(text, MAX_MESSAGE_LENGTH)
+                for chunk in chunks:
+                    try:
+                        await self._on_message(binding.channel_id, chunk)
+                    except Exception:
+                        logger.exception("OpenCode monitor callback error")
 
     @staticmethod
     def _read_new_opencode_parts(

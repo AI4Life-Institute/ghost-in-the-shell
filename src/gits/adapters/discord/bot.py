@@ -90,30 +90,37 @@ class DiscordAdapter(PlatformAdapter):
         await self.bot.close()
 
     async def send_message(self, channel_id: str, msg: OutgoingMessage) -> str:
-        """Send a message to a Discord channel/thread."""
+        """Send a message to a Discord channel/thread.
+
+        Long text is automatically split into multiple messages to avoid
+        Discord's 2000-character limit.
+        """
+        from gits.core.jsonl_monitor import split_message
+
         channel = self.bot.get_channel(int(channel_id))
         if channel is None:
             channel = await self.bot.fetch_channel(int(channel_id))
 
-        kwargs: dict[str, Any] = {}
+        text_chunks = split_message(msg.text, 2000) if msg.text else [""]
 
-        if msg.text:
-            kwargs["content"] = msg.text[:2000]  # Discord limit
+        # Send all chunks; attach image/buttons only to the last one.
+        sent: Any = None
+        for i, chunk in enumerate(text_chunks):
+            kwargs: dict[str, Any] = {}
+            if chunk:
+                kwargs["content"] = chunk
 
-        if msg.image:
-            kwargs["file"] = discord.File(
-                io.BytesIO(msg.image), filename="screenshot.png"
-            )
+            is_last = i == len(text_chunks) - 1
+            if is_last:
+                if msg.image:
+                    kwargs["file"] = discord.File(
+                        io.BytesIO(msg.image), filename="screenshot.png"
+                    )
+                if msg.buttons:
+                    kwargs["view"] = self._build_view(msg.buttons)
 
-        if msg.buttons:
-            view = self._build_view(msg.buttons)
-            kwargs["view"] = view
+            sent = await channel.send(**kwargs)
 
-        if msg.ephemeral:
-            # Ephemeral only works with interactions, skip for regular sends
-            pass
-
-        sent = await channel.send(**kwargs)
         logger.info(
             "Discord POST ch=%s msg_id=%s content=%s",
             channel_id, sent.id, (msg.text or "")[:60],

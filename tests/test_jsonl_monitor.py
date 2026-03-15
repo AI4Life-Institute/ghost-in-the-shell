@@ -465,8 +465,8 @@ class TestTruncationHandling:
 
 class TestCallbackBehavior:
     @pytest.mark.asyncio
-    async def test_long_text_truncated(self, monitor, session_mgr, tmp_path):
-        """Text exceeding MAX_MESSAGE_LENGTH should be truncated."""
+    async def test_long_text_split(self, monitor, session_mgr, tmp_path):
+        """Text exceeding MAX_MESSAGE_LENGTH should be split into chunks."""
         jsonl_file = tmp_path / "sess-123.jsonl"
         _make_jsonl_file(jsonl_file, [])
 
@@ -488,10 +488,10 @@ class TestCallbackBehavior:
             }) + "\n")
 
         await monitor._poll_once()
-        callback.assert_called_once()
-        sent_text = callback.call_args[0][1]
-        assert len(sent_text) < 2100  # truncated
-        assert "truncated" in sent_text
+        assert callback.call_count == 2  # split into 2 chunks
+        for call_args in callback.call_args_list:
+            sent_text = call_args[0][1]
+            assert len(sent_text) <= 1900
 
     @pytest.mark.asyncio
     async def test_callback_error_doesnt_crash(self, monitor, session_mgr, tmp_path):
