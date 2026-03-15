@@ -290,10 +290,8 @@ class DiscordAdapter(PlatformAdapter):
         )
         @app_commands.choices(
             mode=[
-                app_commands.Choice(name="default (ask for permissions)", value="default"),
-                app_commands.Choice(name="acceptEdits (auto-accept edits)", value="acceptEdits"),
-                app_commands.Choice(name="auto (auto-accept most tools)", value="auto"),
-                app_commands.Choice(name="bypassPermissions / yolo (skip all prompts)", value="bypassPermissions"),
+                app_commands.Choice(name="普通 (需要确认)", value="default"),
+                app_commands.Choice(name="YOLO (全自动)", value="bypassPermissions"),
             ],
             cli=[
                 app_commands.Choice(name="Claude Code", value="claude"),
