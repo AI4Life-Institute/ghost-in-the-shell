@@ -30,6 +30,19 @@ Watch your AI write code, review its terminal output, and approve permission pro
 - **tmux-backed sessions** — each project runs in a real tmux window; developers get full terminal access locally while GITS handles the Discord bridge
 - **Subscription-safe** — GITS drives the official CLI tools (Claude Code, Codex) exactly as a human would; no API key required, no terms-of-service gray area — your existing Pro/Max subscription just works
 
+## Why GITS?
+
+| | GITS | OpenClaw | Native Claude Code / Codex |
+|---|:---:|:---:|:---:|
+| Mobile & remote control | ✅ Discord | ✅ Web UI | ❌ Local terminal only |
+| Team collaboration & sharing | ✅ Discord channels & threads | ❌ | ❌ |
+| Works with your subscription (no API key) | ✅ | ❌ Requires API key | ✅ |
+| ToS compliant | ✅ Drives official CLI as a human would | ⚠️ API access may violate ToS | ✅ |
+| Multi-CLI (Claude Code + Codex + OpenCode) | ✅ | ❌ Claude only | ❌ One CLI only |
+| Real terminal access (tmux) | ✅ | ❌ | ✅ |
+| Interactive prompts as buttons | ✅ | ❌ | ❌ |
+| Isolated worktrees per task | ✅ `/fork` | ❌ | ❌ |
+
 ---
 
 ## Quick Start
