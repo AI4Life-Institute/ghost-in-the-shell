@@ -281,10 +281,10 @@ class JsonlMonitor:
                     binding.cli_session_id = new_sid
 
         for binding in bindings:
+            cli = getattr(binding, "coding_cli", "claude")
             if not binding.cli_session_id:
                 continue
             try:
-                cli = getattr(binding, "coding_cli", "claude")
                 if cli == "opencode":
                     await self._check_opencode_binding(binding)
                 else:
@@ -313,6 +313,11 @@ class JsonlMonitor:
         """Check a single binding's JSONL file for new content."""
         jsonl_path = self._find_jsonl_file(binding)
         if jsonl_path is None:
+            cli = getattr(binding, "coding_cli", "claude")
+            logger.debug(
+                "No JSONL file found for channel %s (cli=%s, sid=%s)",
+                binding.channel_id, cli, binding.cli_session_id,
+            )
             return
 
         file_key = str(jsonl_path)
