@@ -138,9 +138,11 @@ class JsonlMonitor:
         self,
         session_mgr: Any,
         poll_interval: float = 2.0,
+        projects_path: Path | None = None,
     ):
         self._session_mgr = session_mgr
         self._poll_interval = poll_interval
+        self._projects_path = projects_path or Path.home() / ".claude" / "projects"
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -191,8 +193,39 @@ class JsonlMonitor:
             await asyncio.sleep(self._poll_interval)
 
     async def _poll_once(self) -> None:
-        """Single poll iteration: check all bindings for new JSONL content."""
+        """Single poll iteration: check all bindings for new JSONL content.
+
+        Also reads ~/.gits/session_map.json to pick up new CLI session IDs
+        written by the ``gits hook`` subprocess.
+        """
         bindings = self._session_mgr.list_bindings()
+
+        # Try to pick up session IDs from session_map.json
+        session_map = self._read_session_map()
+        if session_map:
+            for binding in bindings:
+                if not binding.window_id:
+                    continue
+                # session_map keys use "gits:{window_id}" format
+                map_key = f"gits:{binding.window_id}"
+                entry = session_map.get(map_key)
+                if not entry or not isinstance(entry, dict):
+                    continue
+                new_sid = entry.get("session_id", "")
+                if new_sid and new_sid != binding.cli_session_id:
+                    logger.info(
+                        "Updating cli_session_id for channel %s "
+                        "(window %s): %s -> %s",
+                        binding.channel_id,
+                        binding.window_id,
+                        binding.cli_session_id,
+                        new_sid,
+                    )
+                    await self._session_mgr.update_cli_session_id(
+                        binding.channel_id, new_sid
+                    )
+                    binding.cli_session_id = new_sid
+
         for binding in bindings:
             if not binding.cli_session_id:
                 continue
@@ -203,6 +236,20 @@ class JsonlMonitor:
                     "Error checking JSONL for channel %s", binding.channel_id,
                     exc_info=True,
                 )
+
+    @staticmethod
+    def _read_session_map() -> dict:
+        """Read ~/.gits/session_map.json if it exists.
+
+        Returns the parsed dict, or empty dict on any error.
+        """
+        map_file = Path.home() / ".gits" / "session_map.json"
+        if not map_file.exists():
+            return {}
+        try:
+            return json.loads(map_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
 
     async def _check_binding(self, binding: Any) -> None:
         """Check a single binding's JSONL file for new content."""
@@ -273,7 +320,7 @@ class JsonlMonitor:
         if not binding.cli_session_id or not binding.work_dir:
             return None
 
-        claude_projects = Path.home() / ".claude" / "projects"
+        claude_projects = self._projects_path
         if not claude_projects.exists():
             return None
 

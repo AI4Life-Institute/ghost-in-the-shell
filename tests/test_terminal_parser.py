@@ -350,6 +350,8 @@ class TestExtractPromptOptions:
             Do you want to proceed?
             \u276f 1. Yes
               2. No
+
+            Esc to cancel
         """)
         result = extract_prompt_options(text)
         assert result is not None
@@ -361,6 +363,8 @@ class TestExtractPromptOptions:
             Do you want to proceed?
               1. Yes
               2. No
+
+            Esc to cancel
         """)
         result = extract_prompt_options(text)
         assert result is not None
@@ -438,6 +442,8 @@ class TestIntegration:
               2. Beta
               3. Gamma
               4. Delta
+
+            Esc to cancel
         """)
         result = extract_prompt_options(text)
         assert result is not None
@@ -446,10 +452,11 @@ class TestIntegration:
 
     def test_tool_context_empty_when_no_tool(self) -> None:
         text = textwrap.dedent("""\
-            Some random text
             Do you want to proceed?
             \u276f 1. Yes
               2. No
+
+            Esc to cancel
         """)
         result = extract_prompt_options(text)
         assert result is not None

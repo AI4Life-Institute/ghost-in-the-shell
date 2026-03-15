@@ -313,12 +313,11 @@ def extract_prompt_options(pane_text: str) -> PromptInfo | None:
     # numbered lines (e.g. "1. 先用 /bind /tmp 绑定一个目录").
     ui_content = extract_interactive_content(pane_text)
 
-    # Determine which lines to scan for options
-    if ui_content:
-        option_lines = ui_content.content.strip().split("\n")
-    else:
-        # Fallback: scan full pane (but this is less reliable)
-        option_lines = pane_text.strip().split("\n")
+    # Only scan within detected prompt region — if no interactive UI
+    # is found, there are no prompt options to extract.
+    if not ui_content:
+        return None
+    option_lines = ui_content.content.strip().split("\n")
 
     # -- Extract numbered options from the prompt region only --
     options: list[PromptOption] = []
