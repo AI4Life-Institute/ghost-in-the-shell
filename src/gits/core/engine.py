@@ -1011,13 +1011,8 @@ class Engine:
             await self._reply(
                 interaction,
                 "Usage: `/model <name>`\n"
-                "Available models:\n"
-                "• `sonnet` — Sonnet 4.6 (daily coding)\n"
-                "• `opus` — Opus 4.6 (complex reasoning)\n"
-                "• `haiku` — Haiku 4.5 (fast, simple tasks)\n"
-                "• `sonnet[1m]` — Sonnet 4.6 with 1M context\n"
-                "• `opus[1m]` — Opus 4.6 with 1M context\n"
-                "• `opusplan` — Opus planning + Sonnet execution",
+                "**Claude Code** — `sonnet`, `opus`, `haiku`, `sonnet[1m]`, `opus[1m]`, `opusplan`\n"
+                "**Codex** — `o3`, `o4-mini`, `gpt-4o`, or any model name supported by your CLI",
             )
 
     # ------------------------------------------------------------------

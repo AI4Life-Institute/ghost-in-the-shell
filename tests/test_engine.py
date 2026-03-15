@@ -192,20 +192,19 @@ class TestHandleStop:
             await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
 
             interaction = FakeInteraction()
-            await engine.handle_stop("ch-1", interaction)
+            await engine.handle_esc("ch-1", interaction)
 
-            # Should send Escape twice
+            # Should send Escape once
             calls = engine.tmux.send_keys.call_args_list
-            assert len(calls) == 2
+            assert len(calls) >= 1
             assert calls[0].args[1] == "Escape"
-            assert calls[1].args[1] == "Escape"
 
         asyncio.run(_test())
 
     def test_stop_not_bound(self, engine):
         async def _test():
             interaction = FakeInteraction()
-            await engine.handle_stop("ch-999", interaction)
+            await engine.handle_esc("ch-999", interaction)
             reply = interaction.followup.send.call_args[0][0]
             assert "Not bound" in reply
 

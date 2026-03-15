@@ -300,6 +300,11 @@ const DATA_FILES = [
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────
+let channelPaneMap = {}; // channel_id → pane index (populated by ghost bridge)
+let allSessions = []; // all sessions from backend
+let panePickerOpen = -1; // which pane idx has picker open
+let tmuxSession = 'ghost'; // tmux session name from backend
+const ptyTerminals = {}; // pane index → xterm.js Terminal instance
 let curMode = 'build';
 let activeWsTab = 0;
 let devMode = false;
@@ -388,6 +393,18 @@ function toggleDevMode() {
   if (devMode) {
     const inp = document.querySelector(`#wsp-${activeWsTab} .wsp-tinp`);
     if (inp) setTimeout(() => inp.focus(), 50);
+    // Init any pending xterm.js terminals
+    Object.entries(_pendingTerminalInits).forEach(([idx, channelId]) => {
+      setTimeout(() => initPtyTerminal(Number(idx), channelId), 150);
+      delete _pendingTerminalInits[idx];
+    });
+    // Also re-init existing ones if not yet initialized
+    Object.keys(channelPaneMap).forEach(channelId => {
+      const idx = channelPaneMap[channelId];
+      if (idx < 3 && !ptyTerminals[idx]) {
+        setTimeout(() => initPtyTerminal(idx, channelId), 150);
+      }
+    });
   }
 }
 
@@ -596,6 +613,14 @@ function send() {
   if (!txt) return;
   addm('usr', txt);
   inp.value = ''; ar(inp);
+
+  const channelId = Object.keys(channelPaneMap).find(k => channelPaneMap[k] === 0);
+  if (window.ghost && channelId) {
+    window.ghost.send('send', { channel_id: channelId, text: txt });
+    return; // real response arrives via 'output' event
+  }
+
+  // Mock response (no Electron bridge)
   document.getElementById('typing').style.display = 'flex';
   scrl();
   setTimeout(() => {
@@ -1323,7 +1348,323 @@ document.addEventListener('click', e => {
   if (!e.target.closest('#agents-popover') && !e.target.closest('#tb-agents-btn')) {
     closeAgentsPopover();
   }
+  if (panePickerOpen >= 0 && !e.target.closest('.pane-picker') && !e.target.closest('.wsp-name')) {
+    document.querySelectorAll('.pane-picker').forEach(p => p.remove());
+    panePickerOpen = -1;
+  }
 });
+
+// ── Tauri v2 IPC shim ─────────────────────────────────────────────────────
+// Exposes the same window.ghost API as Electron's preload.js, so ghostSetup()
+// works unchanged in both runtimes. Runs only when window.__TAURI__ is present.
+(function installTauriShim() {
+  if (window.ghost || !window.__TAURI__) return;
+  const { invoke, event: tauriEvent } = window.__TAURI__;
+
+  window.ghost = {
+    send(cmd, payload = {}) {
+      return invoke('python_cmd', { cmd, payload });
+    },
+    on(event, cb) {
+      const handle = { event, cb, unlisten: null };
+      tauriEvent.listen('python-event', (e) => {
+        const data = e.payload;
+        if (event === '*' || data?.event === event) cb(data);
+      }).then(fn => { handle.unlisten = fn; });
+      return handle;
+    },
+    off(handle) {
+      if (handle?.unlisten) handle.unlisten();
+    },
+    onAny(cb) { return window.ghost.on('*', cb); },
+  };
+})();
+
+// ── Ghost Bridge (Electron IPC) ────────────────────────────────────────────
+
+function sendPane(idx) {
+  const ta = document.querySelector(`#wsp-${idx} .wsp-ta`);
+  if (!ta) return;
+  const txt = ta.value.trim();
+  if (!txt) return;
+  _addPaneMsg(idx, 'usr', txt);
+  ta.value = '';
+
+  const channelId = Object.keys(channelPaneMap).find(k => channelPaneMap[k] === idx);
+  if (window.ghost && channelId) {
+    window.ghost.send('send', { channel_id: channelId, text: txt });
+  }
+}
+
+function _addPaneMsg(idx, role, text) {
+  const msgs = idx === 0
+    ? document.getElementById('build-msgs')
+    : document.getElementById('wspc-' + idx);
+  if (!msgs) return;
+  const now = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  d.innerHTML = `<div class="mav">${role==='ai'?'🤖':'W'}</div><div><div class="bbl">${fmt(text)}</div><div class="mt">${now}</div></div>`;
+  if (idx === 0) {
+    msgs.insertBefore(d, document.getElementById('typing'));
+  } else {
+    msgs.appendChild(d);
+  }
+  setTimeout(() => msgs.scrollTop = msgs.scrollHeight, 10);
+}
+
+function _initTerminalWhenVisible(idx, channelId) {
+  // If devMode is on, init immediately; otherwise wait until devMode toggle
+  if (devMode) {
+    setTimeout(() => initPtyTerminal(idx, channelId), 100);
+  } else {
+    // Store pending init; toggleDevMode will pick it up
+    _pendingTerminalInits[idx] = channelId;
+  }
+}
+
+const _pendingTerminalInits = {};
+
+function _applySession(idx, sess) {
+  const panel = document.getElementById('wsp-' + idx);
+  if (!panel) return;
+
+  // Update header label + CLI badge
+  const nameEl = panel.querySelector('.wsp-name');
+  const aiEl = panel.querySelector('.wsp-ai');
+  if (nameEl) nameEl.textContent = sess.window_name || sess.coding_cli;
+  if (nameEl) {
+    nameEl.style.cursor = 'pointer';
+    nameEl.title = 'Click to switch session';
+    nameEl.onclick = (e) => openPanePicker(idx, e);
+  }
+  if (aiEl) aiEl.textContent = sess.coding_cli || 'claude';
+
+  // Mark as active
+  const dot = panel.querySelector('.pane-dot');
+  if (dot) dot.className = 'pane-dot active';
+  panel.querySelectorAll('[class^="pane-status-"]').forEach(el => el.style.display = 'none');
+  const activeLabel = panel.querySelector('.pane-status-active');
+  if (activeLabel) activeLabel.style.display = '';
+
+  // Replace mock messages with connected greeting
+  const msgs = idx === 0
+    ? document.getElementById('build-msgs')
+    : document.getElementById('wspc-' + idx);
+  if (msgs) {
+    const typingEl = document.getElementById('typing');
+    const children = Array.from(msgs.childNodes);
+    children.forEach(c => { if (c !== typingEl) msgs.removeChild(c); });
+    const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '~';
+    _addPaneMsg(idx, 'ai', `Connected · ${sess.coding_cli} · \`${dir}\``);
+  }
+  // Initialize interactive xterm.js terminal (lazy — only when devMode shows the term div)
+  _initTerminalWhenVisible(idx, sess.channel_id);
+}
+
+function openPanePicker(paneIdx, e) {
+  e.stopPropagation();
+  // Close existing picker
+  document.querySelectorAll('.pane-picker').forEach(p => p.remove());
+  if (panePickerOpen === paneIdx) { panePickerOpen = -1; return; }
+  panePickerOpen = paneIdx;
+
+  const panel = document.getElementById('wsp-' + paneIdx);
+  if (!panel || allSessions.length === 0) return;
+  const nameEl = panel.querySelector('.wsp-name');
+  const currentId = Object.keys(channelPaneMap).find(k => channelPaneMap[k] === paneIdx);
+
+  const picker = document.createElement('div');
+  picker.className = 'pane-picker';
+
+  allSessions.forEach(sess => {
+    const item = document.createElement('div');
+    item.className = 'pane-picker-item' + (sess.channel_id === currentId ? ' active' : '');
+    const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '~';
+    item.innerHTML =
+      `<span class="pp-name">${esc(sess.window_name)}</span>` +
+      `<span class="pp-cli">${esc(sess.coding_cli)}</span>` +
+      `<span class="pp-dir">${esc(dir)}</span>`;
+    item.onclick = (ev) => {
+      ev.stopPropagation();
+      switchPaneSession(paneIdx, sess);
+      picker.remove();
+      panePickerOpen = -1;
+    };
+    picker.appendChild(item);
+  });
+
+  nameEl.parentElement.appendChild(picker);
+}
+
+function switchPaneSession(paneIdx, sess) {
+  // Remove old channel mapping
+  const oldId = Object.keys(channelPaneMap).find(k => channelPaneMap[k] === paneIdx);
+  if (oldId) delete channelPaneMap[oldId];
+  // Set new mapping
+  channelPaneMap[sess.channel_id] = paneIdx;
+  _applySession(paneIdx, sess);
+}
+
+function initPtyTerminal(idx, channelId) {
+  if (ptyTerminals[idx]) {
+    ptyTerminals[idx].dispose();
+    delete ptyTerminals[idx];
+  }
+
+  const termEl = document.getElementById('wspt-' + idx);
+  if (!termEl) return;
+
+  // Clear old content
+  termEl.innerHTML = '';
+  termEl.style.padding = '0';
+
+  const term = new Terminal({
+    fontFamily: '"SF Mono", "JetBrains Mono", "Menlo", monospace',
+    fontSize: 12,
+    lineHeight: 1.5,
+    theme: {
+      background: 'transparent',
+      foreground: 'rgba(0,0,0,0.85)',
+      cursor: 'rgba(0,0,0,0.7)',
+      selectionBackground: 'rgba(0,122,255,0.3)',
+      black: '#1a1a1a', red: '#c0392b', green: '#27ae60',
+      yellow: '#f39c12', blue: '#2980b9', magenta: '#8e44ad',
+      cyan: '#16a085', white: '#ecf0f1',
+      brightBlack: '#7f8c8d', brightRed: '#e74c3c',
+      brightGreen: '#2ecc71', brightYellow: '#f1c40f',
+      brightBlue: '#3498db', brightMagenta: '#9b59b6',
+      brightCyan: '#1abc9c', brightWhite: '#ffffff',
+    },
+    allowTransparency: true,
+    cursorBlink: true,
+    scrollback: 500,
+  });
+
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(termEl);
+  fitAddon.fit();
+
+  ptyTerminals[idx] = term;
+
+  // Send keyboard input to PTY
+  term.onData((data) => {
+    if (window.__TAURI__) {
+      const encoded = btoa(data);
+      window.__TAURI__.invoke('pty_input', { channel_id: channelId, data: encoded });
+    }
+  });
+
+  // Open PTY on backend
+  const binding = allSessions.find(s => s.channel_id === channelId);
+  if (binding && window.__TAURI__) {
+    const rows = term.rows;
+    const cols = term.cols;
+    window.__TAURI__.invoke('open_pty', {
+      channel_id: channelId,
+      tmux_session: tmuxSession,
+      window_id: binding.window_id,
+      rows,
+      cols,
+    }).catch(err => console.error('open_pty failed:', err));
+  }
+
+  // Handle resize
+  const resizeObserver = new ResizeObserver(() => {
+    fitAddon.fit();
+    if (window.__TAURI__ && term.rows && term.cols) {
+      window.__TAURI__.invoke('resize_pty', {
+        channel_id: channelId,
+        rows: term.rows,
+        cols: term.cols,
+      }).catch(() => {});
+    }
+  });
+  resizeObserver.observe(termEl);
+}
+
+function ghostSetup() {
+  if (typeof window === 'undefined' || !window.ghost) return;
+
+  // Wire send buttons for panes 1 and 2
+  [1, 2].forEach(idx => {
+    const btn = document.querySelector(`#wsp-${idx} .wsp-sbtn`);
+    if (btn) btn.onclick = () => sendPane(idx);
+  });
+
+  window.ghost.on('ready', () => {
+    window.ghost.send('sessions');
+  });
+
+  // Request sessions immediately in case ready already fired
+  window.ghost.send('sessions');
+
+  window.ghost.on('sessions', (data) => {
+    allSessions = data.sessions || [];
+    if (data.tmux_session) tmuxSession = data.tmux_session;
+    channelPaneMap = {};
+    allSessions.forEach((sess, i) => {
+      channelPaneMap[sess.channel_id] = i;
+      _applySession(i, sess);
+    });
+    // Show terminal view by default when real sessions arrive
+    if (allSessions.length > 0 && !devMode) toggleDevMode();
+  });
+
+  window.ghost.on('output', (data) => {
+    const idx = channelPaneMap[data.channel_id];
+    if (idx === undefined) return;
+    if (data.text) _addPaneMsg(idx, 'ai', data.text);
+  });
+
+  window.ghost.on('edit', (data) => {
+    const idx = channelPaneMap[data.channel_id];
+    if (idx === undefined) return;
+    if (data.text) _addPaneMsg(idx, 'ai', data.text);
+  });
+
+  window.ghost.on('pane_update', (data) => {
+    const idx = channelPaneMap[data.channel_id];
+    if (idx === undefined) return;
+
+    // Update status dot
+    const panel = document.getElementById('wsp-' + idx);
+    if (panel) {
+      const dot = panel.querySelector('.pane-dot');
+      if (dot) {
+        if (data.status === 'busy') {
+          dot.className = 'pane-dot active';
+          dot.style.background = '#f59e0b';
+          dot.style.boxShadow = '0 0 4px rgba(245,158,11,.6)';
+          dot.style.animation = 'pulseDot 1s ease-in-out infinite';
+        } else {
+          dot.className = 'pane-dot active';
+          dot.style.background = '#22c55e';
+          dot.style.boxShadow = '0 0 4px rgba(34,197,94,.5)';
+          dot.style.animation = 'pulseDot 2s ease-in-out infinite';
+        }
+      }
+    }
+  });
+
+  // PTY output → xterm.js write
+  window.ghost.on('pty-output', (data) => {
+    const idx = channelPaneMap[data.channel_id];
+    if (idx === undefined) return;
+    const term = ptyTerminals[idx];
+    if (!term) return;
+    if (data.closed) {
+      term.write('\r\n[terminal closed]\r\n');
+      return;
+    }
+    if (data.data) {
+      // data.data is base64 — decode to string
+      const raw = atob(data.data);
+      term.write(raw);
+    }
+  });
+}
 
 // ── Init ───────────────────────────────────────────────────────────────────
 (function init() {
@@ -1355,16 +1696,19 @@ document.addEventListener('click', e => {
   // build empty state check
   checkBuildEmpty();
 
-  // toast after 3s — simulate agent completing (task 1.34)
-  setTimeout(() => {
-    showToast('✓ Nash-AI Reporter · Done → View in Agents', () => setMode('agents'));
-    // inject summary into build chat
-    addm('ai', '✓ Nash-AI Reporter finished: downloaded gs_q2_2024.pdf (2.4 MB). Results saved to Data.');
-  }, 3000);
+  // Wire Electron IPC bridge (no-op in browser)
+  ghostSetup();
 
-  // toast after 7s — simulate HITL waiting (task 1.35)
-  setTimeout(() => {
-    showToast('⚠ Notion Page Watcher needs your input', () => setMode('agents'));
-    updateAgentsWarnBadge();
-  }, 7000);
+  // Demo toasts only when not connected to real backend
+  if (!window.ghost) {
+    setTimeout(() => {
+      showToast('✓ Nash-AI Reporter · Done → View in Agents', () => setMode('agents'));
+      addm('ai', '✓ Nash-AI Reporter finished: downloaded gs_q2_2024.pdf (2.4 MB). Results saved to Data.');
+    }, 3000);
+
+    setTimeout(() => {
+      showToast('⚠ Notion Page Watcher needs your input', () => setMode('agents'));
+      updateAgentsWarnBadge();
+    }, 7000);
+  }
 })();

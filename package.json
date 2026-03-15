@@ -1,0 +1,16 @@
+{
+  "name": "ghost",
+  "version": "0.1.0",
+  "description": "Ghost — AI Fleet Control Center",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.0.0"
+  }
+}

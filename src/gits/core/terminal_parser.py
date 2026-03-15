@@ -281,16 +281,25 @@ def parse_status_line(pane_text: str) -> str | None:
     if chrome_idx is None:
         return None  # No chrome visible
 
+    # Check the prompt line below the separator to detect idle state
+    for i in range(chrome_idx + 1, min(chrome_idx + 5, len(lines))):
+        line = lines[i].strip()
+        if not line:
+            continue
+        if line.startswith("❯") or line == ">":
+            return "idle"
+        break
+
     # Check lines just above the separator (skip blanks, up to 4 lines)
     for i in range(chrome_idx - 1, max(chrome_idx - 5, -1), -1):
         line = lines[i].strip()
         if not line:
             continue
         if line[0] in STATUS_SPINNERS:
-            return line[1:].strip()
-        # First non-empty line above separator isn't a spinner -> no status
-        return None
-    return None
+            return "busy"
+        # First non-empty line above separator isn't a spinner -> idle
+        return "idle"
+    return "idle"
 
 
 # -- Pane chrome stripping ----------------------------------------------

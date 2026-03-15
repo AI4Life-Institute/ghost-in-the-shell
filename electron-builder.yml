@@ -1,0 +1,29 @@
+appId: com.ghost.app
+productName: Ghost
+
+directories:
+  buildResources: build
+  output: dist
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+    - target: zip
+  icon: build/icon.icns
+  darkModeSupport: true
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+files:
+  - ui/**
+  - electron/**
+  - "!src/**"
+  - "!tests/**"
+  - "!openspec/**"
+  - "!docs/**"
+  - "!scripts/**"
+  - "!*.py"
+  - "!*.sh"
+  - "!*.md"

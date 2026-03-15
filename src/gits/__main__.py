@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sys
+from typing import Any
 
 
 def main() -> None:
@@ -65,6 +66,14 @@ def main() -> None:
     # gits status
     sub.add_parser("status", help="Show current bindings")
 
+    # gits desktop  (launched by the Electron shell)
+    desktop_p = sub.add_parser("desktop", help="Desktop app backend (IPC over stdio)")
+    desktop_p.add_argument(
+        "--log-level",
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+
     args = parser.parse_args()
 
     if args.command == "start" or args.command is None:
@@ -77,6 +86,8 @@ def main() -> None:
         _cmd_hook(args)
     elif args.command == "status":
         _cmd_status(args)
+    elif args.command == "desktop":
+        _cmd_desktop(args)
 
 
 def _cmd_start(args: argparse.Namespace) -> None:
@@ -699,6 +710,199 @@ def _cmd_status(args: argparse.Namespace) -> None:
         if b.get("cli_session_id"):
             print(f"    Session: {b['cli_session_id'][:16]}...")
         print()
+
+
+def _cmd_desktop(args: argparse.Namespace) -> None:
+    """Desktop backend: read JSON commands from stdin, write JSON events to stdout.
+
+    Protocol (newline-delimited JSON):
+      stdin:  {"cmd": "sessions"}
+      stdin:  {"cmd": "send",    "payload": {"channel_id": "...", "text": "..."}}
+      stdin:  {"cmd": "capture", "payload": {"channel_id": "..."}}
+      stdin:  {"cmd": "button",  "payload": {"channel_id": "...", "callback_data": "..."}}
+      stdin:  {"cmd": "ping"}
+      stdout: {"event": "ready",    "version": "..."}
+      stdout: {"event": "sessions", "sessions": [...]}
+      stdout: {"event": "output",   "channel_id": "...", "text": "..."}
+      stdout: {"event": "capture",  "channel_id": "...", "text": "..."}
+      stdout: {"event": "pong"}
+      stdout: {"event": "error",    "msg": "..."}
+    """
+    log_level = (args.log_level or "WARNING").upper()  # quiet by default — stdout is IPC
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        stream=sys.stderr,  # keep stdout clean for IPC
+    )
+    logger = logging.getLogger("gits.desktop")
+    logger.info("Desktop backend starting")
+
+    from .adapters.desktop import DesktopAdapter
+    from .adapters.base import IncomingMessage
+    from .core.engine import Engine
+    from .config import Settings
+
+    settings = Settings()
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+
+    engine = Engine(settings)
+
+    async def _run() -> None:
+        loop = asyncio.get_event_loop()
+
+        def _emit(obj: dict) -> None:
+            """Write a JSON event to stdout (Electron picks this up)."""
+            try:
+                print(json.dumps(obj), flush=True)
+            except Exception:
+                pass
+
+        # Wire up the DesktopAdapter
+        adapter = DesktopAdapter(emit=_emit)
+        engine.set_adapter(adapter)
+        adapter.on_message(engine.handle_message)
+        adapter.on_button_click(engine.handle_button_click)
+
+        # Start the engine (health monitor, pane poller, etc.)
+        # Redirect stdout → stderr during startup to prevent installer print()
+        # calls from contaminating the JSON IPC channel.
+        _old_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            await engine.start()
+        finally:
+            sys.stdout = _old_stdout
+
+        # Emit ready + initial session list
+        _emit({"event": "ready", "version": _get_version()})
+        _emit_sessions(engine, _emit)
+
+        # Start background pane status watcher
+        asyncio.ensure_future(_pane_watcher(engine, _emit, logger))
+
+        # Read commands from stdin line by line
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+        try:
+            while True:
+                try:
+                    line = await reader.readline()
+                except Exception:
+                    break
+                if not line:
+                    break
+                line = line.decode().strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("Desktop: invalid JSON on stdin: %s", line[:80])
+                    continue
+
+                cmd = msg.get("cmd", "")
+                payload = msg.get("payload", {})
+                logger.debug("Desktop cmd: %s %s", cmd, payload)
+
+                try:
+                    if cmd == "ping":
+                        _emit({"event": "pong"})
+
+                    elif cmd == "sessions":
+                        _emit_sessions(engine, _emit)
+
+                    elif cmd == "send":
+                        channel_id = payload.get("channel_id", "")
+                        text = payload.get("text", "")
+                        if channel_id and text:
+                            await adapter.dispatch_message(IncomingMessage(
+                                platform="desktop",
+                                channel_id=channel_id,
+                                user_id="desktop_user",
+                                text=text,
+                            ))
+                        else:
+                            _emit({"event": "error", "msg": "send requires channel_id and text"})
+
+                    elif cmd == "capture":
+                        channel_id = payload.get("channel_id", "")
+                        binding = engine.session_mgr.get_binding(channel_id)
+                        if binding:
+                            text = await engine.tmux.capture_pane_text(binding.window_id)
+                            _emit({"event": "capture", "channel_id": channel_id, "text": text})
+                        else:
+                            _emit({"event": "error", "msg": f"No binding for channel {channel_id}"})
+
+                    elif cmd == "button":
+                        channel_id = payload.get("channel_id", "")
+                        callback_data = payload.get("callback_data", "")
+                        if channel_id and callback_data:
+                            await adapter.dispatch_button(channel_id, "desktop_user", callback_data)
+                        else:
+                            _emit({"event": "error", "msg": "button requires channel_id and callback_data"})
+
+                    else:
+                        _emit({"event": "error", "msg": f"Unknown command: {cmd}"})
+
+                except Exception as exc:
+                    logger.exception("Desktop: error handling cmd %s", cmd)
+                    _emit({"event": "error", "cmd": cmd, "msg": str(exc)})
+        finally:
+            await engine.stop()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        logger.info("Desktop: shutting down")
+    except Exception:
+        logger.exception("Desktop backend crashed")
+
+
+async def _pane_watcher(engine: Any, emit_fn: Any, logger: Any) -> None:
+    """Background task: poll all bound panes every 2s, push status + content."""
+    from .core.terminal_parser import parse_status_line
+
+    prev_statuses: dict[str, str] = {}
+
+    while True:
+        await asyncio.sleep(2)
+        bindings = engine.session_mgr.list_bindings()
+        for b in bindings:
+            try:
+                text = await engine.tmux.capture_pane_text(b.window_id)
+                status = parse_status_line(text) or "idle"
+
+                # Always emit capture (terminal content)
+                emit_fn({
+                    "event": "pane_update",
+                    "channel_id": b.channel_id,
+                    "status": status,
+                    "text": text,
+                })
+
+                prev_statuses[b.channel_id] = status
+            except Exception as exc:
+                logger.debug("pane_watcher: error for %s: %s", b.channel_id, exc)
+
+
+def _emit_sessions(engine: Any, emit_fn: Any) -> None:
+    """Emit the current session list to the Electron/Tauri frontend."""
+    bindings = engine.session_mgr.list_bindings()
+    emit_fn({"event": "sessions",
+             "tmux_session": engine.tmux.session_name,
+             "sessions": [
+        {
+            "channel_id": b.channel_id,
+            "window_id": b.window_id,
+            "window_name": b.window_name,
+            "work_dir": b.work_dir,
+            "coding_cli": b.coding_cli,
+            "platform": b.platform,
+        }
+        for b in bindings
+    ]})
 
 
 def _get_version() -> str:

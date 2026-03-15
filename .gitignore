@@ -22,5 +22,11 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Node
+node_modules/
+
+# Rust/Tauri build artifacts
+src-tauri/target/
+
 # State
 *.gits/
