@@ -265,15 +265,37 @@ class Engine:
         if session_id:
             session_info = f"\nResuming session `{session_id[:16]}...`"
         else:
-            session_info = "\nFresh session (hook will capture session ID)"
+            session_info = "\nFresh session"
 
-        await self._reply(
-            interaction,
+        # Build confirmation with quick-action buttons
+        wid = win.window_id
+        nav_buttons = [
+            [
+                Button(label="↑ Up", callback_data=f"prompt_opt:{wid}:Up"),
+                Button(label="↓ Down", callback_data=f"prompt_opt:{wid}:Down"),
+                Button(label="⏎ Enter", callback_data=f"prompt_opt:{wid}:Enter"),
+                Button(label="⎋ Esc", callback_data=f"prompt_esc:{wid}"),
+            ],
+            [
+                Button(label="Accept (↓⏎)", callback_data=f"nav:{wid}:Down Enter"),
+                Button(label="Screenshot", callback_data=f"nav:{wid}:screenshot"),
+                Button(label="Ctrl-C", callback_data=f"prompt_abort:{wid}"),
+            ],
+        ]
+
+        confirm_text = (
             f"Bound **#{window_name}** \u2192 `{p}`\n"
-            f"tmux window: `{win.window_id}` | CLI: `{cli}`"
-            f"{session_info}"
-            f"{dir_info}",
+            f"tmux: `{wid}` | CLI: `{cli}`"
+            f"{session_info}{dir_info}"
         )
+
+        if self._adapter:
+            await self._adapter.send_message(
+                channel_id,
+                OutgoingMessage(text=confirm_text, buttons=nav_buttons),
+            )
+        if interaction:
+            await self._reply(interaction, "Bound successfully.")
 
     # ------------------------------------------------------------------
     # Session Picker helpers
@@ -699,6 +721,28 @@ class Engine:
                 user_id,
             )
             await self.tmux.send_keys(window_id, "C-c")
+
+        elif action == "nav" and len(parts) >= 3:
+            window_id = parts[1]
+            nav_action = ":".join(parts[2:])  # rejoin in case of colons
+
+            if nav_action == "screenshot":
+                # Take screenshot and send
+                try:
+                    ansi_text = await self.tmux.capture_pane_ansi(window_id)
+                    png_bytes = await self.screenshot.capture(ansi_text)
+                    if self._adapter:
+                        await self._adapter.send_message(
+                            channel_id,
+                            OutgoingMessage(image=png_bytes),
+                        )
+                except Exception:
+                    logger.exception("Nav screenshot failed")
+            else:
+                # Send key sequence (space-separated keys)
+                for key in nav_action.split():
+                    await self.tmux.send_keys(window_id, key)
+                    await asyncio.sleep(0.15)
 
         elif action == "bind_resume" and len(parts) >= 3:
             pending_channel = parts[1]
