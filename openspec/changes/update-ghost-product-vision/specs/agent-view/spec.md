@@ -39,32 +39,60 @@ Left panel:
 - **THEN** it appears immediately in the appropriate group in the Agents view
 - **AND** the sidebar Agents badge increments
 
-### Requirement: Browser Agents — Real Chrome, Real Sessions
-The system SHALL display Browser Agents organised by Chrome profile. Each Browser Agent
-operates the user's real Chrome browser — not a sandboxed browser — using the user's existing
-cookies, saved passwords, and active login sessions. No re-authentication is required for
-sites the user is already logged into.
+### Requirement: Browser Profiles as First-Class Fleet Units
+The system SHALL display Browser Agents grouped by Chrome profile at the top of the Agents
+view as prominent profile cards — not buried inside a left-panel list. Each profile card shows
+the profile name, agent count, and running status at a glance.
 
-This is the primary differentiator vs sandboxed automation tools (Playwright, Puppeteer, Manus).
-The UI SHALL make this explicit: "Your real Chrome. Your sessions. No re-logging in."
+Clicking a profile card selects it and reveals its agents as tiles below the profile row.
+Multiple agents can share a profile. The "＋ Add Profile" card lets users register a new
+Chrome profile from the system.
 
-Browser Agents are grouped under their Chrome profile in the left panel. The profile is the
-browser identity — Personal, Work, or any named profile — and multiple Agents can share a profile.
+#### Scenario: User sees all Chrome profiles
+- **WHEN** the user opens Agents mode
+- **THEN** the Browser section shows one card per registered Chrome profile
+- **AND** each card shows: profile name, agent count, current status (▶ N running / ⏸ Idle)
+- **AND** clicking a profile card selects it and shows its agents as tiles beneath
 
 #### Scenario: Browser Agent uses existing session
 - **WHEN** a Browser Agent navigates to a site the user is already logged into in that Chrome profile
 - **THEN** it proceeds without any login step
-- **AND** the step log shows "✓ Already logged in (session active)" rather than a login action
-
-#### Scenario: User sees which Chrome profile an Agent uses
-- **WHEN** the user views a Browser Agent's detail panel
-- **THEN** the header shows the Chrome profile name and a "🌐 Real Chrome · [profile name]" badge
-- **AND** the step log shows the browser actions taken (navigate, snapshot, click, type, extract)
+- **AND** the execution log shows "✓ Already logged in (session active)" rather than a login action
 
 #### Scenario: User adds a Chrome profile
-- **WHEN** the user clicks "＋ Add profile" in the Browser section
+- **WHEN** the user clicks "＋ Add Profile" in the Browser section
 - **THEN** Ghost lists existing Chrome profiles detected on the system
 - **AND** the user can select one to make it available for Browser Agents
+
+### Requirement: Browser Agent Live View — Embedded Screenshot Stream
+The system SHALL display a live screenshot stream inside the Browser Agent detail drawer,
+giving the user a real-time view of what the agent is doing in Chrome without opening a
+separate browser window.
+
+**Implementation (v1):** The Python backend uses Playwright via CDP to connect to and control
+the user's real Chrome. After each action step, the backend calls `page.screenshot()` and
+emits the PNG bytes as a base64-encoded Tauri IPC event. The frontend renders the latest
+frame inside a browser-chrome-styled container (window controls, URL bar, Live badge).
+
+The live view is embedded at the top of the detail drawer. Below it are two columns:
+status + controls (left) and the execution log (right).
+
+#### Scenario: User sees what the browser agent is doing
+- **WHEN** the user opens a running Browser Agent's detail drawer
+- **THEN** the top section shows a browser-chrome frame containing the latest screenshot
+- **AND** the URL bar shows the current page URL
+- **AND** a "● Live · Ns ago" badge shows when the last frame was captured
+- **AND** the frame updates automatically as each new screenshot arrives via IPC
+
+#### Scenario: Agent is done — last frame preserved
+- **WHEN** the user opens a completed Browser Agent's detail drawer
+- **THEN** the screenshot area shows the last captured frame
+- **AND** the badge reads "Last frame · Ns ago" (no live pulse)
+
+#### Scenario: Non-browser agent has no live view
+- **WHEN** the user opens a Loop or Reactive Agent detail drawer
+- **THEN** no screenshot area is shown
+- **AND** the drawer shows only status + controls (left) and execution log (right)
 
 ### Requirement: Loop Agents — Continuous Execution
 The system SHALL support Loop Agents: Agents that run a script or sequence of actions

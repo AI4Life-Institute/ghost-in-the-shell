@@ -1,33 +1,45 @@
 ## ADDED Requirements
 
-### Requirement: Data View as Structured Output Explorer
-The system SHALL provide a Data mode that displays structured data produced by Tasks (browser
-agent extractions), Skills (script outputs), and Code sessions (AI-generated datasets) in a
-clean, browseable interface. Users do not need to know the underlying storage is SQLite.
+### Requirement: Data View as Project File Tree
+The system SHALL provide a Data mode whose left panel is a file tree rooted at
+`~/myproject/data/`. All agent outputs, skill outputs, and user-imported files live under
+this directory — the same project mono-repo as everything else.
 
-Data mode is the "output tray" of the AI fleet — everything the agents save ends up here,
-organised and explorable.
+The user sees the actual files and folders. This is intentional: the target persona (AI-native
+productivity user) is comfortable with terms like "database", "table", "CSV". Exposing the
+file system gives them ground truth and full control. The AI handles the complexity of reading
+and presenting the data.
+
+**File type handling in the tree:**
+- `📁` Folder — expandable; shows children
+- `🗄` SQLite `.db` file — expandable; shows its tables as child nodes with row counts
+- `📄` CSV / JSON file — leaf node; clicking opens it directly as a table
+
+The right panel shows a sortable, filterable table when a SQLite table or CSV/JSON file is
+selected. The user can switch between Table and Cards views.
 
 #### Scenario: User opens Data mode
 - **WHEN** the user navigates to Data mode
-- **THEN** the left panel shows a list of data collections (named sets of rows), grouped by source:
-  - Tasks (e.g. "BTC prices", "HN top stories")
-  - Skills (e.g. "AAPL daily data", "Weekly report")
-  - Manual (user-imported CSV or JSON)
-- **AND** each collection shows row count, last updated time, and source icon
+- **THEN** the left panel shows `~/myproject/data/` as a file tree
+- **AND** folders and `.db` files are expandable (click to toggle open/closed)
+- **AND** `.db` files show their tables as child items with row counts
 
-#### Scenario: User selects a data collection
-- **WHEN** the user clicks a collection
-- **THEN** the right panel displays the data in the AI-selected presentation format
-- **AND** the user can switch presentation format using tabs: Table / Cards / (Chart if applicable)
+#### Scenario: User selects a SQLite table
+- **WHEN** the user clicks a table name under a `.db` file in the tree
+- **THEN** the right panel shows that table's rows in a sortable, filterable table
+- **AND** the header shows the table name
 
-### Requirement: AI-Selected Data Presentation
-The system SHALL automatically select the most appropriate presentation format for each data
-collection based on its shape and content. The user can always override the choice.
+#### Scenario: User selects a CSV file
+- **WHEN** the user clicks a `.csv` file in the tree
+- **THEN** the right panel shows the CSV contents as a table directly
+- **AND** the first row is treated as the header
 
-The underlying storage format (SQLite tables, JSON files) SHALL NOT be exposed in the UI.
-Column names, row counts, and data values are shown; CREATE TABLE statements, file paths,
-and migration history are not.
+### Requirement: Table Presentation
+The system SHALL display tabular data (SQLite tables, CSV files) in a sortable, filterable
+grid. The user can always override the view format.
+
+Data is shown at face value — column names, row counts, and values as stored. The AI can be
+asked to render the data differently (chart, pivot, summary) from the Build chat using `/data`.
 
 #### Scenario: Tabular data is shown as a sortable table
 - **WHEN** a collection has uniform rows with named columns (e.g. stock prices with date, open,
