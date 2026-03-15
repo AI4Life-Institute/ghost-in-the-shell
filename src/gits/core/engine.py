@@ -1006,24 +1006,42 @@ def _submit_keys_for_cli(cli: str) -> str:
 def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
     """Append the correct permission flag based on CLI type and mode.
 
-    Each CLI has its own flag syntax:
-    - claude: --permission-mode {mode}
-    - codex: --full-auto (for bypass) or --approval-mode {mode}
-    - copilot: similar to claude
-    - opencode: no permission flags (not supported)
+    Mapping (our mode → CLI flag):
+      claude:
+        default           → (nothing)
+        acceptEdits       → --permission-mode acceptEdits
+        auto              → --permission-mode auto
+        bypassPermissions → --permission-mode bypassPermissions
+      codex:
+        default           → (nothing)
+        acceptEdits       → (not supported, skip)
+        auto              → --full-auto
+        bypassPermissions → --dangerously-bypass-approvals-and-sandbox
+      copilot:
+        default           → (nothing)
+        acceptEdits       → --allow-tool=write --allow-tool=edit
+        auto              → --allow-all-tools
+        bypassPermissions → --yolo
+      opencode:           → (no permission flags supported)
     """
+    if mode == "default":
+        return cmd
+
     if cli == "codex":
         if mode == "bypassPermissions":
-            cmd += " --full-auto"
+            cmd += " --dangerously-bypass-approvals-and-sandbox"
         elif mode == "auto":
             cmd += " --full-auto"
-        # codex doesn't have fine-grained modes like acceptEdits
-    elif cli == "opencode":
-        # OpenCode has no permission mode flags — silently ignore
-        pass
+        # acceptEdits not supported by codex — skip
     elif cli == "copilot":
-        # Copilot uses similar flags to Claude
-        cmd += f" --permission-mode {mode}"
+        if mode == "bypassPermissions":
+            cmd += " --yolo"
+        elif mode == "auto":
+            cmd += " --allow-all-tools"
+        elif mode == "acceptEdits":
+            cmd += " --allow-tool=write --allow-tool=edit"
+    elif cli == "opencode":
+        pass  # no permission flags supported
     else:
         # claude and others
         cmd += f" --permission-mode {mode}"
