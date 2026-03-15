@@ -1,16 +1,43 @@
-MIT License
+GHOST IN THE SHELL (GITS) COMMUNITY LICENSE AGREEMENT
 
-Copyright (c) 2026 ai4life institute
+Copyright (c) 2026 ai4life institute. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+By using, copying, modifying, or distributing this software (the "Software"),
+you agree to the terms of this License.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+────────────────────────────────────────────────────────────────────────────────
+1. FREE USE
+
+Permission is hereby granted, free of charge, to any individual or organization
+whose total annual gross revenue (and that of all affiliated entities) did not
+exceed USD $1,000,000 (one million US dollars) in the most recently completed
+fiscal year, to use, copy, modify, merge, publish, distribute, and/or create
+derivative works of the Software, subject to the following conditions:
+
+  a. The above copyright notice and this license notice shall be included in
+     all copies or substantial portions of the Software.
+
+  b. Redistributions in source or binary form must reproduce this license in
+     the accompanying documentation and/or other materials.
+
+  c. You may not use the name "ai4life institute", "GITS", or
+     "Ghost in the Shell" to endorse or promote products derived from this
+     Software without prior written permission.
+
+────────────────────────────────────────────────────────────────────────────────
+2. COMMERCIAL LICENSE REQUIRED
+
+If you or your organization's total annual gross revenue exceeded USD $1,000,000
+in the most recently completed fiscal year, you must obtain a separate commercial
+license before using, deploying, or distributing this Software in any form.
+
+To obtain a commercial license, contact:
+
+  ai4life institute
+  Email: license@ai4life.institute
+
+────────────────────────────────────────────────────────────────────────────────
+3. DISCLAIMER
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
