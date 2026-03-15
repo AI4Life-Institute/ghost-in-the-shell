@@ -35,3 +35,14 @@ jobs:
           git add pyproject.toml
           git commit -m "chore: bump version ${{ steps.bump.outputs.old }} → ${{ steps.bump.outputs.new }}"
           git push
+
+  notify:
+    needs: bump
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Discord notification
+        run: |
+          curl -fsSL -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"❌ **Auto version bump failed** — ${{ github.workflow }}\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"

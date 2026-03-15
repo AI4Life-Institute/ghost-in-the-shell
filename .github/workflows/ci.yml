@@ -103,3 +103,14 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "ghost ${VERSION}"
           git push
+
+  notify:
+    needs: [test, release]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Discord notification
+        run: |
+          curl -fsSL -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"❌ **CI failed** — ${{ github.workflow }}\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"

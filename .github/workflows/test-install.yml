@@ -27,3 +27,14 @@ jobs:
         run: |
           ghost --help
           gits --help
+
+  notify:
+    needs: install
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Discord notification
+        run: |
+          curl -fsSL -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"❌ **Install test failed** — ${{ github.workflow }}\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
