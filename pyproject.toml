@@ -27,6 +27,7 @@ dev = [
 ]
 
 [project.scripts]
+ghost = "gits.__main__:main"
 gits = "gits.__main__:main"
 
 [tool.hatch.build.targets.wheel]

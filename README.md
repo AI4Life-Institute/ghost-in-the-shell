@@ -2,7 +2,7 @@
   <img src="docs/logo.png" width="200" alt="Ghost in the Shell">
 </p>
 
-<h1 align="center">Ghost in the Shell (GITS)</h1>
+<h1 align="center">Ghost in the Shell</h1>
 
 <p align="center">
   Control AI coding agents on your machine — from Discord, on any device.
@@ -13,7 +13,7 @@
 Watch your AI write code, review its terminal output, and approve permission prompts — all from your phone via Discord.
 
 <p align="center">
-  <img src="docs/demo.gif" width="300" alt="GITS demo">
+  <img src="docs/demo.gif" width="300" alt="Ghost in the Shell demo">
 </p>
 
 ---
@@ -27,12 +27,12 @@ Watch your AI write code, review its terminal output, and approve permission pro
 - **Multi-CLI support** — works with Claude Code, Codex CLI, and OpenCode; switch between them per channel
 - **Threads & isolated worktrees** — `/fork` spins up a sub-task thread backed by a fresh git worktree, keeping parallel work cleanly separated
 - **Session resume** — reconnecting to a directory shows a session picker so you can continue where you left off
-- **tmux-backed sessions** — each project runs in a real tmux window; developers get full terminal access locally while GITS handles the Discord bridge
-- **Subscription-safe** — GITS drives the official CLI tools (Claude Code, Codex) exactly as a human would; no API key required, no terms-of-service gray area — your existing Pro/Max subscription just works
+- **tmux-backed sessions** — each project runs in a real tmux window; developers get full terminal access locally while Ghost handles the Discord bridge
+- **Subscription-safe** — Ghost drives the official CLI tools (Claude Code, Codex) exactly as a human would; no API key required, no terms-of-service gray area — your existing Pro/Max subscription just works
 
-## Why GITS?
+## Why Ghost?
 
-| | GITS | OpenClaw | Native CLI |
+| | Ghost | OpenClaw | Native CLI |
 |---|:---:|:---:|:---:|
 | Remote control via Discord | ✅ | ✅ | ❌ |
 | Team collaboration | ✅ | ✅ | ❌ |
@@ -73,7 +73,6 @@ ALLOWED_GUILDS=["your-server-id"]
 
 # Optional
 ALLOWED_USERS=["restrict-to-user-id"]
-TMUX_SESSION_NAME=gits
 LOG_LEVEL=INFO
 ```
 
@@ -82,13 +81,13 @@ The Discord bot needs **Message Content Intent** enabled and must be invited wit
 **4. Start**
 
 ```bash
-gits start
+ghost start
 ```
 
 Hooks are auto-installed on first start. For dev mode with auto-restart on file changes:
 
 ```bash
-gits start --dev
+ghost start --dev
 ```
 
 ---
