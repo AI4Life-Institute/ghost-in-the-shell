@@ -302,7 +302,7 @@ class DiscordAdapter(PlatformAdapter):
         async def cmd_bind(
             interaction: discord.Interaction,
             path: str,
-            mode: str | None = "auto",
+            mode: str | None = "bypassPermissions",
             cli: str | None = None,
         ):
             if not self._check_interaction_access(interaction):
