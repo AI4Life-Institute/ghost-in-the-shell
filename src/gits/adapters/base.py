@@ -21,6 +21,15 @@ class Button:
 
 
 @dataclass
+class SelectOption:
+    """A single option in a dropdown / select menu."""
+
+    label: str
+    value: str  # callback_data sent on selection
+    description: str | None = None
+
+
+@dataclass
 class IncomingMessage:
     """Platform-agnostic inbound message."""
 
@@ -40,6 +49,8 @@ class OutgoingMessage:
     text: str | None = None
     image: bytes | None = None  # PNG image data
     buttons: list[list[Button]] | None = None
+    select_options: list[SelectOption] | None = None
+    select_placeholder: str | None = None
     edit_message_id: str | None = None
     ephemeral: bool = False
 

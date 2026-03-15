@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-from ..adapters.base import Button, IncomingMessage, OutgoingMessage
+from ..adapters.base import Button, IncomingMessage, OutgoingMessage, SelectOption
 from ..config import Settings
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
@@ -275,6 +276,7 @@ class Engine:
             work_dir=str(p),
             coding_cli=cli,
             cli_session_id=session_id,
+            permission_mode=mode if mode and mode != "default" else None,
         )
 
         # Start pane polling for the new binding
@@ -327,53 +329,84 @@ class Engine:
     # Session Picker helpers
     # ------------------------------------------------------------------
 
+    _SESSION_PAGE_SIZE = 24  # max Select options per page (leave 1 for "New Session")
+
     def _build_session_picker_message(
         self,
         sessions: list[CLISession],
         work_dir: str,
         channel_id: str,
+        page: int = 0,
     ) -> OutgoingMessage:
-        """Build an OutgoingMessage with buttons for session selection.
+        """Build an OutgoingMessage with a Select Menu for session selection.
 
-        Shows at most 5 sessions (the most recent ones) plus a
-        "New Session" button.
+        Sessions are sorted most-recently-active first (by mtime).
+        Shows up to _SESSION_PAGE_SIZE sessions per page via Discord Select Menu.
+        Adds a "Next Page" button when more sessions exist beyond this page.
         """
-        display_sessions = sessions[:5]
+        page_size = self._SESSION_PAGE_SIZE
+        start = page * page_size
+        end = start + page_size
+        page_sessions = sessions[start:end]
+        total = len(sessions)
+        has_more = end < total
 
-        lines = [f"**Resume Session?**\n"]
-        lines.append(f"Existing sessions in `{work_dir}`:\n")
-        for i, s in enumerate(display_sessions):
-            age = _format_age(s.mtime)
-            # Truncate summary for display
-            summary = s.summary[:50] + "..." if len(s.summary) > 50 else s.summary
-            lines.append(f"{i + 1}. **{summary}** \u2014 {s.message_count} msgs ({age})")
-
+        lines = ["**Resume Session?**\n"]
+        lines.append(f"Found **{total}** session(s) in `{work_dir}` — sorted by most recently active.")
+        if total > page_size:
+            page_total = (total + page_size - 1) // page_size
+            lines.append(f"Page {page + 1}/{page_total}")
+        lines.append("\nPick a session from the dropdown below, or start a new one.")
         text = "\n".join(lines)
 
-        # Build buttons — one per session + New Session
-        # callback_data must be < 100 chars, so use index not full ID
-        session_buttons = []
-        for i, s in enumerate(display_sessions):
-            label = s.summary[:35] + "..." if len(s.summary) > 35 else s.summary
-            session_buttons.append(
-                Button(
-                    label=f"\u25b6 {label}",
-                    callback_data=f"bind_resume:{channel_id}:{i}",
+        # Build Select Menu options — one per session on this page
+        # Use absolute index so callback_data maps correctly even across pages
+        select_opts: list[SelectOption] = []
+        for abs_i, s in enumerate(page_sessions, start=start):
+            age = _format_age(s.mtime)
+            label = s.summary[:100]
+            # description: last message (truncated) + msg count + age
+            meta = f" · {s.message_count} msgs · {age}"
+            last = s.last_message
+            max_last = 100 - len(meta)
+            if last and max_last > 6:
+                last_truncated = (last[:max_last - 1] + "…") if len(last) > max_last else last
+                desc = last_truncated + meta
+            else:
+                desc = f"{s.message_count} msgs · {age}"
+            select_opts.append(
+                SelectOption(
+                    label=label or f"Session {abs_i + 1}",
+                    value=f"bind_resume:{channel_id}:{abs_i}",
+                    description=desc,
                 )
             )
 
-        new_button = Button(
-            label="\u2795 New Session",
-            callback_data=f"bind_new:{channel_id}",
+        # "New Session" as the last Select option
+        select_opts.append(
+            SelectOption(
+                label="＋ New Session",
+                value=f"bind_new:{channel_id}",
+                description="Start a fresh session in this directory",
+            )
         )
 
-        # Layout: session buttons in rows of 2, then New Session row
+        # "Next Page" button when there are more sessions
         button_rows: list[list[Button]] = []
-        for i in range(0, len(session_buttons), 2):
-            button_rows.append(session_buttons[i : i + 2])
-        button_rows.append([new_button])
+        if has_more:
+            button_rows.append([
+                Button(
+                    label=f"Next Page → ({end + 1}–{min(end + page_size, total)} of {total})",
+                    callback_data=f"bind_page:{channel_id}:{page + 1}",
+                )
+            ])
 
-        return OutgoingMessage(text=text, buttons=button_rows)
+        return OutgoingMessage(
+            text=text,
+            select_options=select_opts,
+            select_placeholder="Select a session to resume…",
+            buttons=button_rows or None,
+        )
 
     @staticmethod
     def _format_dir_listing(p: Path) -> str:
@@ -406,15 +439,17 @@ class Engine:
         else:
             await self._reply(interaction, "This channel is not bound.")
 
-    async def handle_fork(
+    async def handle_thread(
         self,
         channel_id: str,
-        title: str,
-        subdir: str | None,
+        message: str,
         interaction: Any,
     ) -> None:
-        """Handle /fork — create sub-task thread + tmux window."""
-        # Get parent binding
+        """Handle /thread — create a Discord thread + child session.
+
+        The child session shares the parent's work_dir and coding_cli.
+        The *message* is sent as the first prompt to the new session.
+        """
         parent_binding = self.session_mgr.get_binding(channel_id)
         if parent_binding is None:
             await self._reply(
@@ -422,36 +457,32 @@ class Engine:
             )
             return
 
-        # Determine work directory
-        work_dir = parent_binding.work_dir
-        if subdir:
-            work_dir = str(Path(work_dir) / subdir)
-            if not Path(work_dir).exists():
-                await self._reply(
-                    interaction, f"Subdirectory not found: `{subdir}`"
-                )
-                return
+        # Use first ~40 chars of message as thread title
+        title = message[:40].strip()
+        if len(message) > 40:
+            title += "…"
 
-        # Create thread
-        if self._adapter:
-            thread_id = await self._adapter.create_thread(
-                channel_id,
-                title,
-                auto_archive_minutes=self.settings.thread_auto_archive_minutes,
-            )
-        else:
+        if not self._adapter:
             await self._reply(interaction, "No adapter available.")
             return
 
-        # Create tmux window
+        thread_id = await self._adapter.create_thread(
+            channel_id,
+            title,
+            auto_archive_minutes=self.settings.thread_auto_archive_minutes,
+        )
+
         cli = parent_binding.coding_cli
+        mode = parent_binding.permission_mode
         cmd = self.launcher.build_launch_command(cli=cli)
+        if mode:
+            cmd = _append_permission_flag(cmd, cli, mode)
+        work_dir = parent_binding.work_dir
 
         win = await self.tmux.create_window(
             name=title, cwd=work_dir, command=cmd
         )
 
-        # Create binding for thread
         await self.session_mgr.bind(
             platform="discord",
             channel_id=thread_id,
@@ -460,13 +491,170 @@ class Engine:
             work_dir=work_dir,
             coding_cli=cli,
             parent_channel_id=channel_id,
-            subdir=subdir,
+            permission_mode=mode,
         )
 
-        subdir_info = f" (subdir: `{subdir}`)" if subdir else ""
+        # Start monitoring
+        self.monitor.start_polling(thread_id, win.window_id)
+
+        # Send initial prompt after CLI starts up
+        async def _send_initial_prompt() -> None:
+            await asyncio.sleep(2.0)  # wait for CLI to be ready
+            submit = _submit_keys_for_cli(cli)
+            await self.tmux.send_text(win.window_id, message, submit_keys=submit)
+
+        asyncio.create_task(_send_initial_prompt())
+
+        # Confirm in thread
+        if self._adapter:
+            await self._adapter.send_message(
+                thread_id,
+                OutgoingMessage(
+                    text=f"Session started → `{work_dir}`\ntmux: `{win.window_id}` | CLI: `{cli}`"
+                ),
+            )
+
         await self._reply(
             interaction,
-            f"Forked **{title}** → `{work_dir}`{subdir_info}\n"
+            f"Thread **{title}** created → <#{thread_id}>",
+        )
+
+    async def handle_thread_auto(
+        self,
+        thread_id: str,
+        parent_channel_id: str,
+        starter_message: str,
+    ) -> None:
+        """Auto-create session for a Discord thread (no interaction).
+
+        Called when a user creates a thread directly in Discord
+        under a bound channel.
+        """
+        parent_binding = self.session_mgr.get_binding(parent_channel_id)
+        if parent_binding is None:
+            return  # parent not bound, ignore
+
+        title = starter_message[:40].strip() if starter_message else "thread"
+        if len(starter_message) > 40:
+            title += "…"
+
+        cli = parent_binding.coding_cli
+        mode = parent_binding.permission_mode
+        cmd = self.launcher.build_launch_command(cli=cli)
+        if mode:
+            cmd = _append_permission_flag(cmd, cli, mode)
+        work_dir = parent_binding.work_dir
+
+        win = await self.tmux.create_window(
+            name=title, cwd=work_dir, command=cmd
+        )
+
+        await self.session_mgr.bind(
+            platform="discord",
+            channel_id=thread_id,
+            window_id=win.window_id,
+            window_name=title,
+            work_dir=work_dir,
+            coding_cli=cli,
+            parent_channel_id=parent_channel_id,
+            permission_mode=mode,
+        )
+
+        self.monitor.start_polling(thread_id, win.window_id)
+
+        # Send initial prompt
+        if starter_message:
+            async def _send_initial_prompt() -> None:
+                await asyncio.sleep(2.0)
+                submit = _submit_keys_for_cli(cli)
+                await self.tmux.send_text(
+                    win.window_id, starter_message, submit_keys=submit
+                )
+
+            asyncio.create_task(_send_initial_prompt())
+
+        if self._adapter:
+            await self._adapter.send_message(
+                thread_id,
+                OutgoingMessage(
+                    text=f"Auto-session started → `{work_dir}`\ntmux: `{win.window_id}` | CLI: `{cli}`"
+                ),
+            )
+
+    async def handle_fork(
+        self,
+        channel_id: str,
+        title: str,
+        interaction: Any,
+    ) -> None:
+        """Handle /fork — create a git worktree + thread + child session.
+
+        Unlike /thread (shared directory), /fork creates an isolated
+        git worktree so the child session doesn't interfere with the parent.
+        """
+        parent_binding = self.session_mgr.get_binding(channel_id)
+        if parent_binding is None:
+            await self._reply(
+                interaction, "This channel is not bound. Use `/bind` first."
+            )
+            return
+
+        repo_dir = parent_binding.work_dir
+
+        # Check if it's a git repo
+        if not _is_git_repo(repo_dir):
+            await self._reply(
+                interaction,
+                "`/fork` requires a git repository. "
+                "Use `/thread` for non-git directories.",
+            )
+            return
+
+        # Create worktree
+        worktree_path = await asyncio.to_thread(
+            _create_worktree, repo_dir, title
+        )
+        if worktree_path is None:
+            await self._reply(interaction, "Failed to create git worktree.")
+            return
+
+        # Create thread
+        if not self._adapter:
+            await self._reply(interaction, "No adapter available.")
+            return
+
+        thread_id = await self._adapter.create_thread(
+            channel_id,
+            title,
+            auto_archive_minutes=self.settings.thread_auto_archive_minutes,
+        )
+
+        cli = parent_binding.coding_cli
+        mode = parent_binding.permission_mode
+        cmd = self.launcher.build_launch_command(cli=cli)
+        if mode:
+            cmd = _append_permission_flag(cmd, cli, mode)
+
+        win = await self.tmux.create_window(
+            name=title, cwd=worktree_path, command=cmd
+        )
+
+        await self.session_mgr.bind(
+            platform="discord",
+            channel_id=thread_id,
+            window_id=win.window_id,
+            window_name=title,
+            work_dir=worktree_path,
+            coding_cli=cli,
+            parent_channel_id=channel_id,
+            permission_mode=mode,
+        )
+
+        self.monitor.start_polling(thread_id, win.window_id)
+
+        await self._reply(
+            interaction,
+            f"Forked **{title}** → `{worktree_path}` (worktree)\n"
             f"Thread: <#{thread_id}> | tmux: `{win.window_id}`",
         )
 
@@ -589,32 +777,101 @@ class Engine:
         await self._reply(interaction, "Sent `Escape Escape` — operation interrupted.")
         await self._auto_screenshot(channel_id, binding, interaction)
 
-    async def handle_kill(self, channel_id: str, interaction: Any) -> None:
-        """Handle /kill — kill tmux window and archive thread."""
+    async def handle_kill(
+        self,
+        channel_id: str,
+        interaction: Any,
+        force_worktree: bool = False,
+    ) -> None:
+        """Handle /kill — kill tmux window, archive thread, clean worktree.
+
+        If the session uses a git worktree and it has uncommitted changes,
+        a confirmation prompt is shown (unless *force_worktree* is True).
+        """
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound.")
             return
 
-        # Stop polling and kill tmux window
-        self.monitor.stop_polling(channel_id)
-        killed = await self.tmux.kill_window(binding.window_id)
+        # Check if work_dir is a worktree with dirty state
+        is_wt = await asyncio.to_thread(_is_worktree, binding.work_dir)
+        if is_wt and not force_worktree:
+            dirty_files = await asyncio.to_thread(
+                _worktree_dirty_files, binding.work_dir
+            )
+            if dirty_files:
+                # Send confirmation buttons
+                preview = "\n".join(dirty_files[:10])
+                if len(dirty_files) > 10:
+                    preview += f"\n... and {len(dirty_files) - 10} more"
+                confirm_msg = OutgoingMessage(
+                    text=(
+                        f"**Worktree has uncommitted changes:**\n"
+                        f"```\n{preview}\n```\n"
+                        f"Delete worktree anyway?"
+                    ),
+                    buttons=[[
+                        Button(
+                            label="Yes, delete worktree",
+                            callback_data=f"kill_wt_yes:{channel_id}",
+                        ),
+                        Button(
+                            label="No, keep worktree",
+                            callback_data=f"kill_wt_no:{channel_id}",
+                        ),
+                    ]],
+                )
+                if self._adapter:
+                    await self._adapter.send_message(channel_id, confirm_msg)
+                if interaction:
+                    await self._reply(
+                        interaction,
+                        "Worktree has changes — check the confirmation above.",
+                    )
+                return
 
-        # Remove binding
+        # Kill child sessions first (threads and forks)
+        children = self.session_mgr.list_channel_threads(channel_id)
+        for child in children:
+            await self._kill_single(child.channel_id, archive_thread=True)
+
+        # Kill this session
+        await self._kill_single(channel_id, archive_thread=True, remove_worktree=is_wt)
+
+        status_parts = [f"Window `{binding.window_name}` killed. Binding removed."]
+        if children:
+            status_parts.append(f"Also killed {len(children)} child session(s).")
+        if is_wt:
+            status_parts.append("Worktree removed.")
+        await self._reply(interaction, " ".join(status_parts))
+
+    async def _kill_single(
+        self,
+        channel_id: str,
+        archive_thread: bool = False,
+        remove_worktree: bool = False,
+    ) -> None:
+        """Kill a single session: stop polling, kill window, unbind."""
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            return
+
+        self.monitor.stop_polling(channel_id)
+        await self.tmux.kill_window(binding.window_id)
         await self.session_mgr.unbind(channel_id)
 
-        # Archive thread if this is a thread
-        if binding.parent_channel_id and self._adapter:
+        # Remove worktree if requested
+        if remove_worktree or await asyncio.to_thread(
+            _is_worktree, binding.work_dir
+        ):
+            await asyncio.to_thread(_remove_worktree, binding.work_dir)
+
+        # Archive thread
+        if archive_thread and binding.parent_channel_id and self._adapter:
             try:
                 await self._adapter.archive_thread(channel_id)
             except Exception:
                 logger.debug("Could not archive thread %s", channel_id)
-
-        status = "killed" if killed else "already gone"
-        await self._reply(
-            interaction,
-            f"Window `{binding.window_name}` {status}. Binding removed.",
-        )
 
     async def handle_new(self, channel_id: str, interaction: Any) -> None:
         """Handle /new — reset CLI session."""
@@ -790,6 +1047,37 @@ class Engine:
                     await self.tmux.send_keys(window_id, key)
                     await asyncio.sleep(0.15)
 
+        elif action == "kill_wt_yes" and len(parts) >= 2:
+            target_channel = parts[1]
+            await self.handle_kill(target_channel, interaction=None, force_worktree=True)
+            if self._adapter:
+                await self._adapter.send_message(
+                    channel_id,
+                    OutgoingMessage(text="Session killed and worktree removed."),
+                )
+
+        elif action == "kill_wt_no" and len(parts) >= 2:
+            target_channel = parts[1]
+            binding = self.session_mgr.get_binding(target_channel)
+            if binding:
+                # Kill tmux + unbind but keep worktree
+                self.monitor.stop_polling(target_channel)
+                await self.tmux.kill_window(binding.window_id)
+                await self.session_mgr.unbind(target_channel)
+                if binding.parent_channel_id and self._adapter:
+                    try:
+                        await self._adapter.archive_thread(target_channel)
+                    except Exception:
+                        pass
+            if self._adapter:
+                wt_path = binding.work_dir if binding else "unknown"
+                await self._adapter.send_message(
+                    channel_id,
+                    OutgoingMessage(
+                        text=f"Session killed. Worktree preserved at `{wt_path}`."
+                    ),
+                )
+
         elif action == "bind_resume" and len(parts) >= 3:
             pending_channel = parts[1]
             session_index = int(parts[2])
@@ -798,6 +1086,11 @@ class Engine:
         elif action == "bind_new" and len(parts) >= 2:
             pending_channel = parts[1]
             await self._handle_bind_new(pending_channel, channel_id)
+
+        elif action == "bind_page" and len(parts) >= 3:
+            pending_channel = parts[1]
+            page = int(parts[2])
+            await self._handle_bind_page(pending_channel, page, channel_id)
 
         else:
             logger.warning("Unknown button action: %s", callback_data)
@@ -1022,6 +1315,24 @@ class Engine:
                 ),
             )
 
+    async def _handle_bind_page(
+        self, pending_channel: str, page: int, reply_channel: str
+    ) -> None:
+        """Handle a bind_page button click — show next page of sessions."""
+        pending = self._pending_binds.get(pending_channel)
+        if pending is None:
+            if self._adapter:
+                await self._adapter.send_message(
+                    reply_channel,
+                    OutgoingMessage(text="Session picker expired. Run `/bind` again."),
+                )
+            return
+
+        sessions = pending["sessions"]
+        msg = self._build_session_picker_message(sessions, pending["path"], pending_channel, page=page)
+        if self._adapter:
+            await self._adapter.send_message(reply_channel, msg)
+
     async def _reply(self, interaction: Any, text: str) -> None:
         """Reply to an interaction or send to channel."""
         try:
@@ -1094,6 +1405,122 @@ def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
         # claude and others
         cmd += f" --permission-mode {mode}"
     return cmd
+
+
+def _is_git_repo(path: str) -> bool:
+    """Check if *path* is inside a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--git-dir"],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _create_worktree(repo_dir: str, label: str) -> str | None:
+    """Create a git worktree and return its path, or None on failure.
+
+    Worktree is created at ``<repo>/.worktrees/gits-<label-slug>/``.
+    A new branch ``gits/<label-slug>`` is created from HEAD.
+    """
+    import re
+
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "-", label)[:30].strip("-")
+    if not slug:
+        slug = "session"
+
+    wt_dir = str(Path(repo_dir) / ".worktrees" / f"gits-{slug}")
+    branch = f"gits/{slug}"
+
+    # Ensure parent dir exists
+    Path(wt_dir).parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "worktree", "add", "-b", branch, wt_dir],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return wt_dir
+        # Branch may already exist — try without -b
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "worktree", "add", wt_dir],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return wt_dir
+        logger.error("git worktree add failed: %s", result.stderr)
+        return None
+    except Exception:
+        logger.exception("Failed to create worktree")
+        return None
+
+
+def _remove_worktree(worktree_path: str) -> bool:
+    """Remove a git worktree. Returns True on success."""
+    try:
+        # Find the main repo dir from the worktree's .git file
+        git_file = Path(worktree_path) / ".git"
+        repo_dir = worktree_path
+        if git_file.is_file():
+            # .git file contains: "gitdir: /path/to/repo/.git/worktrees/..."
+            content = git_file.read_text().strip()
+            if content.startswith("gitdir:"):
+                gitdir = content.split(":", 1)[1].strip()
+                # Go up from .git/worktrees/<name> to repo root
+                repo_dir = str(Path(gitdir).resolve().parent.parent.parent)
+
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "worktree", "remove", "--force", worktree_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.returncode == 0
+    except Exception:
+        logger.exception("Failed to remove worktree %s", worktree_path)
+        return False
+
+
+def _is_worktree(path: str) -> bool:
+    """Check if *path* is a git worktree (not the main working tree)."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+        # Check if it's a worktree by looking for .git file (not dir)
+        git_path = Path(path) / ".git"
+        return git_path.is_file()  # worktrees have a .git *file*, not dir
+    except Exception:
+        return False
+
+
+def _worktree_dirty_files(worktree_path: str) -> list[str]:
+    """Return list of dirty files in a worktree (empty if clean)."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", worktree_path, "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+        return [line for line in result.stdout.strip().split("\n") if line.strip()]
+    except Exception:
+        return []
 
 
 def _format_age(mtime: float) -> str:

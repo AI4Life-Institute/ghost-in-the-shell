@@ -32,7 +32,8 @@ class CLISession:
     """A discovered coding CLI session."""
 
     session_id: str
-    summary: str
+    summary: str       # slug (e.g. "gleaming-dreaming-token")
+    last_message: str  # last user message text, for description
     message_count: int
     file_path: str
     mtime: float
@@ -133,39 +134,45 @@ class CodingCLILauncher:
             try:
                 stat = jsonl_file.stat()
                 session_id = jsonl_file.stem
-                # Find the first user message for summary
-                summary = ""
+                slug = ""
+                last_user = ""
                 msg_count = 0
                 with open(jsonl_file) as f:
                     for line in f:
                         msg_count += 1
-                        if not summary:
-                            try:
-                                data = json.loads(line)
-                                # Look for the first user message as summary
-                                if data.get("type") == "user" and "message" in data:
-                                    content = data["message"].get("content", "")
-                                    if isinstance(content, list):
-                                        for block in content:
-                                            if (
-                                                isinstance(block, dict)
-                                                and block.get("type") == "text"
-                                            ):
-                                                summary = block.get("text", "")[:80]
-                                                break
-                                    elif isinstance(content, str):
-                                        summary = content[:80]
-                            except json.JSONDecodeError:
-                                pass
-
-                # Collapse whitespace for clean single-line display
-                if summary:
-                    summary = " ".join(summary.split())
+                        try:
+                            data = json.loads(line)
+                            # Pick up slug from any record that has it
+                            if not slug and data.get("slug"):
+                                slug = data["slug"]
+                            # Track last real user message
+                            if data.get("type") == "user" and "message" in data:
+                                content = data["message"].get("content", "")
+                                text = ""
+                                if isinstance(content, list):
+                                    for block in content:
+                                        if not isinstance(block, dict):
+                                            continue
+                                        if block.get("type") != "text":
+                                            continue
+                                        t = block.get("text", "").strip()
+                                        if t and not t.startswith("<"):
+                                            text = t
+                                            break
+                                elif isinstance(content, str):
+                                    t = content.strip()
+                                    if t and not t.startswith("<"):
+                                        text = t
+                                if text:
+                                    last_user = " ".join(text.split())[:80]
+                        except json.JSONDecodeError:
+                            pass
 
                 sessions.append(
                     CLISession(
                         session_id=session_id,
-                        summary=summary or f"Session {session_id[:8]}",
+                        summary=slug or f"session-{session_id[:8]}",
+                        last_message=last_user,
                         message_count=msg_count,
                         file_path=str(jsonl_file),
                         mtime=stat.st_mtime,
@@ -175,7 +182,7 @@ class CodingCLILauncher:
                 continue
 
         sessions.sort(key=lambda s: s.mtime, reverse=True)
-        return sessions[:10]  # top 10 most recent
+        return sessions  # caller handles pagination
 
     def _discover_codex_sessions(self, work_dir: str) -> list[CLISession]:
         """Scan ~/.codex/sessions/ for matching Codex CLI sessions.
@@ -264,6 +271,7 @@ class CodingCLILauncher:
                     CLISession(
                         session_id=session_id,
                         summary=summary or f"Session {session_id[:12]}",
+                        last_message="",
                         message_count=msg_count,
                         file_path=str(jsonl_file),
                         mtime=stat.st_mtime,
@@ -273,7 +281,7 @@ class CodingCLILauncher:
                 continue
 
         sessions.sort(key=lambda s: s.mtime, reverse=True)
-        return sessions[:10]
+        return sessions  # caller handles pagination
 
     def _discover_copilot_sessions(self, work_dir: str) -> list[CLISession]:
         """Scan ~/.copilot/session-state/ for matching Copilot CLI sessions.
@@ -371,6 +379,7 @@ class CodingCLILauncher:
                     CLISession(
                         session_id=session_id,
                         summary=summary or f"Session {session_id[:12]}",
+                        last_message="",
                         message_count=msg_count,
                         file_path=str(events_file),
                         mtime=stat.st_mtime,
@@ -380,7 +389,7 @@ class CodingCLILauncher:
                 continue
 
         sessions.sort(key=lambda s: s.mtime, reverse=True)
-        return sessions[:10]
+        return sessions  # caller handles pagination
 
     def _discover_opencode_sessions(self, work_dir: str) -> list[CLISession]:
         """Scan ~/.local/share/opencode/storage/ for matching OpenCode sessions.
@@ -458,6 +467,7 @@ class CodingCLILauncher:
                         CLISession(
                             session_id=session_id,
                             summary=title or f"Session {session_id[:12]}",
+                            last_message="",
                             message_count=msg_count,
                             file_path=str(sess_file),
                             mtime=stat.st_mtime,
@@ -467,4 +477,4 @@ class CodingCLILauncher:
                     continue
 
         sessions.sort(key=lambda s: s.mtime, reverse=True)
-        return sessions[:10]
+        return sessions  # caller handles pagination
