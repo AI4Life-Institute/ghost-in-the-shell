@@ -893,6 +893,35 @@ def _cmd_desktop(args: argparse.Namespace) -> None:
                         else:
                             _emit({"event": "error", "msg": "skill_resume requires skill_name"})
 
+                    elif cmd == "new_session":
+                        import subprocess as _sp
+                        import time as _time
+                        sess_name = payload.get("name", "ghost")
+                        work_dir = os.path.expanduser(payload.get("work_dir", "~"))
+                        cli = payload.get("cli", "claude")
+                        ts = str(int(_time.time() * 1000))
+                        channel_id = f"desktop-{ts}"
+                        result = _sp.run(
+                            ["tmux", "new-window", "-t", f"{engine.tmux.session_name}:",
+                             "-n", sess_name, "-c", work_dir, "-P", "-F", "#{window_id}"],
+                            capture_output=True, text=True,
+                        )
+                        window_id = result.stdout.strip()
+                        if not window_id:
+                            _emit({"event": "error", "msg": "Failed to create tmux window"})
+                        else:
+                            _sp.run(["tmux", "send-keys", "-t",
+                                     f"{engine.tmux.session_name}:{window_id}", cli, "Enter"])
+                            await engine.session_mgr.bind(
+                                platform="desktop",
+                                channel_id=channel_id,
+                                window_id=window_id,
+                                window_name=sess_name,
+                                work_dir=work_dir,
+                                coding_cli=cli,
+                            )
+                            _emit_sessions(engine, _emit)
+
                     elif cmd == "agent_log":
                         skill_name = payload.get("skill_name", "")
                         run_id = payload.get("run_id", "")

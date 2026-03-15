@@ -85,233 +85,31 @@
       ══════════════════════════════════════ -->
       <div id="view-build" class="view on">
 
-        <!-- Window tab bar -->
-        <div class="ws-tabbar">
-          <div class="ws-tab on" id="wstab-0" onclick="selectBuildTab(0)">
-            <span class="ws-tab-dot g"></span>main
+        <!-- Session sidebar -->
+        <div id="sess-sidebar">
+          <div id="sess-header">
+            <span>Sessions</span>
+            <button id="new-sess-btn" onclick="newSession()" title="New Session">＋</button>
           </div>
-          <div class="ws-tab" id="wstab-1" onclick="selectBuildTab(1)">
-            <span class="ws-tab-dot y"></span>auth
-          </div>
-          <div class="ws-tab" id="wstab-2" onclick="selectBuildTab(2)">
-            <span class="ws-tab-dot d"></span>tests
-          </div>
-          <div class="ws-tab-add" onclick="addWindow()">＋</div>
-          <div class="ws-tabbar-right">
-            <div class="devmode-btn" id="devmode-btn" onclick="toggleDevMode()">
-              <span class="devmode-dot"></span>&gt;_ Dev
-            </div>
+          <div id="sess-list">
+            <div style="padding:20px 12px;color:rgba(255,255,255,0.2);font-size:12px">Loading sessions…</div>
           </div>
         </div>
 
-        <!-- Build grid -->
-        <div class="ws-grid" id="ws-grid">
-
-          <!-- Build empty state -->
-          <div id="build-empty" class="build-empty-state" style="display:none">
-            <div class="build-empty-inner">
-              <div class="build-empty-title">What do you want to build?</div>
-              <div class="build-empty-hints">
-                <span class="build-hint-chip" onclick="buildHint(this)">Create a browser agent to monitor prices</span>
-                <span class="build-hint-chip" onclick="buildHint(this)">Write a loop agent that checks emails daily</span>
-                <span class="build-hint-chip" onclick="buildHint(this)">Build a skill to export data as CSV</span>
-              </div>
-              <div class="build-empty-row">
-                <input id="build-empty-inp" class="build-empty-inp" placeholder="Describe what you want to build…" onkeydown="buildEmptyKey(event)">
-                <button class="wsp-sbtn" onclick="buildEmptySend()">&#8593;</button>
-              </div>
-            </div>
+        <!-- Terminal -->
+        <div id="term-view">
+          <div id="term-topbar">
+            <span id="term-sess-name" style="color:rgba(255,255,255,0.3)">No session selected</span>
+            <span id="term-sess-cli"></span>
+            <span id="term-sess-dir"></span>
           </div>
-
-          <!-- Pane 0: main — active -->
-          <div class="ws-panel active" id="wsp-0">
-            <div class="wsp-head" onclick="selectBuildTab(0)" ondblclick="paneFocus(0)">
-              <div class="pane-status">
-                <span class="pane-dot active"></span>
-                <span class="pane-status-active">&#9654; Active</span>
-              </div>
-              <span class="wsp-name" style="margin-left:6px">main</span>
-              <span class="wsp-ai">claude</span>
-            </div>
-            <div class="wsp-chat wsp-msgs" id="build-msgs">
-              <div class="msg ai">
-                <div class="mav">🤖</div>
-                <div>
-                  <div class="bbl"><p>Ready at <code>~/myproject</code>. What would you like to build?</p></div>
-                  <div class="mt">2:41 PM</div>
-                </div>
-              </div>
-              <div class="msg usr">
-                <div class="mav">W</div>
-                <div>
-                  <div class="bbl">Add async streaming to the engine output</div>
-                  <div class="mt">2:42 PM</div>
-                </div>
-              </div>
-              <div class="msg ai">
-                <div class="mav">🤖</div>
-                <div>
-                  <div class="bbl">
-                    <p>Here's the async generator pattern:</p>
-                    <pre><code>async def stream_output(self, session_id):
-    async for chunk in self._tmux.read():
-        yield OutputChunk(text=chunk)</code><button class="ccbtn" onclick="cpc(this)">Copy</button></pre>
-                    <p>Wire into Discord adapter too?</p>
-                  </div>
-                  <div class="mt">2:42 PM</div>
-                </div>
-              </div>
-              <div class="msg ai" id="typing" style="display:none">
-                <div class="mav">🤖</div>
-                <div>
-                  <div class="bbl"><div class="tdots"><span></span><span></span><span></span></div></div>
-                </div>
-              </div>
-            </div>
-            <div class="wsp-term" id="wspt-0">
-              <div class="tl-dim">ghost · ~/myproject</div>
-              <div class="tl-cmd">$ uv run pytest tests/test_engine.py -v</div>
-              <div class="tl-out">test_stream_output ........ <span class="tl-ok">PASSED</span></div>
-              <div class="tl-out">test_session_create ....... <span class="tl-ok">PASSED</span></div>
-              <div class="tl-out">test_multi_workspace ...... <span class="tl-err">FAILED</span></div>
-              <div class="tl-err">AssertionError: expected 2 sessions, got 1</div>
-              <div class="tl-out">4 passed, 1 failed in 1.42s</div>
-              <div class="tl-dim">&#9607;</div>
-            </div>
-            <div class="wsp-input wsp-chat" style="position:relative">
-              <textarea id="build-inp" class="wsp-ta" placeholder="Build something in ~/myproject…"
-                rows="1" onkeydown="hk(event)" oninput="ar(this)"></textarea>
-              <button class="wsp-sbtn" onclick="send()">&#8593;</button>
-              <!-- Slash command menu for pane 0 -->
-              <div class="slash-menu" id="slash-menu-0">
-                <div class="slash-item" onclick="insertSlashCmd('/agent',0)">
-                  <span class="slash-cmd">/agent</span><span class="slash-desc">Deploy a new agent</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/skill',0)">
-                  <span class="slash-cmd">/skill</span><span class="slash-desc">Run a saved skill</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/data',0)">
-                  <span class="slash-cmd">/data</span><span class="slash-desc">Query your data</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/status',0)">
-                  <span class="slash-cmd">/status</span><span class="slash-desc">Show fleet status</span>
-                </div>
-              </div>
-            </div>
-            <div class="wsp-tinput">
-              <span class="wsp-ps">myproject $</span>
-              <input class="wsp-tinp" placeholder="command…" onkeydown="gridTermKey(event,0)">
-            </div>
+          <div id="main-term" style="display:none"></div>
+          <div id="term-empty">
+            <span style="font-size:28px;opacity:0.3">⌗</span>
+            <span>Select a session from the sidebar</span>
           </div>
+        </div>
 
-          <!-- Pane 1: auth — idle -->
-          <div class="ws-panel" id="wsp-1">
-            <div class="wsp-head" onclick="selectBuildTab(1)" ondblclick="paneFocus(1)">
-              <div class="pane-status">
-                <span class="pane-dot idle"></span>
-                <span class="pane-status-idle">&#9208; Idle</span>
-              </div>
-              <span class="wsp-name" style="margin-left:6px">auth</span>
-              <span class="wsp-ai">claude</span>
-            </div>
-            <div class="wsp-chat wsp-msgs" id="wspc-1">
-              <div class="msg ai">
-                <div class="mav">🤖</div>
-                <div>
-                  <div class="bbl"><p>Auth module loaded. Applied JWT session changes — 2 routes updated.</p></div>
-                  <div class="mt">2:11 PM</div>
-                </div>
-              </div>
-              <div class="msg usr">
-                <div class="mav">W</div>
-                <div>
-                  <div class="bbl">add refresh token support</div>
-                  <div class="mt">2:11 PM</div>
-                </div>
-              </div>
-            </div>
-            <div class="wsp-term" id="wspt-1">
-              <div class="tl-dim">ghost · ~/myproject/auth</div>
-              <div class="tl-cmd">$ uv run python -m auth.server</div>
-              <div class="tl-ok">Server running on :8080</div>
-              <div class="tl-dim">&#9607;</div>
-            </div>
-            <div class="wsp-input wsp-chat" style="position:relative">
-              <textarea class="wsp-ta" placeholder="Build something in ~/myproject…" rows="1"
-                oninput="ar(this)" onkeydown="buildPaneKey(event,1)"></textarea>
-              <button class="wsp-sbtn">&#8593;</button>
-              <div class="slash-menu" id="slash-menu-1">
-                <div class="slash-item" onclick="insertSlashCmd('/agent',1)">
-                  <span class="slash-cmd">/agent</span><span class="slash-desc">Deploy a new agent</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/skill',1)">
-                  <span class="slash-cmd">/skill</span><span class="slash-desc">Run a saved skill</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/data',1)">
-                  <span class="slash-cmd">/data</span><span class="slash-desc">Query your data</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/status',1)">
-                  <span class="slash-cmd">/status</span><span class="slash-desc">Show fleet status</span>
-                </div>
-              </div>
-            </div>
-            <div class="wsp-tinput">
-              <span class="wsp-ps">myproject $</span>
-              <input class="wsp-tinp" placeholder="command…" onkeydown="gridTermKey(event,1)">
-            </div>
-          </div>
-
-          <!-- Pane 2: tests — stopped -->
-          <div class="ws-panel" id="wsp-2">
-            <div class="wsp-head" onclick="selectBuildTab(2)" ondblclick="paneFocus(2)">
-              <div class="pane-status">
-                <span class="pane-dot stopped"></span>
-                <span class="pane-status-stopped">&#9724; Stopped</span>
-              </div>
-              <span class="wsp-name" style="margin-left:6px">tests</span>
-              <span class="wsp-ai">claude</span>
-            </div>
-            <div class="wsp-chat wsp-msgs" id="wspc-2">
-              <div class="msg ai">
-                <div class="mav">🤖</div>
-                <div>
-                  <div class="bbl"><p>Session stopped. Click to resume test suite.</p></div>
-                  <div class="mt">1:28 PM</div>
-                </div>
-              </div>
-            </div>
-            <div class="wsp-term" id="wspt-2">
-              <div class="tl-dim">ghost · ~/myproject — stopped 42m ago</div>
-            </div>
-            <div class="wsp-input wsp-chat" style="position:relative">
-              <textarea class="wsp-ta" placeholder="Build something in ~/myproject…" rows="1"
-                oninput="ar(this)" onkeydown="buildPaneKey(event,2)"></textarea>
-              <button class="wsp-sbtn">&#8593;</button>
-              <div class="slash-menu" id="slash-menu-2">
-                <div class="slash-item" onclick="insertSlashCmd('/agent',2)">
-                  <span class="slash-cmd">/agent</span><span class="slash-desc">Deploy a new agent</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/skill',2)">
-                  <span class="slash-cmd">/skill</span><span class="slash-desc">Run a saved skill</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/data',2)">
-                  <span class="slash-cmd">/data</span><span class="slash-desc">Query your data</span>
-                </div>
-                <div class="slash-item" onclick="insertSlashCmd('/status',2)">
-                  <span class="slash-cmd">/status</span><span class="slash-desc">Show fleet status</span>
-                </div>
-              </div>
-            </div>
-            <div class="wsp-tinput">
-              <span class="wsp-ps">myproject $</span>
-              <input class="wsp-tinp" placeholder="command…" onkeydown="gridTermKey(event,2)">
-            </div>
-          </div>
-
-          <!-- Add pane cell -->
-          <div class="ws-panel-add" onclick="addPane()">＋</div>
-
-        </div><!-- /#ws-grid -->
       </div><!-- /#view-build -->
 
 

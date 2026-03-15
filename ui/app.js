@@ -300,15 +300,11 @@ const DATA_FILES = [
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────
-let channelPaneMap = {}; // channel_id → pane index (populated by ghost bridge)
-let allSessions = []; // all sessions from backend
-let panePickerOpen = -1; // which pane idx has picker open
-let tmuxSession = 'ghost'; // tmux session name from backend
-const ptyTerminals = {}; // pane index → xterm.js Terminal instance
+let activeSessId = null;      // channel_id of the open PTY session
+let sessTerminal = null;      // single xterm.js Terminal instance
+let allSessions = [];         // all sessions from backend
+let tmuxSession = 'ghost';    // tmux session name from backend
 let curMode = 'build';
-let activeWsTab = 0;
-let devMode = false;
-let paneFocused = false;
 let curAgentId = 'nash-reporter';
 let curProfileId = 'personal-chrome';
 let curSkill = 'market';
@@ -383,255 +379,84 @@ function closeAgentsPopover() {
   document.getElementById('agents-popover').classList.remove('on');
 }
 
-// ── Build view ─────────────────────────────────────────────────────────────
-function selectBuildTab(idx) {
-  activeWsTab = idx;
-  document.querySelectorAll('.ws-tab').forEach((t,i) => t.classList.toggle('on', i===idx));
-  document.querySelectorAll('.ws-panel').forEach((p,i) => p.classList.toggle('active', i===idx));
-}
-
-function toggleDevMode() {
-  devMode = !devMode;
-  document.getElementById('ws-grid').classList.toggle('devmode', devMode);
-  document.getElementById('devmode-btn').classList.toggle('on', devMode);
-  if (devMode) {
-    const inp = document.querySelector(`#wsp-${activeWsTab} .wsp-tinp`);
-    if (inp) setTimeout(() => inp.focus(), 50);
-    // Init any pending xterm.js terminals
-    Object.entries(_pendingTerminalInits).forEach(([idx, channelId]) => {
-      setTimeout(() => initPtyTerminal(Number(idx), channelId), 150);
-      delete _pendingTerminalInits[idx];
-    });
-    // Also re-init existing ones if not yet initialized
-    Object.keys(channelPaneMap).forEach(channelId => {
-      const idx = channelPaneMap[channelId];
-      if (idx < 3 && !ptyTerminals[idx]) {
-        setTimeout(() => initPtyTerminal(idx, channelId), 150);
-      }
-    });
+// ── Build view: session sidebar + terminal ─────────────────────────────────
+function renderSessions(sessions) {
+  const list = document.getElementById('sess-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!sessions.length) {
+    list.innerHTML = '<div style="padding:20px 12px;color:rgba(255,255,255,0.2);font-size:12px">No sessions found</div>';
+    return;
   }
-}
-
-function paneFocus(idx) {
-  if (paneFocused) return;
-  paneFocused = true;
-  const panel = document.getElementById('wsp-' + idx);
-  if (!panel) return;
-  panel.classList.add('focus');
-  // add exit button to pane header
-  const head = panel.querySelector('.wsp-head');
-  if (head && !head.querySelector('.focus-exit-btn')) {
-    const btn = document.createElement('button');
-    btn.className = 'focus-exit-btn';
-    btn.innerHTML = '⤢ Exit focus';
-    btn.onclick = e => { e.stopPropagation(); paneFocusExit(); };
-    head.appendChild(btn);
-  }
-}
-
-function paneFocusExit() {
-  paneFocused = false;
-  document.querySelectorAll('.ws-panel.focus').forEach(p => {
-    p.classList.remove('focus');
-    const btn = p.querySelector('.focus-exit-btn');
-    if (btn) btn.remove();
+  sessions.forEach(sess => {
+    const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '~';
+    const isActive = sess.channel_id === activeSessId;
+    const cli = (sess.coding_cli || 'claude').toLowerCase();
+    const clsExtra = cli === 'codex' ? ' codex' : cli === 'opencode' ? ' opencode' : cli === 'copilot' ? ' copilot' : '';
+    const item = document.createElement('div');
+    item.className = 'sess-item' + (isActive ? ' active' : '');
+    item.dataset.channelId = sess.channel_id;
+    item.innerHTML =
+      `<div class="sess-row1">` +
+        `<span class="sess-dot-sm${isActive ? ' active' : ''}"></span>` +
+        `<span class="sess-nm">${esc(sess.window_name || cli)}</span>` +
+        `<span class="sess-cli-b${clsExtra}">${esc(cli)}</span>` +
+      `</div>` +
+      `<div class="sess-wd">${esc(dir)}</div>`;
+    item.onclick = () => activateSession(sess);
+    list.appendChild(item);
   });
 }
 
-function addWindow() {
-  const tabs = document.querySelectorAll('.ws-tab');
-  const n = tabs.length;
-  const tab = document.createElement('div');
-  tab.className = 'ws-tab';
-  tab.id = 'wstab-' + n;
-  tab.innerHTML = `<span class="ws-tab-dot d"></span>window ${n+1}`;
-  tab.onclick = () => selectBuildTab(n);
-  document.querySelector('.ws-tab-add').before(tab);
-  selectBuildTab(n);
+function activateSession(sess) {
+  if (activeSessId === sess.channel_id && sessTerminal) return; // already open
+  activeSessId = sess.channel_id;
+
+  // Highlight sidebar
+  document.querySelectorAll('.sess-item').forEach(el => {
+    const on = el.dataset.channelId === sess.channel_id;
+    el.classList.toggle('active', on);
+    const dot = el.querySelector('.sess-dot-sm');
+    if (dot) { dot.classList.toggle('active', on); dot.classList.remove('busy'); }
+  });
+
+  // Update topbar
+  const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '~';
+  const nameEl = document.getElementById('term-sess-name');
+  const cliEl  = document.getElementById('term-sess-cli');
+  const dirEl  = document.getElementById('term-sess-dir');
+  if (nameEl) { nameEl.textContent = sess.window_name || sess.coding_cli; nameEl.style.color = ''; }
+  if (cliEl)  cliEl.textContent = sess.coding_cli || 'claude';
+  if (dirEl)  dirEl.textContent = dir;
+
+  // Show terminal, hide empty
+  const termEl  = document.getElementById('main-term');
+  const emptyEl = document.getElementById('term-empty');
+  if (termEl)  termEl.style.display = '';
+  if (emptyEl) emptyEl.style.display = 'none';
+
+  // Open PTY terminal
+  initPtyTerminal(sess.channel_id);
 }
 
-function addPane() {
-  const panels = document.querySelectorAll('.ws-panel');
-  const n = panels.length;
-  const addCell = document.querySelector('.ws-panel-add');
-  const panel = document.createElement('div');
-  panel.className = 'ws-panel';
-  panel.id = 'wsp-' + n;
-  panel.innerHTML = `
-    <div class="wsp-head" onclick="selectBuildTab(${n})">
-      <div class="pane-status">
-        <span class="pane-dot stopped"></span>
-        <span class="pane-status-stopped">&#9724; Stopped</span>
-      </div>
-      <span class="wsp-name" style="margin-left:6px">pane ${n+1}</span>
-      <span class="wsp-ai">claude</span>
-    </div>
-    <div class="wsp-chat wsp-msgs" id="wspc-${n}">
-      <div class="msg ai"><div class="mav">🤖</div><div>
-        <div class="bbl"><p>Ready at <code>~/myproject</code>.</p></div>
-      </div></div>
-    </div>
-    <div class="wsp-term" id="wspt-${n}">
-      <div class="tl-dim">ghost · ~/myproject</div><div class="tl-dim">&#9607;</div>
-    </div>
-    <div class="wsp-input wsp-chat" style="position:relative">
-      <textarea class="wsp-ta" placeholder="Build something in ~/myproject…" rows="1"
-        oninput="ar(this)" onkeydown="buildPaneKey(event,${n})"></textarea>
-      <button class="wsp-sbtn">&#8593;</button>
-      <div class="slash-menu" id="slash-menu-${n}">
-        <div class="slash-item" onclick="insertSlashCmd('/agent',${n})">/agent<span class="slash-desc"> Deploy a new agent</span></div>
-        <div class="slash-item" onclick="insertSlashCmd('/skill',${n})">/skill<span class="slash-desc"> Run a saved skill</span></div>
-        <div class="slash-item" onclick="insertSlashCmd('/data',${n})">/data<span class="slash-desc"> Query your data</span></div>
-        <div class="slash-item" onclick="insertSlashCmd('/status',${n})">/status<span class="slash-desc"> Show fleet status</span></div>
-      </div>
-    </div>
-    <div class="wsp-tinput">
-      <span class="wsp-ps">myproject $</span>
-      <input class="wsp-tinp" placeholder="command…" onkeydown="gridTermKey(event,${n})">
-    </div>`;
-  addCell.before(panel);
-  selectBuildTab(n);
-}
-
-function buildPaneKey(e, idx) {
-  const ta = e.target;
-  const menu = document.getElementById('slash-menu-' + idx);
-  if (e.key === 'Escape') {
-    if (menu) menu.classList.remove('on');
-    return;
-  }
-  if (e.key === '/' && ta.value === '') {
-    setTimeout(() => { if (menu) menu.classList.add('on'); }, 0);
-    return;
-  }
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    if (menu) menu.classList.remove('on');
-    // submit in panel 0 goes to full send()
-    if (idx === 0) send();
-  }
-  // hide menu when backspace clears the /
-  if (e.key === 'Backspace' && ta.value.length <= 1) {
-    if (menu) menu.classList.remove('on');
+function newSession() {
+  const name = prompt('Session name:', 'ghost');
+  if (!name) return;
+  if (window.ghost) {
+    window.ghost.send('new_session', { name, work_dir: '~', cli: 'claude' });
   }
 }
 
-function insertSlashCmd(cmd, idx) {
-  const ta = document.querySelector(`#wsp-${idx} .wsp-ta`);
-  if (ta) { ta.value = cmd + ' '; ta.focus(); }
-  const menu = document.getElementById('slash-menu-' + idx);
-  if (menu) menu.classList.remove('on');
-}
+function selectBuildTab() {} // compat stub
+function toggleDevMode() {}  // compat stub
+function addWindow() {}      // compat stub
+function addPane() {}        // compat stub
 
-function toggleSlashMenu(show, menuEl) {
-  if (show) menuEl.classList.add('on');
-  else menuEl.classList.remove('on');
-}
-
-function gridTermKey(e, idx) {
-  if (e.key !== 'Enter') return;
-  const inp = e.target, cmd = inp.value.trim();
-  if (!cmd) return;
-  inp.value = '';
-  const sc = document.getElementById('wspt-' + idx);
-  const add = (cls, txt) => {
-    const d = document.createElement('div'); d.className = cls; d.textContent = txt; sc.appendChild(d);
-  };
-  add('tl-cmd', '$ ' + cmd);
-  if (cmd.startsWith('uv run pytest')) {
-    add('tl-out', 'collecting…');
-    setTimeout(() => { add('tl-ok', '✓ all passed'); sc.scrollTop = 9999; }, 700);
-  } else if (cmd === 'clear') {
-    sc.innerHTML = '';
-  } else {
-    add('tl-out', 'running…');
-    setTimeout(() => { add('tl-dim', '[done]'); sc.scrollTop = 9999; }, 400);
-  }
-  sc.scrollTop = 9999;
-}
-
-// ── Chat (build pane 0) ────────────────────────────────────────────────────
-const REPLIES = [
-  "Sure! Here's the Discord adapter wired with a 30s timeout:\n```python\nasync def handle(self, msg):\n    try:\n        async with asyncio.timeout(30):\n            async for chunk in engine.stream_output(session_id):\n                await msg.channel.send(chunk.text)\n    except TimeoutError:\n        await msg.channel.send('⏱ Timed out.')\n```",
-  "Done! `src/gits/adapters/discord/bot.py` updated. Run `uv run pytest` to verify.",
-  "Want me to add a `/agent` command that hands off to the Agent fleet? Users can trigger agents directly from Build mode.",
-  "All good. The async generator streams correctly — no more blocking on output.",
-];
-let ri = 0;
-
+// ── Chat helpers (kept for Agents view compatibility) ──────────────────────
 function ar(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 100) + 'px'; }
-
-function buildHint(el) {
-  const inp = document.getElementById('build-empty-inp');
-  if (inp) { inp.value = el.textContent; inp.focus(); }
-}
-
-function buildEmptyKey(e) {
-  if (e.key === 'Enter') { e.preventDefault(); buildEmptySend(); }
-}
-
-function buildEmptySend() {
-  const inp = document.getElementById('build-empty-inp');
-  const txt = inp ? inp.value.trim() : '';
-  if (!txt) return;
-  // Switch to build pane and inject the message
-  document.getElementById('build-empty').style.display = 'none';
-  const ta = document.getElementById('build-inp');
-  if (ta) { ta.value = txt; send(); }
-}
-
-function checkBuildEmpty() {
-  const panels = document.querySelectorAll('.ws-panel:not(.ws-panel-add)');
-  const emptyEl = document.getElementById('build-empty');
-  if (emptyEl) emptyEl.style.display = panels.length === 0 ? 'flex' : 'none';
-}
-
-function hk(e) {
-  if (e.key === 'Escape') {
-    if (paneFocused) { paneFocusExit(); return; }
-    const menu = document.getElementById('slash-menu-0');
-    if (menu) menu.classList.remove('on');
-    return;
-  }
-  if (e.key === '/') {
-    const ta = e.target;
-    if (ta.value === '') {
-      setTimeout(() => {
-        const menu = document.getElementById('slash-menu-0');
-        if (menu) menu.classList.add('on');
-      }, 0);
-    }
-    return;
-  }
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    const menu = document.getElementById('slash-menu-0');
-    if (menu) menu.classList.remove('on');
-    send();
-  }
-}
-
-function send() {
-  const inp = document.getElementById('build-inp');
-  const txt = inp.value.trim();
-  if (!txt) return;
-  addm('usr', txt);
-  inp.value = ''; ar(inp);
-
-  const channelId = Object.keys(channelPaneMap).find(k => channelPaneMap[k] === 0);
-  if (window.ghost && channelId) {
-    window.ghost.send('send', { channel_id: channelId, text: txt });
-    return; // real response arrives via 'output' event
-  }
-
-  // Mock response (no Electron bridge)
-  document.getElementById('typing').style.display = 'flex';
-  scrl();
-  setTimeout(() => {
-    document.getElementById('typing').style.display = 'none';
-    addm('ai', REPLIES[ri++ % REPLIES.length]);
-  }, 900 + Math.random() * 500);
-}
+function hk(e) {}  // compat stub — input now handled by PTY directly
+function send() {} // compat stub
+function checkBuildEmpty() {}
 
 function addm(role, text) {
   const now = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
@@ -1581,10 +1406,6 @@ document.addEventListener('click', e => {
   if (!e.target.closest('#agents-popover') && !e.target.closest('#tb-agents-btn')) {
     closeAgentsPopover();
   }
-  if (panePickerOpen >= 0 && !e.target.closest('.pane-picker') && !e.target.closest('.wsp-name')) {
-    document.querySelectorAll('.pane-picker').forEach(p => p.remove());
-    panePickerOpen = -1;
-  }
 });
 
 // ── Tauri v2 IPC shim ─────────────────────────────────────────────────────
@@ -1617,19 +1438,7 @@ document.addEventListener('click', e => {
 
 // ── Ghost Bridge (Electron IPC) ────────────────────────────────────────────
 
-function sendPane(idx) {
-  const ta = document.querySelector(`#wsp-${idx} .wsp-ta`);
-  if (!ta) return;
-  const txt = ta.value.trim();
-  if (!txt) return;
-  _addPaneMsg(idx, 'usr', txt);
-  ta.value = '';
-
-  const channelId = Object.keys(channelPaneMap).find(k => channelPaneMap[k] === idx);
-  if (window.ghost && channelId) {
-    window.ghost.send('send', { channel_id: channelId, text: txt });
-  }
-}
+function sendPane(idx) {} // compat stub — input now handled by PTY directly
 
 function _addPaneMsg(idx, role, text) {
   const msgs = idx === 0
@@ -1648,145 +1457,50 @@ function _addPaneMsg(idx, role, text) {
   setTimeout(() => msgs.scrollTop = msgs.scrollHeight, 10);
 }
 
-function _initTerminalWhenVisible(idx, channelId) {
-  // If devMode is on, init immediately; otherwise wait until devMode toggle
-  if (devMode) {
-    setTimeout(() => initPtyTerminal(idx, channelId), 100);
-  } else {
-    // Store pending init; toggleDevMode will pick it up
-    _pendingTerminalInits[idx] = channelId;
-  }
-}
+function _initTerminalWhenVisible(idx, channelId) {}  // compat stub
 
-const _pendingTerminalInits = {};
-
-function _applySession(idx, sess) {
-  const panel = document.getElementById('wsp-' + idx);
-  if (!panel) return;
-
-  // Update header label + CLI badge
-  const nameEl = panel.querySelector('.wsp-name');
-  const aiEl = panel.querySelector('.wsp-ai');
-  if (nameEl) nameEl.textContent = sess.window_name || sess.coding_cli;
-  if (nameEl) {
-    nameEl.style.cursor = 'pointer';
-    nameEl.title = 'Click to switch session';
-    nameEl.onclick = (e) => openPanePicker(idx, e);
-  }
-  if (aiEl) aiEl.textContent = sess.coding_cli || 'claude';
-
-  // Mark as active
-  const dot = panel.querySelector('.pane-dot');
-  if (dot) dot.className = 'pane-dot active';
-  panel.querySelectorAll('[class^="pane-status-"]').forEach(el => el.style.display = 'none');
-  const activeLabel = panel.querySelector('.pane-status-active');
-  if (activeLabel) activeLabel.style.display = '';
-
-  // Replace mock messages with connected greeting
-  const msgs = idx === 0
-    ? document.getElementById('build-msgs')
-    : document.getElementById('wspc-' + idx);
-  if (msgs) {
-    const typingEl = document.getElementById('typing');
-    const children = Array.from(msgs.childNodes);
-    children.forEach(c => { if (c !== typingEl) msgs.removeChild(c); });
-    const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '~';
-    _addPaneMsg(idx, 'ai', `Connected · ${sess.coding_cli} · \`${dir}\``);
-  }
-  // Initialize interactive xterm.js terminal (lazy — only when devMode shows the term div)
-  _initTerminalWhenVisible(idx, sess.channel_id);
-}
-
-function openPanePicker(paneIdx, e) {
-  e.stopPropagation();
-  // Close existing picker
-  document.querySelectorAll('.pane-picker').forEach(p => p.remove());
-  if (panePickerOpen === paneIdx) { panePickerOpen = -1; return; }
-  panePickerOpen = paneIdx;
-
-  const panel = document.getElementById('wsp-' + paneIdx);
-  if (!panel || allSessions.length === 0) return;
-  const nameEl = panel.querySelector('.wsp-name');
-  const currentId = Object.keys(channelPaneMap).find(k => channelPaneMap[k] === paneIdx);
-
-  const picker = document.createElement('div');
-  picker.className = 'pane-picker';
-
-  allSessions.forEach(sess => {
-    const item = document.createElement('div');
-    item.className = 'pane-picker-item' + (sess.channel_id === currentId ? ' active' : '');
-    const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '~';
-    item.innerHTML =
-      `<span class="pp-name">${esc(sess.window_name)}</span>` +
-      `<span class="pp-cli">${esc(sess.coding_cli)}</span>` +
-      `<span class="pp-dir">${esc(dir)}</span>`;
-    item.onclick = (ev) => {
-      ev.stopPropagation();
-      switchPaneSession(paneIdx, sess);
-      picker.remove();
-      panePickerOpen = -1;
-    };
-    picker.appendChild(item);
-  });
-
-  nameEl.parentElement.appendChild(picker);
-}
-
-function switchPaneSession(paneIdx, sess) {
-  // Remove old channel mapping
-  const oldId = Object.keys(channelPaneMap).find(k => channelPaneMap[k] === paneIdx);
-  if (oldId) delete channelPaneMap[oldId];
-  // Set new mapping
-  channelPaneMap[sess.channel_id] = paneIdx;
-  _applySession(paneIdx, sess);
-}
-
-function initPtyTerminal(idx, channelId) {
-  if (ptyTerminals[idx]) {
-    ptyTerminals[idx].dispose();
-    delete ptyTerminals[idx];
+function initPtyTerminal(channelId) {
+  if (sessTerminal) {
+    sessTerminal.dispose();
+    sessTerminal = null;
   }
 
-  const termEl = document.getElementById('wspt-' + idx);
+  const termEl = document.getElementById('main-term');
   if (!termEl) return;
-
-  // Clear old content
   termEl.innerHTML = '';
-  termEl.style.padding = '0';
 
   const term = new Terminal({
     fontFamily: '"SF Mono", "JetBrains Mono", "Menlo", monospace',
-    fontSize: 12,
-    lineHeight: 1.5,
+    fontSize: 13,
+    lineHeight: 1.45,
     theme: {
       background: 'transparent',
-      foreground: 'rgba(0,0,0,0.85)',
-      cursor: 'rgba(0,0,0,0.7)',
-      selectionBackground: 'rgba(0,122,255,0.3)',
-      black: '#1a1a1a', red: '#c0392b', green: '#27ae60',
-      yellow: '#f39c12', blue: '#2980b9', magenta: '#8e44ad',
-      cyan: '#16a085', white: '#ecf0f1',
-      brightBlack: '#7f8c8d', brightRed: '#e74c3c',
-      brightGreen: '#2ecc71', brightYellow: '#f1c40f',
-      brightBlue: '#3498db', brightMagenta: '#9b59b6',
-      brightCyan: '#1abc9c', brightWhite: '#ffffff',
+      foreground: 'rgba(255,255,255,0.85)',
+      cursor: 'rgba(255,255,255,0.75)',
+      selectionBackground: 'rgba(99,102,241,0.35)',
+      black: '#1a1a1a', red: '#ff6b6b', green: '#51cf66',
+      yellow: '#ffd43b', blue: '#74c0fc', magenta: '#cc5de8',
+      cyan: '#3bc9db', white: '#e9ecef',
+      brightBlack: '#868e96', brightRed: '#ff8787',
+      brightGreen: '#8ce99a', brightYellow: '#ffe066',
+      brightBlue: '#91d0ff', brightMagenta: '#da77f2',
+      brightCyan: '#66d9e8', brightWhite: '#f8f9fa',
     },
     allowTransparency: true,
     cursorBlink: true,
-    scrollback: 500,
+    scrollback: 5000,
   });
 
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(termEl);
   fitAddon.fit();
+  sessTerminal = term;
 
-  ptyTerminals[idx] = term;
-
-  // Send keyboard input to PTY
+  // Keyboard input → PTY
   term.onData((data) => {
     if (window.__TAURI__) {
-      const encoded = btoa(data);
+      const encoded = btoa(unescape(encodeURIComponent(data)));
       (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('pty_input', { channel_id: channelId, data: encoded });
     }
   });
@@ -1794,39 +1508,30 @@ function initPtyTerminal(idx, channelId) {
   // Open PTY on backend
   const binding = allSessions.find(s => s.channel_id === channelId);
   if (binding && window.__TAURI__) {
-    const rows = term.rows;
-    const cols = term.cols;
     (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('open_pty', {
       channel_id: channelId,
       tmux_session: tmuxSession,
       window_id: binding.window_id,
-      rows,
-      cols,
+      rows: term.rows,
+      cols: term.cols,
     }).catch(err => console.error('open_pty failed:', err));
   }
 
-  // Handle resize
-  const resizeObserver = new ResizeObserver(() => {
+  // Auto-resize
+  const ro = new ResizeObserver(() => {
     fitAddon.fit();
     if (window.__TAURI__ && term.rows && term.cols) {
       (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('resize_pty', {
-        channel_id: channelId,
-        rows: term.rows,
-        cols: term.cols,
+        channel_id: channelId, rows: term.rows, cols: term.cols,
       }).catch(() => {});
     }
   });
-  resizeObserver.observe(termEl);
+  ro.observe(termEl);
+  term.focus();
 }
 
 function ghostSetup() {
   if (typeof window === 'undefined' || !window.ghost) return;
-
-  // Wire send buttons for panes 1 and 2
-  [1, 2].forEach(idx => {
-    const btn = document.querySelector(`#wsp-${idx} .wsp-sbtn`);
-    if (btn) btn.onclick = () => sendPane(idx);
-  });
 
   window.ghost.on('ready', () => {
     window.ghost.send('sessions');
@@ -1834,7 +1539,6 @@ function ghostSetup() {
     window.ghost.send('skills', {});
   });
 
-  // Request sessions, agents, and skills immediately in case ready already fired
   window.ghost.send('sessions');
   window.ghost.send('agents', {});
   window.ghost.send('skills', {});
@@ -1842,52 +1546,43 @@ function ghostSetup() {
   window.ghost.on('sessions', (data) => {
     allSessions = data.sessions || [];
     if (data.tmux_session) tmuxSession = data.tmux_session;
-    channelPaneMap = {};
-    allSessions.forEach((sess, i) => {
-      channelPaneMap[sess.channel_id] = i;
-      _applySession(i, sess);
-    });
-    // Show terminal view by default when real sessions arrive
-    if (allSessions.length > 0 && !devMode) toggleDevMode();
-  });
-
-  window.ghost.on('output', (data) => {
-    const idx = channelPaneMap[data.channel_id];
-    if (idx === undefined) return;
-    if (data.text) _addPaneMsg(idx, 'ai', data.text);
-  });
-
-  window.ghost.on('edit', (data) => {
-    const idx = channelPaneMap[data.channel_id];
-    if (idx === undefined) return;
-    if (data.text) _addPaneMsg(idx, 'ai', data.text);
+    renderSessions(allSessions);
+    // Auto-select first session on first load
+    if (!activeSessId && allSessions.length > 0) {
+      activateSession(allSessions[0]);
+    }
   });
 
   window.ghost.on('pane_update', (data) => {
-    const idx = channelPaneMap[data.channel_id];
-    if (idx === undefined) return;
+    // Update status dot in sidebar
+    const item = document.querySelector(`.sess-item[data-channel-id="${data.channel_id}"]`);
+    if (!item) return;
+    const dot = item.querySelector('.sess-dot-sm');
+    if (!dot) return;
+    if (data.channel_id === activeSessId) {
+      dot.className = 'sess-dot-sm active';
+    } else if (data.status === 'busy') {
+      dot.className = 'sess-dot-sm busy';
+    } else {
+      dot.className = 'sess-dot-sm';
+    }
+  });
 
-    // Update status dot
-    const panel = document.getElementById('wsp-' + idx);
-    if (panel) {
-      const dot = panel.querySelector('.pane-dot');
-      if (dot) {
-        if (data.status === 'busy') {
-          dot.className = 'pane-dot active';
-          dot.style.background = '#f59e0b';
-          dot.style.boxShadow = '0 0 4px rgba(245,158,11,.6)';
-          dot.style.animation = 'pulseDot 1s ease-in-out infinite';
-        } else {
-          dot.className = 'pane-dot active';
-          dot.style.background = '#22c55e';
-          dot.style.boxShadow = '0 0 4px rgba(34,197,94,.5)';
-          dot.style.animation = 'pulseDot 2s ease-in-out infinite';
-        }
+  // PTY output → xterm.js
+  window.ghost.on('pty-output', (data) => {
+    if (data.channel_id !== activeSessId || !sessTerminal) return;
+    if (data.closed) { sessTerminal.write('\r\n[terminal closed]\r\n'); return; }
+    if (data.data) {
+      try {
+        const bytes = Uint8Array.from(atob(data.data), c => c.charCodeAt(0));
+        sessTerminal.write(bytes);
+      } catch (e) {
+        sessTerminal.write(data.data);
       }
     }
   });
 
-  // agents_list: group runs by skill_name, keep most recent per skill (task 6.1)
+  // agents_list
   window.ghost.on('agents_list', (data) => {
     const runs = data.runs || [];
     runnerAgents = {};
@@ -1895,31 +1590,25 @@ function ghostSetup() {
       const key = run.skill_name;
       if (!key) return;
       const existing = runnerAgents[key];
-      if (!existing) {
-        runnerAgents[key] = run;
-      } else {
-        // Keep most recent by started_at
-        const existingTs = existing.started_at ? new Date(existing.started_at).getTime() : 0;
-        const newTs = run.started_at ? new Date(run.started_at).getTime() : 0;
-        if (newTs > existingTs) runnerAgents[key] = run;
-      }
+      if (!existing) { runnerAgents[key] = run; return; }
+      const existingTs = existing.started_at ? new Date(existing.started_at).getTime() : 0;
+      const newTs = run.started_at ? new Date(run.started_at).getTime() : 0;
+      if (newTs > existingTs) runnerAgents[key] = run;
     });
     renderRunnerGrid();
     updateAgentBadge();
   });
 
-  // skills_list: render Skill cards in the runner section and Skills panel (tasks 7.1–7.3)
+  // skills_list
   window.ghost.on('skills_list', (data) => {
     const skills = data.skills || [];
     skillDefs = {};
-    skills.forEach(sk => {
-      if (sk.name) skillDefs[sk.name] = sk;
-    });
+    skills.forEach(sk => { if (sk.name) skillDefs[sk.name] = sk; });
     renderRunnerGrid();
     renderSkillPanel(skills);
   });
 
-  // agent_log: append lines to the open runner drawer's log panel (task 6.4)
+  // agent_log
   window.ghost.on('agent_log', (data) => {
     const skillName = data.skill_name;
     if (!skillName) return;
@@ -1928,7 +1617,6 @@ function ghostSetup() {
     if (!lp) return;
     const line = data.line || data.text || '';
     if (!line) return;
-    // Clear placeholder on first real line
     if (lp.querySelector('div[style]')) lp.innerHTML = '';
     const d = document.createElement('div');
     d.className = 'ag-log-row';
@@ -1936,23 +1624,6 @@ function ghostSetup() {
     d.textContent = line;
     lp.appendChild(d);
     lp.scrollTop = lp.scrollHeight;
-  });
-
-  // PTY output → xterm.js write
-  window.ghost.on('pty-output', (data) => {
-    const idx = channelPaneMap[data.channel_id];
-    if (idx === undefined) return;
-    const term = ptyTerminals[idx];
-    if (!term) return;
-    if (data.closed) {
-      term.write('\r\n[terminal closed]\r\n');
-      return;
-    }
-    if (data.data) {
-      // data.data is base64 — decode to string
-      const raw = atob(data.data);
-      term.write(raw);
-    }
   });
 }
 
@@ -1983,22 +1654,6 @@ function ghostSetup() {
   updateAgentBadge();
   updateAgentsWarnBadge();
 
-  // build empty state check
-  checkBuildEmpty();
-
-  // Wire Electron IPC bridge (no-op in browser)
+  // Wire IPC bridge (no-op in browser)
   ghostSetup();
-
-  // Demo toasts only when not connected to real backend
-  if (!window.ghost) {
-    setTimeout(() => {
-      showToast('✓ Nash-AI Reporter · Done → View in Agents', () => setMode('agents'));
-      addm('ai', '✓ Nash-AI Reporter finished: downloaded gs_q2_2024.pdf (2.4 MB). Results saved to Data.');
-    }, 3000);
-
-    setTimeout(() => {
-      showToast('⚠ Notion Page Watcher needs your input', () => setMode('agents'));
-      updateAgentsWarnBadge();
-    }, 7000);
-  }
 })();
