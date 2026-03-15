@@ -7,7 +7,9 @@ and thread lifecycle.
 from __future__ import annotations
 
 import io
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import discord
@@ -25,6 +27,24 @@ from ..base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_cli_choices() -> list[app_commands.Choice]:
+    """Build /bind cli choices from built-ins + ~/.gits/config.json aliases."""
+    choices = [
+        app_commands.Choice(name="Claude Code", value="claude"),
+        app_commands.Choice(name="Codex CLI (OpenAI)", value="codex"),
+        app_commands.Choice(name="OpenCode", value="opencode"),
+    ]
+    config_path = Path.home() / ".gits" / "config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+            for alias in cfg.get("cli_aliases", {}):
+                choices.append(app_commands.Choice(name=alias, value=alias))
+        except Exception:
+            pass
+    return choices
 
 
 class DiscordAdapter(PlatformAdapter):
@@ -427,11 +447,7 @@ class DiscordAdapter(PlatformAdapter):
                 app_commands.Choice(name="Normal (confirm)", value="default"),
                 app_commands.Choice(name="YOLO (auto)", value="bypassPermissions"),
             ],
-            cli=[
-                app_commands.Choice(name="Claude Code", value="claude"),
-                app_commands.Choice(name="Codex CLI (OpenAI)", value="codex"),
-                app_commands.Choice(name="OpenCode", value="opencode"),
-            ],
+            cli=_build_cli_choices(),
         )
         async def cmd_bind(
             interaction: discord.Interaction,
@@ -547,7 +563,7 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), interaction
                 )
 
-        @tree.command(name="status", description="Show binding status and info")
+        @tree.command(name="info", description="Show binding status and info")
         async def cmd_status(interaction: discord.Interaction):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
