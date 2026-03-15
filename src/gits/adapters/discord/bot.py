@@ -440,6 +440,35 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), command, interaction
                 )
 
+        # ── Send keys command ──────────────────────────────────────────
+
+        @tree.command(name="keys", description="Send key sequence to tmux (↑↓⏎⎋)")
+        @app_commands.describe(keys="Key sequence to send")
+        @app_commands.choices(
+            keys=[
+                app_commands.Choice(name="↓ Down (move selection down)", value="Down"),
+                app_commands.Choice(name="↑ Up (move selection up)", value="Up"),
+                app_commands.Choice(name="⏎ Enter (confirm selection)", value="Enter"),
+                app_commands.Choice(name="⎋ Escape (cancel)", value="Escape"),
+                app_commands.Choice(name="↓⏎ Down + Enter (select option 2)", value="Down Enter"),
+                app_commands.Choice(name="↓↓⏎ Down Down + Enter (select option 3)", value="Down Down Enter"),
+                app_commands.Choice(name="^C Ctrl-C (abort)", value="C-c"),
+                app_commands.Choice(name="Tab", value="Tab"),
+                app_commands.Choice(name="Space", value="Space"),
+            ]
+        )
+        async def cmd_keys(interaction: discord.Interaction, keys: str):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_keys(
+                    str(interaction.channel_id), keys, interaction
+                )
+
         # ── Model command (native with Discord choices) ────────────────
 
         @tree.command(name="model", description="Switch the AI model")

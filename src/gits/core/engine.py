@@ -479,6 +479,26 @@ class Engine:
 
         await self._reply(interaction, "\n".join(lines))
 
+    async def handle_keys(
+        self, channel_id: str, keys: str, interaction: Any
+    ) -> None:
+        """Handle /keys — send a key sequence to the tmux pane.
+
+        Supports space-separated key names: ``Down Enter``, ``Down Down Enter``,
+        ``Escape``, ``C-c``, ``Tab``, ``Space``, etc.
+        """
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            await self._reply(interaction, "Not bound.")
+            return
+
+        key_list = keys.split()
+        for key in key_list:
+            await self.tmux.send_keys(binding.window_id, key)
+            await asyncio.sleep(0.15)
+
+        await self._reply(interaction, f"Sent: `{keys}`")
+
     async def handle_stop(self, channel_id: str, interaction: Any) -> None:
         """Handle /stop — send Escape to interrupt."""
         binding = self.session_mgr.get_binding(channel_id)
