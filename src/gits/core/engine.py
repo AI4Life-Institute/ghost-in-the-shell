@@ -45,6 +45,7 @@ class Engine:
         self.screenshot = ScreenshotEngine(font_size=settings.screenshot_font_size)
         self.launcher = CodingCLILauncher(
             session_map_path=settings.session_map_file,
+            config_path=settings.config_file,
         )
         self.health = HealthMonitor(
             tmux=self.tmux,
@@ -215,8 +216,8 @@ class Engine:
             window_name = channel.name if channel else f"ch-{channel_id[:8]}"
             cli = cli or self.settings.coding_cli_command
 
-            # Discover existing sessions
-            sessions = self.launcher.discover_sessions(str(p), cli=cli)
+            # Discover existing sessions (all CLIs, target first)
+            sessions = self.launcher.discover_all_sessions(str(p), target_cli=cli)
 
             if sessions:
                 # Store pending bind info and show session picker
@@ -229,7 +230,7 @@ class Engine:
                     "created_at": time.time(),
                 }
                 msg = self._build_session_picker_message(
-                    sessions, str(p), channel_id
+                    sessions, str(p), channel_id, target_cli=cli
                 )
 
                 # Send picker via adapter, acknowledge the interaction
@@ -362,6 +363,7 @@ class Engine:
         work_dir: str,
         channel_id: str,
         page: int = 0,
+        target_cli: str = "",
     ) -> OutgoingMessage:
         """Build an OutgoingMessage with a Select Menu for session selection.
 
@@ -376,8 +378,17 @@ class Engine:
         total = len(sessions)
         has_more = end < total
 
+        # Resolve target CLI base type for cross-CLI badge detection
+        target_type = self.launcher.resolve_cli(target_cli).base_type if target_cli else ""
+
+        # Count cross-CLI import candidates
+        import_count = sum(
+            1 for s in sessions if s.source_cli and s.source_cli != target_type
+        )
         lines = ["**Resume Session?**\n"]
         lines.append(f"Found **{total}** session(s) in `{work_dir}` — sorted by most recently active.")
+        if import_count:
+            lines.append(f"Includes **{import_count}** importable session(s) from other CLIs (marked ↗).")
         if total > page_size:
             page_total = (total + page_size - 1) // page_size
             lines.append(f"Page {page + 1}/{page_total}")
@@ -389,16 +400,19 @@ class Engine:
         select_opts: list[SelectOption] = []
         for abs_i, s in enumerate(page_sessions, start=start):
             age = _format_age(s.mtime)
-            label = s.summary[:100]
+            is_import = bool(s.source_cli and s.source_cli != target_type)
+            badge = f"↗[{s.source_cli}] " if is_import else ""
+            label = (badge + s.summary)[:100]
             # description: last message (truncated) + msg count + age
-            meta = f" · {s.message_count} msgs · {age}"
+            import_note = " · import" if is_import else ""
+            meta = f" · {s.message_count} msgs · {age}{import_note}"
             last = s.last_message
             max_last = 100 - len(meta)
             if last and max_last > 6:
                 last_truncated = (last[:max_last - 1] + "…") if len(last) > max_last else last
                 desc = last_truncated + meta
             else:
-                desc = f"{s.message_count} msgs · {age}"
+                desc = f"{s.message_count} msgs · {age}{import_note}"
             select_opts.append(
                 SelectOption(
                     label=label or f"Session {abs_i + 1}",
@@ -1494,14 +1508,19 @@ class Engine:
 _ESCAPE_ENTER_CLIS = frozenset({"codex", "copilot"})
 
 
-def _submit_keys_for_cli(cli: str) -> str:
-    """Return the tmux submit key sequence for a given CLI type."""
-    if cli in _ESCAPE_ENTER_CLIS:
+def _submit_keys_for_cli(cli: str, base_type: str | None = None) -> str:
+    """Return the tmux submit key sequence for a given CLI type.
+
+    *base_type* should be the resolved base type from CodingCLILauncher when
+    *cli* is a user-defined alias; if omitted *cli* is used directly.
+    """
+    effective = base_type if base_type is not None else cli
+    if effective in _ESCAPE_ENTER_CLIS:
         return "Escape Enter"
     return "Enter"
 
 
-def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
+def _append_permission_flag(cmd: str, cli: str, mode: str, base_type: str | None = None) -> str:
     """Append the correct permission flag based on CLI type and mode.
 
     Mapping (our mode → CLI flag):
@@ -1525,7 +1544,9 @@ def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
     if mode == "default":
         return cmd
 
-    if cli == "codex":
+    effective = base_type if base_type is not None else cli
+
+    if effective == "codex":
         if mode == "bypassPermissions":
             cmd += " --dangerously-bypass-approvals-and-sandbox"
         elif mode == "auto":
@@ -1533,14 +1554,14 @@ def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
         # acceptEdits not supported by codex — skip
         # Enable hooks feature for session tracking
         cmd += " --enable codex_hooks"
-    elif cli == "copilot":
+    elif effective == "copilot":
         if mode == "bypassPermissions":
             cmd += " --yolo"
         elif mode == "auto":
             cmd += " --allow-all-tools"
         elif mode == "acceptEdits":
             cmd += " --allow-tool=write --allow-tool=edit"
-    elif cli == "opencode":
+    elif effective == "opencode":
         pass  # no permission flags supported
     else:
         # claude and others

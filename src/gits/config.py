@@ -56,5 +56,9 @@ class Settings(BaseSettings):
         return self.state_dir / "session_map.json"
 
     @property
+    def config_file(self) -> Path:
+        return self.state_dir / "config.json"
+
+    @property
     def log_file(self) -> Path:
         return self.state_dir / "gits.log"

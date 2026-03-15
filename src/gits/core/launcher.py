@@ -2,6 +2,21 @@
 
 Manages session resume for coding CLIs (claude, codex, copilot, opencode),
 persists a window-to-session mapping, and discovers existing sessions.
+
+Custom CLI aliases can be defined in ~/.gits/config.json:
+
+    {
+      "cli_aliases": {
+        "clpy": {
+          "type": "claude",
+          "cmd": "clpy",
+          "resume_by_id": "clpy --resume {id}"
+        }
+      }
+    }
+
+``type`` controls session discovery and permission-flag logic; ``cmd`` and
+``resume_by_id`` override the actual commands that are run.
 """
 
 from __future__ import annotations
@@ -9,6 +24,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 # CLI session resume command templates
 RESUME_TEMPLATES: dict[str, dict[str, str]] = {
@@ -27,6 +43,14 @@ CLI_SESSION_PATHS: dict[str, str] = {
 }
 
 
+class ResolvedCLI(NamedTuple):
+    """Resolved alias → concrete CLI info."""
+
+    base_type: str   # "claude" | "codex" | "copilot" | "opencode"
+    cmd: str         # launch command (e.g. "clpy")
+    resume_by_id: str  # resume template, e.g. "clpy --resume {id}"
+
+
 @dataclass
 class CLISession:
     """A discovered coding CLI session."""
@@ -37,15 +61,19 @@ class CLISession:
     message_count: int
     file_path: str
     mtime: float
+    source_cli: str = ""  # which CLI this session belongs to (set by discover_all_sessions)
 
 
 class CodingCLILauncher:
     """Launch coding CLIs with session resume support."""
 
-    def __init__(self, session_map_path: Path):
+    def __init__(self, session_map_path: Path, config_path: Path | None = None):
         self.session_map_path = session_map_path
+        self.config_path = config_path or (session_map_path.parent / "config.json")
         self._session_map: dict[str, str] = {}  # window_name -> session_id
+        self._aliases: dict[str, dict] = {}     # alias_name -> alias config
         self._load_map()
+        self._load_aliases()
 
     def _load_map(self) -> None:
         if self.session_map_path.exists():
@@ -54,6 +82,39 @@ class CodingCLILauncher:
                     self._session_map = json.load(f)
             except (json.JSONDecodeError, OSError):
                 self._session_map = {}
+
+    def _load_aliases(self) -> None:
+        """Load cli_aliases from ~/.gits/config.json (silently ignore missing)."""
+        if self.config_path.exists():
+            try:
+                with open(self.config_path) as f:
+                    data = json.load(f)
+                self._aliases = data.get("cli_aliases", {})
+            except (json.JSONDecodeError, OSError):
+                self._aliases = {}
+
+    def resolve_cli(self, cli: str) -> ResolvedCLI:
+        """Resolve a cli name / alias to its concrete launch info.
+
+        For built-in names (claude, codex, …) returns defaults.
+        For user-defined aliases from config.json, overrides cmd and
+        resume_by_id while inheriting the base_type's session-discovery logic.
+        """
+        alias_cfg = self._aliases.get(cli)
+        if alias_cfg:
+            base = alias_cfg.get("type", "claude")
+            cmd = alias_cfg.get("cmd", cli)
+            default_resume = RESUME_TEMPLATES.get(base, {}).get("by_id", f"{cli} --resume {{id}}")
+            resume = alias_cfg.get("resume_by_id", default_resume.replace(base, cmd, 1))
+            return ResolvedCLI(base_type=base, cmd=cmd, resume_by_id=resume)
+
+        # Built-in CLI — derive from RESUME_TEMPLATES
+        templates = RESUME_TEMPLATES.get(cli, {})
+        return ResolvedCLI(
+            base_type=cli,
+            cmd=cli,
+            resume_by_id=templates.get("by_id", f"{cli} --resume {{id}}"),
+        )
 
     def get_session_id(self, window_name: str) -> str | None:
         return self._session_map.get(window_name)
@@ -77,24 +138,212 @@ class CodingCLILauncher:
         When it is ``None`` or empty, a **fresh** session is started
         (just the bare CLI command — no ``--continue``).
         """
-        templates = RESUME_TEMPLATES.get(cli)
-        if templates and session_id:
-            return templates["by_id"].format(id=session_id)
+        resolved = self.resolve_cli(cli)
+        if session_id:
+            return resolved.resume_by_id.format(id=session_id)
         # No session_id → start fresh (don't use --continue)
-        return cli
+        return resolved.cmd
 
     def discover_sessions(self, work_dir: str, cli: str = "claude") -> list[CLISession]:
         """Discover existing CLI sessions for a given directory."""
+        resolved = self.resolve_cli(cli)
         discoverers = {
             "claude": self._discover_claude_sessions,
             "codex": self._discover_codex_sessions,
             "copilot": self._discover_copilot_sessions,
             "opencode": self._discover_opencode_sessions,
         }
-        discoverer = discoverers.get(cli)
+        discoverer = discoverers.get(resolved.base_type)
         if discoverer:
-            return discoverer(work_dir)
+            sessions = discoverer(work_dir)
+            for s in sessions:
+                s.source_cli = resolved.base_type
+            return sessions
         return []
+
+    def discover_all_sessions(self, work_dir: str, target_cli: str = "claude") -> list[CLISession]:
+        """Discover sessions from all CLIs, not just the target.
+
+        Target-CLI sessions come first (sorted by mtime), then sessions from
+        other CLIs sorted by mtime.  Each session has ``source_cli`` set so
+        callers can detect cross-CLI import candidates.
+        """
+        resolved = self.resolve_cli(target_cli)
+        target_type = resolved.base_type
+
+        target_sessions = self.discover_sessions(work_dir, target_cli)
+
+        other_sessions: list[CLISession] = []
+        for cli_type in RESUME_TEMPLATES:
+            if cli_type == target_type:
+                continue
+            try:
+                sessions = self.discover_sessions(work_dir, cli_type)
+                other_sessions.extend(sessions)
+            except Exception:
+                pass
+
+        other_sessions.sort(key=lambda s: s.mtime, reverse=True)
+        return target_sessions + other_sessions
+
+    # ------------------------------------------------------------------
+    # Cross-CLI conversation extraction
+    # ------------------------------------------------------------------
+
+    def extract_conversation_text(self, session: "CLISession", max_chars: int = 8000) -> str:
+        """Extract conversation turns from a session as human-readable markdown.
+
+        Returns a string of ``**USER**: …`` / ``**ASSISTANT**: …`` blocks,
+        truncated to *max_chars* (keeping the most recent messages).
+        """
+        cli = session.source_cli or "claude"
+        extractors = {
+            "claude": self._extract_claude_text,
+            "codex": self._extract_codex_text,
+            "copilot": self._extract_copilot_text,
+            "opencode": self._extract_opencode_text,
+        }
+        extractor = extractors.get(cli)
+        if not extractor:
+            return ""
+        try:
+            messages = extractor(session.file_path)
+        except Exception:
+            return ""
+
+        lines = [f"**{role.upper()}**: {text}\n" for role, text in messages]
+        full = "\n".join(lines)
+
+        if len(full) <= max_chars:
+            return full
+
+        # Keep most-recent messages when truncating
+        kept: list[str] = []
+        total = 0
+        for line in reversed(lines):
+            if total + len(line) > max_chars:
+                break
+            kept.append(line)
+            total += len(line)
+        kept.reverse()
+        return "[…earlier messages omitted…]\n\n" + "\n".join(kept)
+
+    def _extract_claude_text(self, file_path: str) -> list[tuple[str, str]]:
+        messages: list[tuple[str, str]] = []
+        with open(file_path) as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                role = data.get("type", "")
+                if role not in ("user", "assistant"):
+                    continue
+                content = data.get("message", {}).get("content", "")
+                text = ""
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            t = block.get("text", "").strip()
+                            if t and not t.startswith("<"):
+                                text += t + " "
+                elif isinstance(content, str):
+                    text = content.strip()
+                text = text.strip()
+                if text:
+                    messages.append((role, text[:1000]))
+        return messages
+
+    def _extract_codex_text(self, file_path: str) -> list[tuple[str, str]]:
+        messages: list[tuple[str, str]] = []
+        with open(file_path) as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") != "response_item":
+                    continue
+                payload = data.get("payload", {})
+                if not isinstance(payload, dict):
+                    continue
+                role = payload.get("role", "")
+                if role not in ("user", "assistant"):
+                    continue
+                content = payload.get("content", [])
+                text = ""
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            text += (
+                                block.get("text", "")
+                                or block.get("input_text", "")
+                                or block.get("output_text", "")
+                            )
+                text = text.strip()
+                if text and not text.startswith("<") and not text.startswith("# AGENTS"):
+                    messages.append((role, text[:1000]))
+        return messages
+
+    def _extract_copilot_text(self, file_path: str) -> list[tuple[str, str]]:
+        messages: list[tuple[str, str]] = []
+        with open(file_path) as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                role = data.get("role", "")
+                event_type = data.get("type", "")
+                if event_type == "user.message" or role == "user":
+                    role = "user"
+                    event_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+                    text = event_data.get("content", "") or data.get("text", "") or data.get("content", "")
+                elif event_type == "assistant.message" or role == "assistant":
+                    role = "assistant"
+                    event_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+                    text = event_data.get("content", "") or data.get("text", "") or data.get("content", "")
+                else:
+                    continue
+                if isinstance(text, str):
+                    text = text.strip()
+                    if text:
+                        messages.append((role, text[:1000]))
+        return messages
+
+    def _extract_opencode_text(self, file_path: str) -> list[tuple[str, str]]:
+        sess_file = Path(file_path)
+        # message dir lives at storage_root/message/{session_id}/
+        # session file lives at storage_root/session/{project_id}/{session_id}.json
+        storage_dir = sess_file.parent.parent.parent
+        try:
+            sess_data = json.loads(sess_file.read_text())
+            session_id = sess_data.get("id", sess_file.stem)
+        except (json.JSONDecodeError, OSError):
+            return []
+        msg_dir = storage_dir / "message" / session_id
+        if not msg_dir.exists():
+            return []
+        messages: list[tuple[str, str]] = []
+        for msg_file in sorted(msg_dir.glob("*.json")):
+            try:
+                data = json.loads(msg_file.read_text())
+                role = data.get("role", "")
+                if role not in ("user", "assistant"):
+                    continue
+                content = data.get("content", "") or data.get("text", "")
+                if isinstance(content, list):
+                    text = " ".join(
+                        part.get("text", "") for part in content if isinstance(part, dict)
+                    )
+                else:
+                    text = str(content)
+                text = text.strip()
+                if text:
+                    messages.append((role, text[:1000]))
+            except (json.JSONDecodeError, OSError):
+                continue
+        return messages
 
     def _discover_claude_sessions(self, work_dir: str) -> list[CLISession]:
         """Scan ~/.claude/projects/<dir-hash>/ for JSONL session files."""
