@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO="AI4Life-Institute/ghost-in-the-shell"
+BRANCH="master"
 PACKAGE="ghost-in-the-shell"
 
 info()  { printf '\033[1;34m==> %s\033[0m\n' "$*"; }

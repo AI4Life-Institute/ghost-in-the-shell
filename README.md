@@ -47,7 +47,7 @@ Watch your AI write code, review its terminal output, and approve permission pro
 **1. Install**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AI4Life-Institute/ghost-in-the-shell/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/AI4Life-Institute/ghost-in-the-shell/master/install.sh | bash
 ```
 
 Or via Homebrew:
