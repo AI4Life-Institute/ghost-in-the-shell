@@ -101,26 +101,30 @@ gits start --dev
 |---|---|
 | `/bind <path> [mode] [cli]` | Bind channel to a project, launch CLI |
 | `/unbind` | Unbind and close the window |
+| `/status` | Show binding status and session info |
 | `/screenshot` | Send a terminal screenshot |
-| `/stop` | Send Escape (interrupt current operation) |
+| `/esc` | Send Escape key (interrupt current operation) |
 | `/kill` | Close window and archive thread |
-| `/new` | Reset CLI session |
+| `/new [message]` | Reset CLI session |
 | `/bash <command>` | Run a shell command in the project directory |
 | `/keys <keys>` | Send keystrokes (Enter, Escape, Ctrl-C, Up, Down…) |
-| `/model [name]` | Switch model (sonnet, opus, haiku…) |
-| `/fork <title>` | Create a sub-task thread with an isolated git worktree |
-| `/compact` `/clear` `/cost` `/diff` | Forwarded directly to the CLI |
+| `/model [name]` | Switch model (sonnet, opus, haiku, o3, gpt-4o…) |
+| `/mode <mode>` | Switch permission mode without restarting |
+| `/thread <message>` | Create a sub-thread sharing the same directory |
+| `/fork <title>` | Create a sub-thread with an isolated git worktree |
+| `/browse <goal>` | Run a browser agent task |
+| `/compact` `/clear` `/cost` `/diff` `/memory` `/context` `/usage` | Forwarded directly to the CLI |
 | `/cc <command>` | Forward any slash command to the CLI |
 
 ### Permission modes
 
-Set via `/bind` or `/mode`:
+`/bind` supports `default` and `bypassPermissions`. `/mode` also adds:
 
 | Mode | Behavior |
 |---|---|
-| `default` | Normal interactive mode — prompts require approval |
+| `default` | Normal interactive — prompts require approval |
 | `bypassPermissions` | YOLO — auto-approve all operations |
-| `auto` | Auto-run tools, prompt for edits |
+| `auto` | Auto-run tools, prompt for file edits |
 | `acceptEdits` | Auto-accept file edits |
 
 ---
