@@ -1,58 +1,66 @@
 ## 1. Mockup Updates (ui/index.html)
 
-### 1a. Global chrome & navigation
-- [ ] 1.1 Titlebar: add "⏳ 2 active" agent counter button (static); click shows popover listing active agents
-- [ ] 1.2 Titlebar: workspace dropdown — replace color-only dots with icon + label (▶ Active / ⏸ Idle / ◼ Stopped)
-- [ ] 1.3 Sidebar: add activity badge on Task button (static "2") and ⚠ badge variant for HITL-waiting state
+### 1a. Global chrome
+- [ ] 1.1  Titlebar: replace workspace dropdown with project directory path button (shows `~/myproject`)
+- [ ] 1.2  Titlebar: add "⏳ 2 active" agent counter; click shows popover listing all active agents
+- [ ] 1.3  Sidebar: rename modes → Build / Agents / Skills / Data with new icons
+- [ ] 1.4  Sidebar: Agents button shows count badge `[3]`; `⚠` variant when agent waiting for input
+- [ ] 1.5  Sidebar: remove "Task" button entirely
 
-### 1b. Code view
-- [ ] 1.4 Pane headers: replace color dot with icon + label; active pane shows animated pulse dot + "Active"
-- [ ] 1.5 Pane headers: idle pane shows "⏸ Idle", stopped pane shows "◼ Stopped" with dimmed content
-- [ ] 1.6 Pane focus mode: double-click header → pane expands full-screen; show "⤢ Exit focus" button; Escape exits
-- [ ] 1.7 Chat input placeholder: change to "Ask myproject…" (workspace-name aware)
-- [ ] 1.8 Chat input: `/` keypress opens command palette (floating menu: /browse, /skill, /data, /status)
-- [ ] 1.9 Code view empty state: center CTA "No sessions open. Open a project folder to start." + button
+### 1b. Build mode (was Code)
+- [ ] 1.6  Rename "Code" view → "Build"; update all labels and IDs
+- [ ] 1.7  Pane headers: replace color-only dot with icon + label (▶ Active pulse / ⏸ Idle / ◼ Stopped)
+- [ ] 1.8  Pane focus mode: double-click header → full-screen expand; "⤢ Exit focus" button; Escape exits
+- [ ] 1.9  Chat input placeholder: "Build something in ~/myproject…"
+- [ ] 1.10 Chat input: `/` keypress opens command palette (/agent, /skill, /data, /status)
+- [ ] 1.11 Build empty state: centered input "What do you want to build?" with example hints
 
-### 1c. Skill view
-- [ ] 1.10 Skill run: clicking Run shows real-time output panel below the form (simulated streaming lines)
-- [ ] 1.11 Skill run success: output panel shows "✓ Done · 2.3s" + "Copy output" + "View in Data →" link
-- [ ] 1.12 Skill run failure: red output panel + auto-expanded "AI Debug" section with diagnosis text + "Apply fix in Code →" button
-- [ ] 1.13 Run history: each entry has expand arrow showing full output; "Replay" button pre-fills the form
-- [ ] 1.14 "＋ New Skill" button: opens a modal with natural-language description input
+### 1c. Agents mode (replaces Task)
+- [ ] 1.12 Replace Task view entirely with new Agents view
+- [ ] 1.13 Left panel: three groups — Browser (by Chrome profile), Loop, Reactive
+- [ ] 1.14 Browser group: show Chrome profiles (Personal, Work, nash-ai); each lists its Agents below
+- [ ] 1.15 Browser Agent detail: show "🌐 Real Chrome · [profile]" badge prominently in header
+- [ ] 1.16 Browser Agent detail: add explainer line "Your sessions. Your cookies. No re-logging in."
+- [ ] 1.17 Loop Agent item: show schedule ("Every 60 min") + next run time + last run status
+- [ ] 1.18 Reactive Agent item: show trigger source + connection status dot + label
+- [ ] 1.19 Agent detail panel: status (icon+label), live execution log, Run Now / Pause / Delete controls
+- [ ] 1.20 Agent detail panel: "View outputs in Data →" link
+- [ ] 1.21 Simulate auto-repair: failed Loop Agent shows "🤖 Auto-repaired by Build Agent" badge
+- [ ] 1.22 Agents empty state: "No agents running yet. Ask the Build agent to create one." + link to Build
 
-### 1d. Task view
-- [ ] 1.15 Task status badges: add icon prefix (⏳ Running / ✓ Done / ✗ Failed / ○ Queued / ⚠ Needs input)
-- [ ] 1.16 Task list empty state: "No tasks yet. Describe a web goal…" + "＋ New Task" + hint "/browse in any chat"
-- [ ] 1.17 Cross-mode notification: toast component top-right; simulate by clicking "Mark done" on a running task
+### 1d. Skills mode
+- [ ] 1.23 Skill run: real-time output panel below form (simulated streaming)
+- [ ] 1.24 Skill run success: "✓ Done · 2.3s" + "Copy output" + "View in Data →" link
+- [ ] 1.25 Skill run failure: red output + auto-expanded "AI Debug" section + "Apply fix in Build →"
+- [ ] 1.26 Run history: expand arrow per entry; "Replay" pre-fills form
+- [ ] 1.27 "＋ New Skill" button → natural-language description modal
 
-### 1e. Data view
-- [ ] 1.18 Rename sidebar label from "Data" → "Data" (keep), but update section header inside view to "Outputs & Artifacts"
-- [ ] 1.19 Left panel: replace raw table list with named collections grouped by source (Tasks / Skills / Manual)
-- [ ] 1.20 Each collection shows: source icon, name, row count, last updated
-- [ ] 1.21 Collection detail header: show "Source: Task — [task goal]" with clickable link
-- [ ] 1.22 Presentation tabs: Table / Cards (add tab switcher above the grid)
-- [ ] 1.23 Row detail drawer: already exists — verify it shows all fields un-truncated
-- [ ] 1.24 Export button: add CSV download (mockup: shows browser save-as dialog with correct filename)
-- [ ] 1.25 Data view empty state: "No data yet. Run a Task or Skill to start collecting."
+### 1e. Data mode
+- [ ] 1.28 Left panel: named collections grouped by source (Agents / Skills / Manual)
+- [ ] 1.29 Collection header: "Source: Agent — [agent name]" with link back to agent
+- [ ] 1.30 Presentation tabs: Table / Cards above the grid
+- [ ] 1.31 Export button: CSV download with meaningful filename
+- [ ] 1.32 Data empty state: "No data yet. Run an Agent or Skill to start collecting."
 
-### 1f. Cross-mode flow (simulated)
-- [ ] 1.26 When a Task is marked done in mockup: inject a chat message in Code pane 0:
-      "Browser task done: [goal] — saved btc_price.json → [View in Data]"
-- [ ] 1.27 That "[View in Data]" link navigates to Data mode with the relevant collection highlighted
+### 1f. Cross-mode flow (simulated in mockup)
+- [ ] 1.33 Toast component: top-right, auto-dismiss 4s, icon + message + "View →" link
+- [ ] 1.34 Simulate: marking an Agent "done" fires toast + injects summary message in Build chat
+- [ ] 1.35 Simulate: HITL-waiting Agent fires "⚠" badge on Agents sidebar button + toast
 
 ## 2. OpenSpec Validation
 
 - [ ] 2.1 `openspec validate update-ghost-product-vision --strict`
-- [ ] 2.2 Review `add-macos-desktop-app` tasks.md — mark items now covered by this change
-- [ ] 2.3 Review `add-local-browser-agent` tasks.md — no changes expected
+- [ ] 2.2 Annotate `add-macos-desktop-app` tasks.md: mark items superseded by this change
+- [ ] 2.3 Annotate `add-local-browser-agent` tasks.md: browser-agent is now agent-view type, not Task
 
-## 3. Backend (after Tauri shell exists)
+## 3. Backend (after Tauri shell — deferred)
 
-- [ ] 3.1 Global activity model in `src/gits/core/engine.py` — expose active agent count + per-agent status
-- [ ] 3.2 Wire to Tauri IPC — frontend subscribes to activity updates via event stream
-- [ ] 3.3 Toast notification dispatch: Python emits event → Tauri → frontend renders toast
-- [ ] 3.4 Sidebar badge counts via same IPC channel
-- [ ] 3.5 `/` command routing: `/browse` → Task, `/skill` → Skill, `/data` → Data query, `/status` → popover
-- [ ] 3.6 Skill real-time output: stream stdout lines from subprocess → IPC → output panel
-- [ ] 3.7 Data view: query SQLite, return JSON; frontend decides table vs cards based on schema shape
-- [ ] 3.8 AI Debug on Skill failure: send error + stack trace to Claude → stream response into debug panel
+- [ ] 3.1 Global activity model: expose active agent count + per-agent status from `engine.py`
+- [ ] 3.2 Tauri IPC: frontend subscribes to agent state changes via event stream
+- [ ] 3.3 Toast dispatch: Python emits event → Tauri → frontend renders toast
+- [ ] 3.4 `/agent` command: Building Agent decides type (browser/loop/reactive) from natural language goal
+- [ ] 3.5 Skill streaming: stdout lines streamed → IPC → output panel
+- [ ] 3.6 Loop Agent runner: background process manager (start/stop/restart), persists across app restarts
+- [ ] 3.7 Reactive Agent runner: event listener process, reconnects on disconnect
+- [ ] 3.8 Auto-repair: on Agent failure, invoke Building Agent with error context; re-deploy patched script
+- [ ] 3.9 Data view: query SQLite by source (agent_id / skill_id); return schema + rows as JSON

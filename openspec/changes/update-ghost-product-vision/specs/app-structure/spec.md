@@ -1,77 +1,93 @@
 ## ADDED Requirements
 
 ### Requirement: Four-Mode Application Structure
-The system SHALL organise its user interface into exactly four top-level modes, each accessible
-from the sidebar. Switching modes changes the main content area while the titlebar (workspace
-dropdown + agent status) remains constant. All four modes share the same active workspace context.
+The system SHALL organise its interface into exactly four top-level modes. All modes operate
+within the same project directory (the mono-repo root). There is no "workspace" concept —
+the user opens a directory, and everything lives there.
 
-The four modes are:
+| Mode | Icon | One-line purpose |
+|------|------|-----------------|
+| **Build** | 🤖 | Talk to the Building Agent — the AI that writes code, creates Skills, and deploys Agents into your directory |
+| **Agents** | ⚡ | Your deployed agent fleet — every Agent currently running or paused, organised by type |
+| **Skills** | 🛠 | Reusable tools the Building Agent has created; callable by any Agent or by the user directly |
+| **Data** | 🗄 | Structured outputs produced by Agents and Skills; the shared memory of the fleet |
 
-| Mode | Icon | Purpose |
-|------|------|---------|
-| **Code** | 💻 | Multi-pane AI coding session dashboard. Run multiple Claude Code / Codex sessions simultaneously, each in its own pane. The hero view for daily work. |
-| **Skill** | ⚡ | Saved automations. Define reusable scripts with parameters; run them on demand; see run history and AI-generated debug suggestions on failure. |
-| **Task** | 🌐 | Browser agent. Give the AI a natural-language goal; it autonomously browses the web, fills forms, extracts data, and saves artifacts — using the user's real Chrome session. |
-| **Data** | 🗄** | Structured outputs. View and explore data extracted or saved by Tasks and Skills. AI selects the best presentation format (table, cards, chart). No SQL knowledge required. |
+"Task" is not a mode or a navigation concept. A task is what an Agent *does* — an internal
+implementation detail, not something the user manages directly. The user manages Agents.
 
 #### Scenario: User navigates between modes
 - **WHEN** the user clicks a mode button in the sidebar
 - **THEN** the main area switches to that mode immediately
-- **AND** the active workspace and titlebar state remain unchanged
-- **AND** any background work in other modes continues uninterrupted
+- **AND** all Agents continue running uninterrupted in the background
 
-#### Scenario: All modes share the same workspace context
-- **WHEN** the user switches the active workspace via the titlebar dropdown
-- **THEN** all four modes update to reflect that workspace — Code shows its panes, Task shows its
-  tasks, Data shows its saved data, Skill shows its run history for that workspace
+#### Scenario: All modes share the same project directory
+- **WHEN** the user is in any mode
+- **THEN** the titlebar shows the current project directory path (e.g. `~/myproject`)
+- **AND** Build, Agents, Skills, and Data all reference files and outputs within that directory
+
+### Requirement: Project Directory as the Root Context
+The system SHALL use a single project directory as the root context for all operations.
+The directory is equivalent to a mono-repo: all agent code, skill scripts, and data outputs
+live under it. There is no multi-workspace concept in v1.
+
+Opening a different project means opening a different directory — like VS Code's "Open Folder."
+Recent directories are accessible from the titlebar path button.
+
+#### Scenario: User opens a project directory
+- **WHEN** the user clicks the directory path in the titlebar or chooses "Open Folder"
+- **THEN** a native folder picker appears
+- **AND** selecting a directory sets it as the active project context for all four modes
+- **AND** the titlebar updates to show the new path
+
+#### Scenario: User switches to a recent project
+- **WHEN** the user clicks the directory path in the titlebar
+- **THEN** a dropdown shows recent directories with their last-active timestamp
+- **AND** clicking one switches the project immediately
 
 ### Requirement: Sidebar Navigation Structure
-The system SHALL display a narrow sidebar (≤170px) containing only mode buttons and a footer
-with user identity and settings access. The sidebar SHALL NOT contain workspace lists, session
-lists, or any context-specific content — those belong in the main area of each mode.
+The system SHALL display a narrow sidebar (≤170px) containing only the four mode buttons
+and a footer. Mode buttons show activity badges when background work is in progress.
 
 ```
-Sidebar layout (top to bottom):
+Sidebar layout:
   ┌──────────────┐
-  │ 💻  Code     │  ← active mode highlighted
-  │ ⚡  Skill    │
-  │ 🌐  Task  [2]│  ← badge when tasks running
+  │ 🤖  Build    │  ← active mode highlighted
+  │ ⚡  Agents[3]│  ← badge: 3 agents running
+  │ 🛠  Skills   │
   │ 🗄  Data     │
   │              │
-  │ ─────────── │
-  │ [av] Wei Liu │  ← avatar + name; click → Settings
+  │ ──────────── │
+  │ [av] Wei Liu │  ← click → Settings
   └──────────────┘
 ```
 
-#### Scenario: Sidebar shows only navigation
-- **WHEN** the user opens the app
-- **THEN** the sidebar shows the four mode buttons plus the user footer
-- **AND** there are no workspace items, session lists, or file trees in the sidebar
+#### Scenario: Sidebar shows activity badges
+- **WHEN** one or more Agents are running
+- **THEN** the Agents mode button shows a count badge (e.g. `[3]`)
+- **AND** if any Agent is waiting for human input, the badge shows `⚠` instead
 
 #### Scenario: Active mode is visually distinct
 - **WHEN** the user is in a given mode
-- **THEN** that mode button has a filled/highlighted background clearly distinguishing it
-  from inactive modes — using background + border + weight, not color alone
+- **THEN** that mode button has a filled background, distinct border, and heavier font weight
+- **AND** the distinction does not rely on color alone
 
 ### Requirement: Empty State — First Run
-The system SHALL display a helpful empty state when the user has no workspaces configured,
-guiding them to create their first workspace without requiring documentation.
+The system SHALL display a useful empty state when no project directory is open, guiding
+the user to their first action without requiring documentation.
 
-#### Scenario: First launch with no workspaces
-- **WHEN** the user opens the app for the first time with no workspaces configured
-- **THEN** the main area shows a welcome empty state with:
-  - A brief one-line description of what Ghost does
-  - A single primary CTA: "＋ Open a project folder"
-  - Below it, two secondary options: "Connect Discord bot" and "Try a browser task"
-- **AND** the sidebar mode buttons are visible but clicking them shows the same empty state
-  with mode-specific CTAs
+#### Scenario: No project open
+- **WHEN** the user opens Ghost for the first time with no project configured
+- **THEN** the main area shows:
+  - Headline: "Open a project folder to get started"
+  - Primary CTA: "＋ Open Folder"
+  - Secondary hint: "Ghost works inside your project directory — all AI-built code, agents, and data live there"
 
-#### Scenario: Code mode empty state
-- **WHEN** the user is in Code mode with no panes open
-- **THEN** the grid area shows: "No sessions open. Choose a folder to start coding with AI."
-  with a "＋ Open folder" button in the center
+#### Scenario: Build mode empty (project open, no conversation yet)
+- **WHEN** the user opens a project but has not started a Build conversation
+- **THEN** the Build view shows a centered input: "What do you want to build?"
+  with example hints: "Write a web scraper", "Build a price monitor", "Automate my Notion workflow"
 
-#### Scenario: Task mode empty state
-- **WHEN** the user is in Task mode with no tasks created
-- **THEN** the task list shows: "No tasks yet. Describe a web goal and Ghost will handle it."
-  with a "＋ New Task" button and a hint: "or type /browse in any chat"
+#### Scenario: Agents mode empty
+- **WHEN** no Agents have been deployed yet
+- **THEN** the Agents view shows: "No agents running yet. Ask the Build agent to create one."
+  with a link that opens Build mode

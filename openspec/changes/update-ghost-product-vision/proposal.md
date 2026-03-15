@@ -1,67 +1,70 @@
-# Change: Refine Ghost Product Vision — AI-Native Productivity UX
+# Change: Refine Ghost Product Vision — AI Fleet Control Center
 
 ## Why
 
-The existing desktop app specs (`add-macos-desktop-app`, `add-local-browser-agent`) were written before
-a clear target persona was established. A product review identified two structural issues:
+After product review, two structural issues were identified in the existing specs:
 
-1. **Target persona mismatch.** The specs oscillate between "non-technical user" and "developer power
-   user", producing UX compromises that serve neither well. Based on product review, the primary user is
-   an **AI-native productivity user** — someone who already uses Claude/ChatGPT/Cursor, understands
-   concepts like workspace and session, and wants to dramatically amplify what they can get done with AI.
-   They are moving toward "vibe coder" but are not there yet.
+1. **No clear target persona.** Specs oscillated between "non-technical user" and "developer
+   power user." The real target is an **AI-native productivity user** — someone who wants to
+   build and automate things but finds terminal/VSCode too high a barrier. They are comfortable
+   with AI concepts and want to dramatically amplify what they can do. The product should feel
+   like a cockpit, not a consumer chat app.
 
-2. **Static UI for a live-agent product.** Ghost's core value is running multiple AI agents
-   simultaneously. The current UI design treats this like a chat app with tabs. It should feel like a
-   **mission control** — alive, connected, showing agents at work.
-
-This change locks in the product direction and adds the UX requirements that follow from it, so
-`add-macos-desktop-app` and `add-local-browser-agent` can be implemented against a clear target.
+2. **"Task" was wrong as a top-level concept.** A task is what an Agent *does*, not something
+   the user manages. The user manages Agents — autonomous processes that run tasks on their
+   behalf. Removing "Task" as a mode and introducing "Agents" gives the product a coherent
+   mental model: you deploy agents, agents run tasks.
 
 ## Target Persona
 
-**AI-native productivity user** ("aspiring vibe coder"):
+**AI-native productivity user ("aspiring vibe coder"):**
 - Already uses Claude.ai, ChatGPT, or Cursor daily
-- Comfortable with terms: workspace, session, agent, task, skill
-- Does not want to configure terminals, but is not afraid of technical UI
-- Core job: get more done with AI, faster — especially multi-step and multi-project work
-- The product should feel like a **cockpit**, not a consumer chat app
+- Wants to build things and automate workflows, but terminal/VSCode is too high a barrier
+- Comfortable with terms: agent, skill, deploy, loop, trigger
+- Core job: get the AI to build things and run things for them, simultaneously
+- The product should feel like **commanding a fleet**, not chatting with a single assistant
+
+## Final Four-Mode Structure
+
+| Mode | Icon | Purpose |
+|------|------|---------|
+| **Build** | 🤖 | The Building Agent — AI that writes code, creates Skills, deploys Agents into your directory |
+| **Agents** | ⚡ | Your fleet — all deployed Agents (Browser / Loop / Reactive), organised by type |
+| **Skills** | 🛠 | Reusable tools the Building Agent has created; callable on demand |
+| **Data** | 🗄 | Structured outputs from all Agents and Skills; the fleet's shared memory |
+
+**Key decisions:**
+- "Task" is removed as a mode. Task = what an Agent does internally. User manages Agents.
+- Browser automation is a type of Agent within Agents mode — not a separate mode.
+  Its "real Chrome, real sessions" differentiator is surfaced prominently inside Agents view.
+- No "workspace" concept in v1. One project directory = one mono-repo root. All agent
+  code, Skills, and Data live under it. Switching projects = opening a different folder.
+- Building Agent (Build mode) creates and deploys the other Agents; it also monitors them
+  and auto-repairs Loop/Reactive Agents when they fail.
 
 ## What Changes
 
-### Product structure (no code changes, informs implementation of pending changes)
-- Clarify that **Code** (multi-pane dashboard) is the **hero view**, not an advanced-mode detail
-- Keep **Skill** mode as-is — the term is appropriate for this persona
-- Rename **Data** mode to **Data** but surface it as "structured outputs & artifacts" — AI-rendered,
-  not raw SQL. Users do not need to know the backend is SQLite
-- Confirm **Task** (browser agent) as the primary differentiator; surface it prominently
-
-### New UX capabilities (ADDED to desktop-app spec)
-- **Agent Status Bar** — global indicator in titlebar showing number of active agents; click to see
-  per-agent live status
-- **Live Pane State** — Code view panes show animated active state (pulse, typing indicator) when
-  AI is working; idle and stopped states use icon + label, not color alone
-- **Pane Focus Mode** — double-click a pane header to expand it full-screen; Escape to return to grid
-- **Sidebar Activity Badges** — mode buttons show count of active agents/running tasks
-
-### New UX capabilities (ADDED to local-chat spec)
-- **Slash Command Menu** — typing `/` in any chat input opens a command palette:
-  `/browse`, `/skill`, `/data`, `/status` — makes cross-mode actions discoverable from chat
-- **Cross-Mode Notifications** — when a Task or Skill completes while the user is in another mode,
-  a toast appears and the relevant sidebar badge updates; chat pane receives a summary message
-  with a deep link (e.g. "Browser task done: saved btc_price.json → [View in Data]")
-
-### Accessibility (ADDED to desktop-app spec)
-- All status indicators MUST use icon + label + color, never color alone. This applies to:
-  workspace status dots, task status badges, pane active state, agent working state
-
-### Workspace dropdown (MODIFIED in desktop-app spec)
-- Workspace selector stays in the titlebar as a dropdown (already implemented in mockup)
-- Sidebar is reserved exclusively for mode navigation + footer
+### New UX capabilities
+- **Four-mode structure** (Build / Agents / Skills / Data) replaces the prior Code/Skill/Task/Data
+- **Project directory in titlebar** replaces workspace dropdown — one folder, all modes
+- **Agent Fleet View** — left panel groups agents by type: Browser (by Chrome profile), Loop, Reactive
+- **Browser Agents** — explicitly surfaced as "real Chrome, your sessions, no re-logging in"
+- **Loop Agents** — scheduled, continuous execution; Building Agent auto-repairs on failure
+- **Reactive Agents** — event-driven; show trigger source and connection status
+- **Agent auto-repair** — Building Agent monitors Loop/Reactive Agents and patches failures
+- **Slash command menu** — `/agent`, `/skill`, `/data`, `/status` from Build chat input
+- **Cross-mode notifications** — toast + Build chat message when any Agent completes or needs input
+- **Global agent counter** — titlebar shows "⏳ N active" spanning all agent types
+- **Sidebar activity badges** — Agents button shows count; `⚠` when human input needed
+- **Pane focus mode** — double-click Build pane header to full-screen; Escape exits
+- **Live pane state** — animated pulse when Building Agent is working
+- **Accessibility** — all status indicators: icon + label + color (never color alone)
+- **Empty states** — per-mode guidance for first-time users
 
 ## Impact
 
-- Affected changes: `add-macos-desktop-app` (MODIFIED specs), `add-local-browser-agent` (no change)
-- Affected specs (delta): `desktop-app`, `local-chat`, `browser-agent`, new `agent-status`
-- Affected code: `ui/index.html` (mockup update), later Tauri frontend
-- Does NOT change: backend engine, Discord adapter, tmux bridge, SQLite schema
+- Supersedes: `add-macos-desktop-app` (desktop-app, local-chat specs)
+- Partially supersedes: `add-local-browser-agent` (browser-agent becomes a type within agent-view)
+- New specs: `app-structure`, `agent-view`, `skill-view`, `data-view`, `agent-status`
+- Affected code (future): `ui/index.html` mockup, then Tauri frontend
+- No backend changes in this change — implementation deferred to Tauri phase
