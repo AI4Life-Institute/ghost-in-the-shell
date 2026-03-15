@@ -247,6 +247,25 @@ fn spawn_python(app: AppHandle, stdin_arc: Arc<Mutex<Option<ChildStdin>>>) {
     });
 }
 
+// ── Screenshot — save base64 PNG from html2canvas in the WebView ──────────
+
+#[tauri::command]
+fn take_screenshot(data: String, path: Option<String>) -> Result<String, String> {
+    let out_path = path.unwrap_or_else(|| {
+        format!("/tmp/ghost-{}.png",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0))
+    });
+    // Strip "data:image/png;base64," prefix if present
+    let b64 = if let Some(pos) = data.find(',') { &data[pos+1..] } else { &data };
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&out_path, bytes).map_err(|e| e.to_string())?;
+    Ok(out_path)
+}
+
 // ── App entry ────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -269,6 +288,7 @@ fn main() {
             pty_input,
             resize_pty,
             close_pty,
+            take_screenshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

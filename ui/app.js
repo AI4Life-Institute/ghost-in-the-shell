@@ -442,8 +442,11 @@ function activateSession(sess) {
 function newSession() {
   const name = prompt('Session name:', 'ghost');
   if (!name) return;
+  // Default work_dir to the active session's dir, or the first session's dir
+  const refSess = allSessions.find(s => s.channel_id === activeSessId) || allSessions[0];
+  const work_dir = refSess?.work_dir || '~';
   if (window.ghost) {
-    window.ghost.send('new_session', { name, work_dir: '~', cli: 'claude' });
+    window.ghost.send('new_session', { name, work_dir, cli: 'claude' });
   }
 }
 
@@ -1399,6 +1402,48 @@ function dismissToast() {
 }
 
 // ── Slash menu (global dismiss) ────────────────────────────────────────────
+// Screenshot function (button + Cmd+Shift+S)
+// Uses html2canvas to capture DOM → base64 PNG → saved by Rust (no screen recording TCC needed)
+async function takeScreenshot() {
+  if (!window.__TAURI__) { showToast('Screenshot only available in the desktop app'); return; }
+  const invoke = window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke;
+  showToast('📸 Capturing…');
+
+  // Load html2canvas from CDN if not already loaded
+  if (!window.html2canvas) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+
+  try {
+    const canvas = await window.html2canvas(document.body, {
+      backgroundColor: null,
+      scale: window.devicePixelRatio || 1,
+      logging: false,
+      useCORS: true,
+    });
+    const dataUrl = canvas.toDataURL('image/png');
+    const path = await invoke('take_screenshot', { data: dataUrl });
+    showToast(`📸 Saved: ${path}`);
+    console.log('Screenshot saved to', path);
+  } catch (err) {
+    showToast(`Screenshot failed: ${err}`);
+    console.error('Screenshot error:', err);
+  }
+}
+
+// Cmd+Shift+S → screenshot
+document.addEventListener('keydown', e => {
+  if (e.metaKey && e.shiftKey && e.key === 's') {
+    e.preventDefault();
+    takeScreenshot();
+  }
+});
+
 document.addEventListener('click', e => {
   if (!e.target.closest('.slash-menu') && !e.target.closest('.wsp-ta') && !e.target.closest('.irow')) {
     document.querySelectorAll('.slash-menu').forEach(m => m.classList.remove('on'));
