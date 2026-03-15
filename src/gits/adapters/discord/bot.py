@@ -560,8 +560,8 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), interaction
                 )
 
-        @tree.command(name="resume", description="Show the resume command for the current CLI session")
-        async def cmd_resume(interaction: discord.Interaction):
+        @tree.command(name="info", description="Show the resume command for the current CLI session")
+        async def cmd_info(interaction: discord.Interaction):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
                     "Access denied.", ephemeral=True

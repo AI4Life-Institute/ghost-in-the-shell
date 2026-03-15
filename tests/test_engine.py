@@ -369,6 +369,10 @@ class TestHandleMessage:
 
             project_dir = tmp_path / "proj"
             project_dir.mkdir()
+            # Return idle pane so _wait_for_idle resolves immediately
+            engine.tmux.capture_pane_text = AsyncMock(return_value="output\n" + "\u2500" * 66 + "\n\u276f \n")
+            # No existing sessions → bind immediately without picker
+            engine.launcher.discover_sessions = MagicMock(return_value=[])
             await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
 
             msg = IncomingMessage(
@@ -378,6 +382,9 @@ class TestHandleMessage:
                 text="fix the bug please",
             )
             await engine.handle_message(msg)
+
+            # Yield to the event loop so the drainer task can run
+            await asyncio.sleep(0.1)
 
             # Should have sent to tmux
             text_calls = [
@@ -422,6 +429,7 @@ def _make_sessions(count: int = 3) -> list[CLISession]:
                 message_count=10 * (i + 1),
                 file_path=f"/tmp/fake/{i}.jsonl",
                 mtime=now - (3600 * (i + 1)),  # 1h, 2h, 3h ago...
+                last_message=f"Last message for session {i}",
             )
         )
     return sessions
@@ -452,42 +460,44 @@ class TestBuildSessionPickerMessage:
         assert msg.text is not None
         assert "Resume Session?" in msg.text
         assert "/tmp/project" in msg.text
-        assert "Session 0 summary" in msg.text
-        assert "Session 2 summary" in msg.text
+        # Sessions are now in select_options, not in text
+        assert msg.select_options is not None
+        labels = [opt.label for opt in msg.select_options]
+        # index 0 is "New Session", sessions start at index 1
+        assert any("Session 0 summary" in lbl for lbl in labels)
+        assert any("Session 2 summary" in lbl for lbl in labels)
 
-    def test_message_has_buttons(self, engine):
+    def test_message_has_select_options(self, engine):
         sessions = _make_sessions(2)
         msg = engine._build_session_picker_message(sessions, "/tmp/project", "ch-1")
 
-        assert msg.buttons is not None
-        # 2 sessions in 1 row of 2 + 1 row for New Session = 2 rows
-        assert len(msg.buttons) == 2
+        # Session picker now uses a select menu, not buttons
+        assert msg.select_options is not None
+        # 2 sessions + 1 "New Session" option = 3 total
+        assert len(msg.select_options) == 3
 
-        # Last row should have New Session button
-        last_row = msg.buttons[-1]
-        assert any("New Session" in btn.label for btn in last_row)
+        # First option should be "New Session"
+        assert "New Session" in msg.select_options[0].label
 
     def test_callback_data_format(self, engine):
         sessions = _make_sessions(1)
         msg = engine._build_session_picker_message(sessions, "/tmp/project", "ch-1")
 
-        # Session button callback
-        session_btn = msg.buttons[0][0]
-        assert session_btn.callback_data == "bind_resume:ch-1:0"
+        # index 0 = "New Session", index 1 = first session
+        resume_opt = msg.select_options[1]
+        assert resume_opt.value == "bind_resume:ch-1:0"
 
-        # New session button callback
-        new_btn = msg.buttons[-1][0]
-        assert new_btn.callback_data == "bind_new:ch-1"
+        new_opt = msg.select_options[0]
+        assert new_opt.value == "bind_new:ch-1"
 
-    def test_max_5_sessions_displayed(self, engine):
+    def test_max_sessions_in_select(self, engine):
         sessions = _make_sessions(8)
         msg = engine._build_session_picker_message(sessions, "/tmp/project", "ch-1")
 
-        # Should only show 5 sessions (buttons in rows of 2: 3 rows + 1 new)
-        assert msg.buttons is not None
-        all_buttons = [btn for row in msg.buttons for btn in row]
-        resume_buttons = [b for b in all_buttons if b.callback_data.startswith("bind_resume")]
-        assert len(resume_buttons) == 5
+        # All 8 sessions fit on one page (page_size=24), plus "New Session" = 9 options
+        assert msg.select_options is not None
+        resume_opts = [o for o in msg.select_options if o.value.startswith("bind_resume")]
+        assert len(resume_opts) == 8
 
     def test_callback_data_within_100_chars(self, engine):
         sessions = _make_sessions(5)
@@ -495,9 +505,8 @@ class TestBuildSessionPickerMessage:
         msg = engine._build_session_picker_message(
             sessions, "/tmp/project", "1234567890" * 5
         )
-        for row in msg.buttons:
-            for btn in row:
-                assert len(btn.callback_data) <= 100
+        for opt in msg.select_options:
+            assert len(opt.value) <= 100
 
 
 class TestSessionPickerFlow:
@@ -527,7 +536,7 @@ class TestSessionPickerFlow:
             call_args = adapter.send_message.call_args
             assert call_args[0][0] == "ch-1"
             picker_msg = call_args[0][1]
-            assert picker_msg.buttons is not None
+            assert picker_msg.select_options is not None
             assert "Resume Session?" in picker_msg.text
 
             # Should have stored pending bind

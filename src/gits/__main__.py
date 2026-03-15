@@ -67,15 +67,16 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "start":
+    if args.command == "start" or args.command is None:
+        if args.command is None:
+            # Default: inject start defaults
+            args.log_level = None
+            args.dev = False
         _cmd_start(args)
     elif args.command == "hook":
         _cmd_hook(args)
     elif args.command == "status":
         _cmd_status(args)
-    else:
-        parser.print_help()
-        sys.exit(1)
 
 
 def _cmd_start(args: argparse.Namespace) -> None:

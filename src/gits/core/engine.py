@@ -67,6 +67,7 @@ class Engine:
         # Pending session picker state: channel_id -> bind info
         self._pending_binds: dict[str, dict] = {}
 
+
     def set_adapter(self, adapter: Any) -> None:
         """Set the platform adapter."""
         self._adapter = adapter
@@ -102,6 +103,7 @@ class Engine:
         self.monitor.stop_all()
         self.jsonl_monitor.stop()
         await self.health.stop()
+        # Cancel all message drainer tasks
         logger.info("Engine stopped")
 
     # ------------------------------------------------------------------
@@ -382,13 +384,14 @@ class Engine:
                 )
             )
 
-        # "New Session" as the last Select option
-        select_opts.append(
+        # "New Session" as the first Select option
+        select_opts.insert(
+            0,
             SelectOption(
                 label="＋ New Session",
                 value=f"bind_new:{channel_id}",
                 description="Start a fresh session in this directory",
-            )
+            ),
         )
 
         # "Next Page" button when there are more sessions
@@ -743,6 +746,36 @@ class Engine:
 
         await self._reply(interaction, "\n".join(lines))
 
+    async def handle_resume(self, channel_id: str, interaction: Any) -> None:
+        """Handle /resume — show the resume command for the current CLI session."""
+        from .launcher import RESUME_TEMPLATES
+
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            await self._reply(interaction, "Not bound.")
+            return
+
+        if not binding.cli_session_id:
+            await self._reply(interaction, "No session ID recorded yet (session may still be starting).")
+            return
+
+        cli = binding.coding_cli or "claude"
+        templates = RESUME_TEMPLATES.get(cli)
+        if templates:
+            resume_cmd = templates["by_id"].format(id=binding.cli_session_id)
+        else:
+            resume_cmd = f"{cli} --resume {binding.cli_session_id}"
+
+        lines = [
+            f"**Resume command for `{cli}`:**",
+            f"```",
+            f"cd {binding.work_dir}",
+            f"{resume_cmd}",
+            f"```",
+            f"Session ID: `{binding.cli_session_id}`",
+        ]
+        await self._reply(interaction, "\n".join(lines))
+
     async def handle_keys(
         self, channel_id: str, keys: str, interaction: Any
     ) -> None:
@@ -873,7 +906,9 @@ class Engine:
             except Exception:
                 logger.debug("Could not archive thread %s", channel_id)
 
-    async def handle_new(self, channel_id: str, interaction: Any) -> None:
+    async def handle_new(
+        self, channel_id: str, interaction: Any, message: str | None = None
+    ) -> None:
         """Handle /new — reset CLI session."""
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
@@ -895,7 +930,62 @@ class Engine:
         # Clear session ID
         await self.session_mgr.update_cli_session_id(channel_id, "")
 
-        await self._reply(interaction, "Session reset. Fresh CLI launched.")
+        if message:
+            async def _send_initial_prompt() -> None:
+                await asyncio.sleep(2.0)  # wait for CLI to be ready
+                submit = _submit_keys_for_cli(binding.coding_cli)
+                await self.tmux.send_text(binding.window_id, message, submit_keys=submit)
+
+            asyncio.create_task(_send_initial_prompt())
+            await self._reply(interaction, f"Session reset. Fresh CLI launched.\nSent: {message[:80]}")
+        else:
+            await self._reply(interaction, "Session reset. Fresh CLI launched.")
+
+    async def handle_mode(
+        self, channel_id: str, mode: str, interaction: Any
+    ) -> None:
+        """Handle /mode — switch permission mode by resuming the session with a new flag.
+
+        Kills the current CLI process and relaunches it with the same session ID
+        (resume) so conversation history is preserved, but with the new permission
+        mode flag applied.
+        """
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            await self._reply(interaction, "Not bound.")
+            return
+
+        cli = binding.coding_cli
+        session_id = binding.cli_session_id
+
+        # Kill the running CLI
+        await self.tmux.send_keys(binding.window_id, "C-c")
+        await asyncio.sleep(0.5)
+        await self.tmux.send_text(binding.window_id, "exit")
+        await asyncio.sleep(1.5)
+
+        # Resume with new mode
+        cmd = self.launcher.build_launch_command(cli=cli, session_id=session_id)
+        if mode and mode != "default":
+            cmd = _append_permission_flag(cmd, cli, mode)
+        await self.tmux.send_text(binding.window_id, cmd)
+
+        # Persist new mode
+        stored_mode = mode if mode != "default" else None
+        binding.permission_mode = stored_mode
+        await self.session_mgr._save()
+
+        mode_label = {
+            "bypassPermissions": "YOLO (全自動)",
+            "auto": "Auto",
+            "acceptEdits": "AcceptEdits",
+            "default": "普通 (需要確認)",
+        }.get(mode, mode)
+        resume_note = f" (resuming `{session_id[:16]}…`)" if session_id else " (fresh)"
+        await self._reply(
+            interaction,
+            f"Mode switched to **{mode_label}**{resume_note}",
+        )
 
     async def handle_bash(
         self, channel_id: str, command: str, interaction: Any
@@ -1062,6 +1152,7 @@ class Engine:
             if binding:
                 # Kill tmux + unbind but keep worktree
                 self.monitor.stop_polling(target_channel)
+                self._cancel_drainer(target_channel)
                 await self.tmux.kill_window(binding.window_id)
                 await self.session_mgr.unbind(target_channel)
                 if binding.parent_channel_id and self._adapter:
@@ -1332,6 +1423,58 @@ class Engine:
         msg = self._build_session_picker_message(sessions, pending["path"], pending_channel, page=page)
         if self._adapter:
             await self._adapter.send_message(reply_channel, msg)
+
+    # ------------------------------------------------------------------
+    # Browser agent command
+    # ------------------------------------------------------------------
+
+    async def handle_browse(
+        self,
+        goal: str,
+        profile: str,
+        channel_id: str,
+        interaction: Any,
+    ) -> None:
+        """Create and run a browser agent task.
+
+        Immediately acknowledges the interaction, then fires off the
+        BrowserAgent in a background asyncio task so the slash command
+        returns quickly while the agent runs asynchronously.
+        """
+        from ..adapters.browser.agent import BrowserAgent
+        from ..storage.sqlite import GitsDB, TaskRepo
+
+        await self._reply(interaction, f"Starting browser task: {goal}")
+
+        # Create task record.
+        async with GitsDB() as db:
+            task_id = await TaskRepo(db.conn).create(goal=goal, profile=profile)
+
+        # Notification callback posts Discord updates during execution.
+        async def notify(tid: str, event: str, data: dict) -> None:
+            msg = ""
+            if event == "step":
+                msg = f"Step {data['seq']}: {data['action']} — {data.get('reasoning', '')}"
+            elif event == "done":
+                msg = f"Done: {data.get('summary', '')}"
+            elif event == "ask_user":
+                msg = (
+                    f"Agent needs input: {data.get('message', '')}\n"
+                    "Reply in this channel to continue."
+                )
+            elif event == "failed":
+                msg = f"Failed: {data.get('error', '')}"
+            if msg and self._adapter:
+                await self._adapter.send_message(
+                    channel_id, OutgoingMessage(text=msg)
+                )
+
+        async def _run() -> None:
+            async with GitsDB() as db:
+                agent = BrowserAgent(db=db, profile=profile, notify_cb=notify)
+                await agent.run(task_id=task_id, goal=goal)
+
+        asyncio.create_task(_run())
 
     async def _reply(self, interaction: Any, text: str) -> None:
         """Reply to an interaction or send to channel."""

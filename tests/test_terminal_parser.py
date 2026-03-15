@@ -234,11 +234,10 @@ class TestExtractInteractiveContent:
 class TestParseStatusLine:
     def test_spinner_detected(self) -> None:
         result = parse_status_line(PANE_SPINNER)
-        assert result is not None
-        assert "Generating response" in result
+        assert result == "busy"
 
     def test_idle_no_spinner(self) -> None:
-        assert parse_status_line(PANE_IDLE) is None
+        assert parse_status_line(PANE_IDLE) == "idle"
 
     def test_empty_pane(self) -> None:
         assert parse_status_line("") is None
@@ -251,15 +250,13 @@ class TestParseStatusLine:
         for spinner in ["\u00b7", "\u273b", "\u273d", "\u2736", "\u2733", "\u2722"]:
             text = f"output\n{spinner} Working...\n{sep}\n"
             result = parse_status_line(text)
-            assert result is not None
-            assert "Working" in result
+            assert result == "busy"
 
     def test_blank_lines_above_chrome(self) -> None:
         sep = "\u2500" * 30
         text = f"output\n\u273b Reading files\n\n{sep}\n"
         result = parse_status_line(text)
-        assert result is not None
-        assert "Reading files" in result
+        assert result == "busy"
 
 
 # ---------------------------------------------------------------------------
