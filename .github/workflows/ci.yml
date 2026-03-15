@@ -18,6 +18,11 @@ jobs:
       - name: Install tmux
         run: sudo apt-get install -y tmux
 
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@github.com"
+          git config --global user.name "CI"
+
       - name: Run tests
         run: uv sync --extra dev && uv run pytest --tb=short -q --cov=gits --cov-report=term-missing
 
