@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from ..adapters.base import Button, IncomingMessage, OutgoingMessage
 from ..config import Settings
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
-from .launcher import CodingCLILauncher
+from .launcher import CLISession, CodingCLILauncher
 from .monitor import PaneMonitor
 from .screenshot import ScreenshotEngine
 from .session import SessionManager
@@ -62,6 +63,9 @@ class Engine:
 
         # Platform adapter (set externally)
         self._adapter: Any = None
+
+        # Pending session picker state: channel_id -> bind info
+        self._pending_binds: dict[str, dict] = {}
 
     def set_adapter(self, adapter: Any) -> None:
         """Set the platform adapter."""
@@ -129,7 +133,12 @@ class Engine:
     async def handle_bind(
         self, channel_id: str, path: str | None, interaction: Any
     ) -> None:
-        """Handle /bind — bind channel to a project directory."""
+        """Handle /bind — bind channel to a project directory.
+
+        When existing CLI sessions are found in the directory, shows a
+        session picker with buttons.  Otherwise starts a fresh session
+        immediately.
+        """
         if path:
             # Direct path specified — validate and bind
             p = Path(path).expanduser().resolve()
@@ -147,54 +156,49 @@ class Engine:
                 await self._reply(interaction, "Path not in allowed paths.")
                 return
 
-            # Create tmux window — always start a fresh CLI session.
-            # The hook will capture the new session ID automatically.
             channel = interaction.channel if interaction else None
             window_name = channel.name if channel else f"ch-{channel_id[:8]}"
             cli = self.settings.coding_cli_command
 
-            cmd = self.launcher.build_launch_command(cli=cli)
+            # Discover existing sessions
+            sessions = self.launcher.discover_sessions(str(p), cli=cli)
 
-            win = await self.tmux.create_window(
-                name=window_name, cwd=str(p), command=cmd
-            )
+            if sessions:
+                # Store pending bind info and show session picker
+                self._pending_binds[channel_id] = {
+                    "path": str(p),
+                    "window_name": window_name,
+                    "cli": cli,
+                    "sessions": sessions,
+                    "created_at": time.time(),
+                }
+                msg = self._build_session_picker_message(
+                    sessions, str(p), channel_id
+                )
 
-            # Create binding (no cli_session_id yet — the hook will set it)
-            await self.session_mgr.bind(
-                platform="discord",
-                channel_id=channel_id,
-                window_id=win.window_id,
-                window_name=window_name,
-                work_dir=str(p),
-                coding_cli=cli,
-            )
-
-            # Start pane polling for the new binding
-            self.monitor.start_polling(channel_id, win.window_id)
-
-            # List directory contents for user orientation
-            try:
-                entries = sorted(p.iterdir())
-                dirs = [e.name + "/" for e in entries if e.is_dir() and not e.name.startswith(".")]
-                files = [e.name for e in entries if e.is_file() and not e.name.startswith(".")]
-                listing_items = dirs + files
-                if listing_items:
-                    listing = "\n".join(f"  {item}" for item in listing_items[:30])
-                    if len(listing_items) > 30:
-                        listing += f"\n  ... and {len(listing_items) - 30} more"
-                    dir_info = f"\n```\n{listing}\n```"
+                # Send picker via adapter, acknowledge the interaction
+                if self._adapter:
+                    await self._adapter.send_message(channel_id, msg)
+                    await self._reply(
+                        interaction,
+                        f"Found {len(sessions)} existing session(s) in `{p}`. "
+                        f"Pick one below or start fresh.",
+                    )
                 else:
-                    dir_info = "\n*(empty directory)*"
-            except Exception:
-                dir_info = ""
-
-            await self._reply(
-                interaction,
-                f"Bound **#{window_name}** → `{p}`\n"
-                f"tmux window: `{win.window_id}` | CLI: `{cli}`"
-                f"\nFresh session (hook will capture session ID)"
-                f"{dir_info}",
-            )
+                    await self._reply(
+                        interaction,
+                        f"Found {len(sessions)} session(s) but no adapter to "
+                        f"show picker. Starting fresh.",
+                    )
+                    await self._create_bind(
+                        channel_id, str(p), window_name, cli, interaction
+                    )
+                return
+            else:
+                # No sessions found — start fresh directly
+                await self._create_bind(
+                    channel_id, str(p), window_name, cli, interaction
+                )
         else:
             # No path — for now, tell user to provide one
             # TODO: implement interactive directory browser
@@ -203,6 +207,126 @@ class Engine:
                 "Usage: `/bind /path/to/project`\n"
                 "Interactive directory browser coming soon.",
             )
+
+    async def _create_bind(
+        self,
+        channel_id: str,
+        work_dir: str,
+        window_name: str,
+        cli: str,
+        interaction: Any,
+        session_id: str | None = None,
+    ) -> None:
+        """Create a tmux window, binding, and reply with confirmation.
+
+        If *session_id* is provided the CLI is launched in resume mode.
+        """
+        p = Path(work_dir)
+        cmd = self.launcher.build_launch_command(cli=cli, session_id=session_id)
+
+        win = await self.tmux.create_window(
+            name=window_name, cwd=str(p), command=cmd
+        )
+
+        # Create binding
+        await self.session_mgr.bind(
+            platform="discord",
+            channel_id=channel_id,
+            window_id=win.window_id,
+            window_name=window_name,
+            work_dir=str(p),
+            coding_cli=cli,
+            cli_session_id=session_id,
+        )
+
+        # Start pane polling for the new binding
+        self.monitor.start_polling(channel_id, win.window_id)
+
+        # List directory contents for user orientation
+        dir_info = self._format_dir_listing(p)
+
+        if session_id:
+            session_info = f"\nResuming session `{session_id[:16]}...`"
+        else:
+            session_info = "\nFresh session (hook will capture session ID)"
+
+        await self._reply(
+            interaction,
+            f"Bound **#{window_name}** \u2192 `{p}`\n"
+            f"tmux window: `{win.window_id}` | CLI: `{cli}`"
+            f"{session_info}"
+            f"{dir_info}",
+        )
+
+    # ------------------------------------------------------------------
+    # Session Picker helpers
+    # ------------------------------------------------------------------
+
+    def _build_session_picker_message(
+        self,
+        sessions: list[CLISession],
+        work_dir: str,
+        channel_id: str,
+    ) -> OutgoingMessage:
+        """Build an OutgoingMessage with buttons for session selection.
+
+        Shows at most 5 sessions (the most recent ones) plus a
+        "New Session" button.
+        """
+        display_sessions = sessions[:5]
+
+        lines = [f"**Resume Session?**\n"]
+        lines.append(f"Existing sessions in `{work_dir}`:\n")
+        for i, s in enumerate(display_sessions):
+            age = _format_age(s.mtime)
+            # Truncate summary for display
+            summary = s.summary[:50] + "..." if len(s.summary) > 50 else s.summary
+            lines.append(f"{i + 1}. **{summary}** \u2014 {s.message_count} msgs ({age})")
+
+        text = "\n".join(lines)
+
+        # Build buttons — one per session + New Session
+        # callback_data must be < 100 chars, so use index not full ID
+        session_buttons = []
+        for i, s in enumerate(display_sessions):
+            label = s.summary[:35] + "..." if len(s.summary) > 35 else s.summary
+            session_buttons.append(
+                Button(
+                    label=f"\u25b6 {label}",
+                    callback_data=f"bind_resume:{channel_id}:{i}",
+                )
+            )
+
+        new_button = Button(
+            label="\u2795 New Session",
+            callback_data=f"bind_new:{channel_id}",
+        )
+
+        # Layout: session buttons in rows of 2, then New Session row
+        button_rows: list[list[Button]] = []
+        for i in range(0, len(session_buttons), 2):
+            button_rows.append(session_buttons[i : i + 2])
+        button_rows.append([new_button])
+
+        return OutgoingMessage(text=text, buttons=button_rows)
+
+    @staticmethod
+    def _format_dir_listing(p: Path) -> str:
+        """Format a directory listing for user orientation."""
+        try:
+            entries = sorted(p.iterdir())
+            dirs = [e.name + "/" for e in entries if e.is_dir() and not e.name.startswith(".")]
+            files = [e.name for e in entries if e.is_file() and not e.name.startswith(".")]
+            listing_items = dirs + files
+            if listing_items:
+                listing = "\n".join(f"  {item}" for item in listing_items[:30])
+                if len(listing_items) > 30:
+                    listing += f"\n  ... and {len(listing_items) - 30} more"
+                return f"\n```\n{listing}\n```"
+            else:
+                return "\n*(empty directory)*"
+        except Exception:
+            return ""
 
     async def handle_unbind(self, channel_id: str, interaction: Any) -> None:
         """Handle /unbind — unbind channel."""
@@ -537,6 +661,15 @@ class Engine:
             )
             await self.tmux.send_keys(window_id, "C-c")
 
+        elif action == "bind_resume" and len(parts) >= 3:
+            pending_channel = parts[1]
+            session_index = int(parts[2])
+            await self._handle_bind_resume(pending_channel, session_index, channel_id)
+
+        elif action == "bind_new" and len(parts) >= 2:
+            pending_channel = parts[1]
+            await self._handle_bind_new(pending_channel, channel_id)
+
         else:
             logger.warning("Unknown button action: %s", callback_data)
 
@@ -660,6 +793,104 @@ class Engine:
     # Helpers
     # ------------------------------------------------------------------
 
+    async def _handle_bind_resume(
+        self, pending_channel: str, session_index: int, reply_channel: str
+    ) -> None:
+        """Handle a bind_resume button click — resume an existing session."""
+        pending = self._pending_binds.pop(pending_channel, None)
+        if pending is None:
+            logger.warning("No pending bind for channel %s", pending_channel)
+            if self._adapter:
+                await self._adapter.send_message(
+                    reply_channel,
+                    OutgoingMessage(text="Session picker expired. Run `/bind` again."),
+                )
+            return
+
+        sessions: list[CLISession] = pending["sessions"]
+        if session_index < 0 or session_index >= len(sessions):
+            logger.warning("Invalid session index %d", session_index)
+            if self._adapter:
+                await self._adapter.send_message(
+                    reply_channel,
+                    OutgoingMessage(text="Invalid session selection."),
+                )
+            return
+
+        session = sessions[session_index]
+        logger.info(
+            "Bind resume: channel=%s session=%s summary=%s",
+            pending_channel,
+            session.session_id,
+            session.summary[:40],
+        )
+
+        # Create the window and binding with resume
+        await self._create_bind(
+            channel_id=pending_channel,
+            work_dir=pending["path"],
+            window_name=pending["window_name"],
+            cli=pending["cli"],
+            interaction=None,
+            session_id=session.session_id,
+        )
+
+        # Send confirmation via adapter since we have no interaction object
+        if self._adapter:
+            age = _format_age(session.mtime)
+            await self._adapter.send_message(
+                reply_channel,
+                OutgoingMessage(
+                    text=(
+                        f"Bound **#{pending['window_name']}** \u2192 "
+                        f"`{pending['path']}`\n"
+                        f"Resumed: **{session.summary}** ({age})"
+                    )
+                ),
+            )
+
+    async def _handle_bind_new(
+        self, pending_channel: str, reply_channel: str
+    ) -> None:
+        """Handle a bind_new button click — start a fresh session."""
+        pending = self._pending_binds.pop(pending_channel, None)
+        if pending is None:
+            logger.warning("No pending bind for channel %s", pending_channel)
+            if self._adapter:
+                await self._adapter.send_message(
+                    reply_channel,
+                    OutgoingMessage(text="Session picker expired. Run `/bind` again."),
+                )
+            return
+
+        logger.info(
+            "Bind new: channel=%s path=%s",
+            pending_channel,
+            pending["path"],
+        )
+
+        # Create the window and binding without resume
+        await self._create_bind(
+            channel_id=pending_channel,
+            work_dir=pending["path"],
+            window_name=pending["window_name"],
+            cli=pending["cli"],
+            interaction=None,
+        )
+
+        # Send confirmation via adapter
+        if self._adapter:
+            await self._adapter.send_message(
+                reply_channel,
+                OutgoingMessage(
+                    text=(
+                        f"Bound **#{pending['window_name']}** \u2192 "
+                        f"`{pending['path']}`\n"
+                        f"Fresh session started."
+                    )
+                ),
+            )
+
     async def _reply(self, interaction: Any, text: str) -> None:
         """Reply to an interaction or send to channel."""
         try:
@@ -669,3 +900,29 @@ class Engine:
                 await interaction.channel.send(text)
         except Exception:
             logger.exception("Failed to reply")
+
+
+# ------------------------------------------------------------------
+# Module-level helpers
+# ------------------------------------------------------------------
+
+
+def _format_age(mtime: float) -> str:
+    """Format a timestamp as a human-readable age string.
+
+    Examples: "just now", "3m ago", "2h ago", "1d ago", "3w ago".
+    """
+    delta = time.time() - mtime
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        mins = int(delta / 60)
+        return f"{mins}m ago"
+    if delta < 86400:
+        hours = int(delta / 3600)
+        return f"{hours}h ago"
+    if delta < 604800:
+        days = int(delta / 86400)
+        return f"{days}d ago"
+    weeks = int(delta / 604800)
+    return f"{weeks}w ago"
