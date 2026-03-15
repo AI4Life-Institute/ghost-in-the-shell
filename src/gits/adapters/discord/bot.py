@@ -298,14 +298,13 @@ class DiscordAdapter(PlatformAdapter):
             cli=[
                 app_commands.Choice(name="Claude Code", value="claude"),
                 app_commands.Choice(name="Codex CLI (OpenAI)", value="codex"),
-                app_commands.Choice(name="Copilot CLI (GitHub)", value="copilot"),
                 app_commands.Choice(name="OpenCode", value="opencode"),
             ],
         )
         async def cmd_bind(
             interaction: discord.Interaction,
             path: str,
-            mode: str | None = None,
+            mode: str | None = "auto",
             cli: str | None = None,
         ):
             if not self._check_interaction_access(interaction):
