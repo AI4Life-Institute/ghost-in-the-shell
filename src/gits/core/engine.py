@@ -1039,6 +1039,8 @@ def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
         elif mode == "auto":
             cmd += " --full-auto"
         # acceptEdits not supported by codex — skip
+        # Enable hooks feature for session tracking
+        cmd += " --enable codex_hooks"
     elif cli == "copilot":
         if mode == "bypassPermissions":
             cmd += " --yolo"

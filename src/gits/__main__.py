@@ -479,7 +479,8 @@ def _install_codex_hook() -> int:
 
     if "hooks" not in hooks:
         hooks["hooks"] = {}
-    session_start = hooks["hooks"].get("session_start", [])
+    # Codex uses PascalCase "SessionStart" as the event key
+    session_start = hooks["hooks"].get("SessionStart", [])
 
     for entry in session_start:
         if isinstance(entry, dict):
@@ -491,12 +492,13 @@ def _install_codex_hook() -> int:
     session_start.append({
         "hooks": [
             {
+                "type": "command",
                 "command": hook_command,
-                "timeout_sec": 5,
+                "timeout": 5,
             }
         ]
     })
-    hooks["hooks"]["session_start"] = session_start
+    hooks["hooks"]["SessionStart"] = session_start
 
     try:
         hooks_file.write_text(
