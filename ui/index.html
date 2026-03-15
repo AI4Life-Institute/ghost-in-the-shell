@@ -4,476 +4,69 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ghost</title>
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{width:100%;height:100%;overflow:hidden}
-body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;font-size:13px;-webkit-font-smoothing:antialiased;background:#f0f2f5;color:#1a1a2e}
-
-/* ── Aurora (pastel, light) ── */
-#bg{position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:0}
-.blob{position:absolute;border-radius:50%;filter:blur(130px)}
-.b1{width:65%;height:60%;top:-25%;left:-20%;background:rgba(253,186,196,0.40)}
-.b2{width:55%;height:55%;top:20%;right:-20%;background:rgba(147,197,253,0.38)}
-.b3{width:50%;height:60%;bottom:-25%;left:15%;background:rgba(221,180,254,0.32)}
-.b4{width:28%;height:28%;top:38%;left:33%;background:rgba(110,231,183,0.28)}
-
-/* ── Shell ── */
-#app{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh}
-
-/* ── Titlebar ── */
-#tb{height:40px;flex-shrink:0;display:flex;align-items:center;padding:0 16px;gap:10px;background:rgba(255,255,255,0.52);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-bottom:1px solid rgba(0,0,0,0.07);-webkit-app-region:drag;position:relative}
-.tls{display:flex;gap:6px;-webkit-app-region:no-drag}
-.tl{width:12px;height:12px;border-radius:50%;cursor:pointer}
-.tlr{background:#ff5f57}.tly{background:#febc2e}.tlg{background:#28c840}
-#tbname{position:absolute;left:50%;transform:translateX(-50%);font-size:12.5px;font-weight:500;color:rgba(0,0,0,0.30);letter-spacing:.04em;pointer-events:none}
-
-/* ── Workspace dropdown (titlebar) ── */
-#ws-dropdown-wrap{position:relative;-webkit-app-region:no-drag}
-#ws-btn{display:flex;align-items:center;gap:6px;padding:4px 10px 4px 8px;border-radius:8px;background:rgba(255,255,255,.70);border:1px solid rgba(0,0,0,.09);cursor:pointer;transition:background .13s;user-select:none;box-shadow:0 1px 3px rgba(0,0,0,.06)}
-#ws-btn:hover{background:rgba(255,255,255,.92)}
-#ws-btn-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:#22c55e;box-shadow:0 0 5px rgba(34,197,94,.5)}
-#ws-btn-name{font-size:12.5px;font-weight:600;color:rgba(0,0,0,.78)}
-#ws-btn-caret{font-size:9px;color:rgba(0,0,0,.35);margin-left:1px}
-#ws-menu{display:none;position:absolute;top:calc(100% + 6px);left:0;min-width:200px;background:rgba(255,255,255,.92);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border:1px solid rgba(0,0,0,.10);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.14);padding:5px;z-index:200}
-#ws-menu.on{display:block}
-.wsm-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;cursor:pointer;transition:background .12s}
-.wsm-item:hover{background:rgba(0,0,0,.05)}
-.wsm-item.on{background:rgba(99,102,241,.08)}
-.wsm-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.wsm-dot.g{background:#22c55e;box-shadow:0 0 4px rgba(34,197,94,.5)}
-.wsm-dot.y{background:#f59e0b}
-.wsm-dot.d{background:rgba(0,0,0,.18)}
-.wsm-info{flex:1;min-width:0}
-.wsm-name{font-size:12.5px;font-weight:600;color:rgba(0,0,0,.78)}
-.wsm-path{font-size:10.5px;color:rgba(0,0,0,.32);font-family:"SF Mono","JetBrains Mono",monospace}
-.wsm-sep{height:1px;background:rgba(0,0,0,.07);margin:4px 0}
-.wsm-add{display:flex;align-items:center;gap:7px;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:rgba(0,0,0,.40);transition:background .12s}
-.wsm-add:hover{background:rgba(0,0,0,.05);color:rgba(0,0,0,.65)}
-
-/* ── Body ── */
-#body{display:flex;flex:1;overflow:hidden}
-
-/* ── Sidebar ── */
-#sb{width:168px;flex-shrink:0;display:flex;flex-direction:column;background:rgba(255,255,255,0.42);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-right:1px solid rgba(0,0,0,0.07)}
-
-/* ── Sidebar section label ── */
-.sblbl{font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:rgba(0,0,0,0.25);padding:10px 16px 4px}
-
-/* ── Workspace list ── */
-.ws-list{padding:0 6px 4px;display:flex;flex-direction:column;gap:1px}
-.wsi{display:flex;align-items:center;gap:7px;padding:7px 10px;border-radius:8px;cursor:pointer;transition:background .13s}
-.wsi:hover{background:rgba(0,0,0,.05)}
-.wsi.on{background:rgba(255,255,255,.82);border:1px solid rgba(0,0,0,.09);box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.wsi-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.wsi-dot.g{background:#22c55e;box-shadow:0 0 4px rgba(34,197,94,.5)}
-.wsi-dot.y{background:#f59e0b}
-.wsi-dot.d{background:rgba(0,0,0,.18)}
-.wsi-info{flex:1;min-width:0}
-.wsi-name{font-size:12.5px;font-weight:600;color:rgba(0,0,0,.78);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wsi.on .wsi-name{color:rgba(0,0,0,.90)}
-.wsi-path{font-size:10.5px;color:rgba(0,0,0,.32);font-family:"SF Mono","JetBrains Mono",monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ws-add{display:flex;align-items:center;gap:6px;padding:5px 10px;font-size:11.5px;color:rgba(0,0,0,.28);cursor:pointer;margin:0 6px;border-radius:7px;transition:color .13s,background .13s}
-.ws-add:hover{color:rgba(0,0,0,.60);background:rgba(0,0,0,.04)}
-
-/* ── Separator ── */
-.sbsep{height:1px;background:rgba(0,0,0,0.07);margin:6px 12px}
-
-/* ── Mode buttons ── */
-.modes{display:flex;flex-direction:column;gap:1px;padding:4px 6px}
-.mode{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:9px;cursor:pointer;color:rgba(0,0,0,0.42);font-size:13px;font-weight:450;transition:background .15s,color .15s;user-select:none}
-.mode:hover{background:rgba(0,0,0,0.05);color:rgba(0,0,0,0.80)}
-.mode.on{background:rgba(255,255,255,0.80);border:1px solid rgba(0,0,0,0.09);color:rgba(0,0,0,0.88);box-shadow:0 1px 5px rgba(0,0,0,0.08)}
-.mode-ico{font-size:15px;width:20px;text-align:center}
-
-/* ── Bottom ── */
-.sbfoot{padding:8px;border-top:1px solid rgba(0,0,0,.07);margin-top:auto}
-.sbfoot-row{display:flex;align-items:center;gap:9px;padding:6px 10px;border-radius:8px;cursor:pointer;transition:background .15s}
-.sbfoot-row:hover{background:rgba(0,0,0,.05)}
-.av{width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,#a78bfa,#60a5fa);display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;font-weight:700;flex-shrink:0}
-.sbfoot-txt{font-size:12px;font-weight:500;color:rgba(0,0,0,.70)}
-.sbfoot-sub{font-size:10.5px;color:rgba(0,0,0,.38)}
-
-/* legacy, keep for other views */
-.dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block}
-.dg{background:#22c55e;box-shadow:0 0 4px rgba(34,197,94,.6)}.dy{background:#f59e0b}.dd{background:rgba(0,0,0,.22)}
-.ctxlbl{font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:rgba(0,0,0,0.28);padding:6px 18px 4px}
-.ctxlist{overflow-y:auto;padding:0 8px 8px}
-.ctxlist::-webkit-scrollbar{width:3px}
-.ctxlist::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:2px}
-
-/* ── Main ── */
-#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.view{display:none;flex:1;flex-direction:column;overflow:hidden}
-.view.on{display:flex}
-
-/* ════════════════════════════════
-   CHAT VIEW  (coding mode)
-════════════════════════════════ */
-/* ════════════════════════════════
-   CODE VIEW
-════════════════════════════════ */
-#view-code{flex-direction:column}
-
-/* workspace tab bar */
-.ws-tabbar{height:38px;flex-shrink:0;display:flex;align-items:center;background:rgba(255,255,255,.52);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-bottom:1px solid rgba(0,0,0,.07);padding:0 8px;gap:2px}
-.ws-tab{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:8px;cursor:pointer;font-size:12.5px;font-weight:500;color:rgba(0,0,0,.42);transition:background .13s,color .13s;user-select:none;white-space:nowrap}
-.ws-tab:hover{background:rgba(0,0,0,.05);color:rgba(0,0,0,.70)}
-.ws-tab.on{background:rgba(255,255,255,.85);border:1px solid rgba(0,0,0,.09);color:rgba(0,0,0,.85);box-shadow:0 1px 4px rgba(0,0,0,.08)}
-.ws-tab-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.ws-tab-dot.g{background:#22c55e;box-shadow:0 0 4px rgba(34,197,94,.5)}
-.ws-tab-dot.y{background:#f59e0b}
-.ws-tab-dot.d{background:rgba(0,0,0,.18)}
-.ws-tab-add{padding:4px 8px;border-radius:7px;font-size:16px;color:rgba(0,0,0,.25);cursor:pointer;line-height:1;transition:color .13s}
-.ws-tab-add:hover{color:rgba(0,0,0,.60)}
-.ws-tabbar-right{margin-left:auto;display:flex;align-items:center;gap:8px}
-.devmode-btn{display:flex;align-items:center;gap:5px;padding:4px 11px;border-radius:7px;background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.08);cursor:pointer;font-size:11.5px;font-weight:500;color:rgba(0,0,0,.38);transition:all .15s;user-select:none}
-.devmode-btn:hover{background:rgba(0,0,0,.08);color:rgba(0,0,0,.60)}
-.devmode-btn.on{background:rgba(15,15,22,.88);border-color:rgba(99,102,241,.50);color:#a78bfa}
-.devmode-dot{width:6px;height:6px;border-radius:50%;background:rgba(0,0,0,.20);transition:background .15s}
-.devmode-btn.on .devmode-dot{background:#a78bfa;box-shadow:0 0 6px rgba(167,139,250,.7)}
-
-/* dashboard grid */
-.ws-grid{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:rgba(0,0,0,.08);overflow:auto}
-
-/* grid cell = one workspace panel */
-.ws-panel{display:flex;flex-direction:column;overflow:hidden;background:#f5f6f8;min-height:200px;position:relative;transition:background .2s}
-.ws-panel.active{box-shadow:inset 0 0 0 2px rgba(99,102,241,.35)}
-
-/* panel header */
-.wsp-head{height:34px;flex-shrink:0;display:flex;align-items:center;padding:0 12px;gap:7px;background:rgba(255,255,255,.60);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid rgba(0,0,0,.07);cursor:pointer;user-select:none;transition:background .15s}
-.ws-panel.active .wsp-head{background:rgba(255,255,255,.85);border-bottom-color:rgba(99,102,241,.20)}
-.wsp-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.wsp-dot.g{background:#22c55e;box-shadow:0 0 4px rgba(34,197,94,.5)}
-.wsp-dot.y{background:#f59e0b}
-.wsp-dot.d{background:rgba(0,0,0,.16)}
-.wsp-name{font-size:12px;font-weight:600;color:rgba(0,0,0,.72)}
-.wsp-ai{font-size:10.5px;color:rgba(0,0,0,.28)}
-.wsp-status{font-size:10.5px;color:rgba(0,0,0,.28);margin-left:auto}
-
-/* chat area inside panel */
-.wsp-msgs{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
-.wsp-msgs::-webkit-scrollbar{width:2px}
-.wsp-msgs::-webkit-scrollbar-thumb{background:rgba(0,0,0,.09);border-radius:2px}
-
-/* panel input */
-.wsp-input{display:flex;align-items:center;gap:6px;padding:7px 10px;background:rgba(255,255,255,.60);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid rgba(0,0,0,.07);flex-shrink:0}
-.wsp-ta{flex:1;background:rgba(255,255,255,.88);border:1px solid rgba(0,0,0,.09);border-radius:12px;padding:5px 11px;font-family:inherit;font-size:12.5px;color:rgba(0,0,0,.78);outline:none;resize:none;line-height:1.45;max-height:72px;min-height:18px;transition:border-color .15s}
-.wsp-ta:focus{border-color:rgba(99,102,241,.38);box-shadow:0 0 0 2px rgba(99,102,241,.08)}
-.wsp-ta::placeholder{color:rgba(0,0,0,.22)}
-.wsp-sbtn{width:26px;height:26px;border-radius:50%;background:#6366f1;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#fff;font-size:12px;flex-shrink:0;box-shadow:0 2px 6px rgba(99,102,241,.34);transition:transform .1s,background .15s}
-.wsp-sbtn:hover{background:#5254cc;transform:scale(1.07)}
-
-/* dev mode: panel becomes terminal */
-.ws-grid.devmode .ws-panel{background:#0d0d14}
-.ws-grid.devmode .wsp-head{background:#13131e;border-bottom-color:rgba(255,255,255,.07)}
-.ws-grid.devmode .wsp-name{color:rgba(255,255,255,.78)}
-.ws-grid.devmode .wsp-ai{color:rgba(255,255,255,.25)}
-.ws-grid.devmode .wsp-status{color:rgba(255,255,255,.25)}
-.ws-grid.devmode .wsp-chat{display:none}
-.ws-grid.devmode .wsp-term{display:flex}
-.ws-grid.devmode .wsp-input{display:none}
-.ws-grid.devmode .wsp-tinput{display:flex}
-
-/* term output (hidden in normal mode) */
-.wsp-term{flex:1;overflow-y:auto;padding:8px 12px;font-family:"SF Mono","JetBrains Mono",monospace;font-size:11.5px;line-height:1.62;display:none;flex-direction:column}
-.wsp-term::-webkit-scrollbar{width:2px}
-.wsp-term::-webkit-scrollbar-thumb{background:rgba(255,255,255,.10);border-radius:2px}
-.tl-cmd{color:#e2e8f0}.tl-out{color:rgba(255,255,255,.42)}.tl-err{color:#f87171}.tl-ok{color:#4ade80}.tl-dim{color:rgba(255,255,255,.20)}
-.wsp-tinput{display:none;align-items:center;height:30px;padding:0 10px;gap:6px;background:#13131e;border-top:1px solid rgba(255,255,255,.07);flex-shrink:0}
-.wsp-ps{font-family:"SF Mono","JetBrains Mono",monospace;font-size:11.5px;color:#a78bfa;flex-shrink:0}
-.wsp-tinp{flex:1;background:transparent;border:none;outline:none;font-family:"SF Mono","JetBrains Mono",monospace;font-size:11.5px;color:rgba(255,255,255,.82);caret-color:#a78bfa}
-.wsp-tinp::placeholder{color:rgba(255,255,255,.16)}
-
-/* empty add cell */
-.ws-panel-add{display:flex;align-items:center;justify-content:center;cursor:pointer;min-height:200px;color:rgba(0,0,0,.20);font-size:28px;background:rgba(0,0,0,.02);transition:background .15s,color .15s}
-.ws-panel-add:hover{background:rgba(99,102,241,.05);color:rgba(99,102,241,.45)}
-
-.top-btns{display:flex;gap:6px}
-.ibtn{width:27px;height:27px;border-radius:7px;background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.09);display:flex;align-items:center;justify-content:center;cursor:pointer;color:rgba(0,0,0,.40);font-size:13px;transition:background .15s}
-.ibtn:hover{background:rgba(0,0,0,.09);color:rgba(0,0,0,.75)}
-
-.msgs{flex:1;overflow-y:auto;padding:18px 20px;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth}
-.msgs::-webkit-scrollbar{width:3px}
-.msgs::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:2px}
-.msg{display:flex;gap:9px;max-width:70%}
-.msg.ai{align-self:flex-start}.msg.usr{align-self:flex-end;flex-direction:row-reverse}
-@keyframes fu{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
-.msg{animation:fu .18s ease}
-.mav{width:26px;height:26px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:12px}
-.msg.ai .mav{background:linear-gradient(135deg,#a78bfa,#60a5fa)}
-.msg.usr .mav{background:rgba(255,255,255,.80);border:1px solid rgba(0,0,0,.10);box-shadow:0 1px 3px rgba(0,0,0,.06)}
-.bbl{padding:9px 13px;border-radius:13px;line-height:1.58;font-size:13px;backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);box-shadow:0 2px 12px rgba(0,0,0,.08)}
-.msg.ai  .bbl{background:rgba(255,255,255,.75);border:1px solid rgba(0,0,0,.09);border-top-left-radius:4px;color:rgba(0,0,0,.78)}
-.msg.usr .bbl{background:rgba(99,102,241,.14);border:1px solid rgba(99,102,241,.22);border-top-right-radius:4px;color:rgba(0,0,0,.80)}
-.mt{font-size:10px;color:rgba(0,0,0,.25);margin-top:4px}
-.msg.usr .mt{text-align:right}
-.bbl pre{background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.09);border-radius:7px;padding:9px 11px;margin:7px 0;overflow-x:auto;position:relative}
-.bbl code{font-family:"SF Mono","JetBrains Mono",monospace;font-size:11.5px;color:#1e293b}
-.bbl p:not(:last-child){margin-bottom:4px}
-.ccbtn{position:absolute;top:5px;right:5px;padding:2px 7px;font-size:10px;border-radius:4px;background:rgba(255,255,255,.75);border:1px solid rgba(0,0,0,.10);color:rgba(0,0,0,.42);cursor:pointer;font-family:inherit;transition:background .15s}
-.ccbtn:hover{background:rgba(255,255,255,.96);color:rgba(0,0,0,.72)}
-.tdots{display:flex;gap:4px;padding:3px 1px}
-.tdots span{width:5px;height:5px;border-radius:50%;background:rgba(0,0,0,.28);animation:bn 1.2s ease-in-out infinite}
-.tdots span:nth-child(2){animation-delay:.2s}.tdots span:nth-child(3){animation-delay:.4s}
-@keyframes bn{0%,80%,100%{opacity:.22;transform:translateY(0)}40%{opacity:.9;transform:translateY(-3px)}}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
-
-.cinput{padding:10px 18px 13px;background:rgba(255,255,255,.50);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-top:1px solid rgba(0,0,0,.07);flex-shrink:0}
-.irow{display:flex;gap:7px;align-items:flex-end;background:rgba(255,255,255,.88);border:1px solid rgba(0,0,0,.10);border-radius:18px;padding:7px 7px 7px 14px;box-shadow:0 2px 8px rgba(0,0,0,.06);transition:border-color .2s,box-shadow .2s}
-.irow:focus-within{border-color:rgba(99,102,241,.42);box-shadow:0 0 0 3px rgba(99,102,241,.09),0 2px 8px rgba(0,0,0,.06)}
-.irow textarea{flex:1;background:transparent;border:none;outline:none;resize:none;font-family:inherit;font-size:13.5px;color:rgba(0,0,0,.80);line-height:1.5;max-height:100px;min-height:20px}
-.irow textarea::placeholder{color:rgba(0,0,0,.26)}
-.sbtn{width:30px;height:30px;border-radius:50%;background:#6366f1;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#fff;font-size:14px;flex-shrink:0;box-shadow:0 2px 8px rgba(99,102,241,.36);transition:transform .1s,background .15s}
-.sbtn:hover{background:#5254cc;transform:scale(1.07)}
-.sbtn:active{transform:scale(.93)}
-.ihint{font-size:10px;color:rgba(0,0,0,.20);text-align:center;margin-top:5px}
-
-/* ════════════════════════════════
-   TASKS VIEW  (browser agent mode)
-════════════════════════════════ */
-#view-task{flex-direction:row}
-
-/* task list panel */
-.tklist{width:280px;flex-shrink:0;display:flex;flex-direction:column;background:rgba(255,255,255,.38);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-right:1px solid rgba(0,0,0,.07)}
-.tklist-head{padding:14px 16px 10px;border-bottom:1px solid rgba(0,0,0,.07);display:flex;align-items:center;justify-content:space-between}
-.tklist-title{font-size:13px;font-weight:600;color:rgba(0,0,0,.80)}
-.new-task-btn{padding:4px 12px;border-radius:7px;background:#6366f1;border:none;font-family:inherit;font-size:12px;font-weight:600;color:#fff;cursor:pointer;box-shadow:0 1px 6px rgba(99,102,241,.32);transition:background .15s}
-.new-task-btn:hover{background:#5254cc}
-
-.tkscroll{flex:1;overflow-y:auto;padding:8px}
-.tkscroll::-webkit-scrollbar{width:3px}
-.tkscroll::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:2px}
-
-.tki{padding:10px 12px;border-radius:10px;cursor:pointer;margin-bottom:4px;background:rgba(255,255,255,.55);border:1px solid rgba(0,0,0,.08);transition:background .15s,border-color .15s;box-shadow:0 1px 4px rgba(0,0,0,.05)}
-.tki:hover{background:rgba(255,255,255,.80);border-color:rgba(0,0,0,.12)}
-.tki.on{background:rgba(255,255,255,.90);border-color:rgba(99,102,241,.30);box-shadow:0 2px 10px rgba(99,102,241,.12)}
-.tki-goal{font-size:12.5px;font-weight:500;color:rgba(0,0,0,.80);line-height:1.45;margin-bottom:5px}
-.tki-meta{display:flex;align-items:center;gap:7px}
-.tki-profile{font-size:10.5px;color:rgba(0,0,0,.38)}
-
-.bdg{padding:2px 8px;border-radius:99px;font-size:10.5px;font-weight:500}
-.bdg-run{background:rgba(99,102,241,.12);color:#4f46e5;border:1px solid rgba(99,102,241,.22)}
-.bdg-done{background:rgba(34,197,94,.10);color:#16a34a;border:1px solid rgba(34,197,94,.20)}
-.bdg-fail{background:rgba(239,68,68,.10);color:#dc2626;border:1px solid rgba(239,68,68,.18)}
-.bdg-wait{background:rgba(245,158,11,.10);color:#b45309;border:1px solid rgba(245,158,11,.20)}
-.bdg-que{background:rgba(0,0,0,.06);color:rgba(0,0,0,.45);border:1px solid rgba(0,0,0,.10)}
-
-/* task detail panel */
-.tkdetail{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.tkd-head{padding:14px 20px;background:rgba(255,255,255,.50);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-bottom:1px solid rgba(0,0,0,.07);flex-shrink:0}
-.tkd-goal{font-size:14px;font-weight:600;color:rgba(0,0,0,.85);margin-bottom:4px}
-.tkd-meta{display:flex;align-items:center;gap:10px}
-.tkd-profile-chip{display:flex;align-items:center;gap:5px;font-size:11.5px;color:rgba(0,0,0,.45);background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.08);border-radius:99px;padding:2px 9px}
-
-.steps-scroll{flex:1;overflow-y:auto;padding:14px 20px;display:flex;flex-direction:column;gap:8px}
-.steps-scroll::-webkit-scrollbar{width:3px}
-.steps-scroll::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:2px}
-
-.step{display:flex;gap:10px;align-items:flex-start;animation:fu .18s ease}
-.step-ico{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;background:rgba(255,255,255,.75);border:1px solid rgba(0,0,0,.09);box-shadow:0 1px 3px rgba(0,0,0,.06)}
-.step-body{flex:1;min-width:0}
-.step-action{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:rgba(0,0,0,.38);margin-bottom:2px}
-.step-desc{font-size:12.5px;color:rgba(0,0,0,.72);line-height:1.5}
-.step-out{font-size:11.5px;color:rgba(0,0,0,.40);margin-top:3px;font-family:"SF Mono","JetBrains Mono",monospace;background:rgba(0,0,0,.04);border-radius:5px;padding:3px 7px}
-.step-ts{font-size:10px;color:rgba(0,0,0,.25);margin-top:3px}
-
-/* artifacts */
-.artifacts-bar{padding:10px 20px;background:rgba(255,255,255,.42);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-top:1px solid rgba(0,0,0,.07);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.artifact{display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:8px;background:rgba(255,255,255,.75);border:1px solid rgba(0,0,0,.09);cursor:pointer;transition:background .15s;font-size:12px;color:rgba(0,0,0,.72)}
-.artifact:hover{background:rgba(255,255,255,.96)}
-.artifact-ico{font-size:15px}
-
-/* human in the loop */
-.hitl{padding:10px 20px;background:rgba(251,191,36,.08);border-top:1px solid rgba(245,158,11,.20);display:flex;gap:9px;align-items:center;flex-shrink:0}
-.hitl-msg{font-size:12.5px;color:rgba(0,0,0,.68);flex:1}
-.hitl input{flex:1;background:rgba(255,255,255,.85);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 11px;font-family:inherit;font-size:13px;color:rgba(0,0,0,.80);outline:none;transition:border-color .15s}
-.hitl input:focus{border-color:rgba(99,102,241,.42);box-shadow:0 0 0 2px rgba(99,102,241,.10)}
-.hitl-send{padding:6px 14px;border-radius:8px;background:#6366f1;border:none;font-family:inherit;font-size:12.5px;font-weight:600;color:#fff;cursor:pointer;transition:background .15s}
-.hitl-send:hover{background:#5254cc}
-
-/* empty state */
-.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:rgba(0,0,0,.30)}
-.empty-ico{font-size:36px}
-.empty-txt{font-size:13px}
-
-/* ════════════════════════════════
-   DATABASE VIEW
-════════════════════════════════ */
-#view-data{flex-direction:row}
-
-.db-tables{width:160px;flex-shrink:0;display:flex;flex-direction:column;background:rgba(255,255,255,.38);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-right:1px solid rgba(0,0,0,.07);padding:10px 8px}
-.db-table-lbl{font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:rgba(0,0,0,.28);padding:4px 8px 8px}
-.db-tbl-item{display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:8px;cursor:pointer;font-size:12.5px;color:rgba(0,0,0,.55);transition:background .15s;font-family:"SF Mono","JetBrains Mono",monospace;font-size:12px}
-.db-tbl-item:hover{background:rgba(0,0,0,.05);color:rgba(0,0,0,.80)}
-.db-tbl-item.on{background:rgba(255,255,255,.80);border:1px solid rgba(0,0,0,.09);color:rgba(0,0,0,.85);box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.db-tbl-count{margin-left:auto;font-size:10.5px;color:rgba(0,0,0,.28);font-family:inherit}
-
-.db-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
-.db-topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 18px;background:rgba(255,255,255,.50);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-bottom:1px solid rgba(0,0,0,.07);flex-shrink:0}
-.db-tname{font-size:13.5px;font-weight:600;color:rgba(0,0,0,.82);font-family:"SF Mono","JetBrains Mono",monospace}
-.db-toolbar{display:flex;align-items:center;gap:8px}
-.db-search{background:rgba(255,255,255,.80);border:1px solid rgba(0,0,0,.10);border-radius:8px;padding:5px 10px;font-family:inherit;font-size:12.5px;color:rgba(0,0,0,.75);outline:none;width:180px;transition:border-color .15s}
-.db-search:focus{border-color:rgba(99,102,241,.42);box-shadow:0 0 0 2px rgba(99,102,241,.09)}
-.db-search::placeholder{color:rgba(0,0,0,.28)}
-.db-count{font-size:11.5px;color:rgba(0,0,0,.35)}
-
-.db-scroll{flex:1;overflow:auto}
-.db-scroll::-webkit-scrollbar{width:3px;height:3px}
-.db-scroll::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:2px}
-
-table.dbt{width:100%;border-collapse:collapse;font-size:12.5px}
-table.dbt thead th{position:sticky;top:0;background:rgba(248,250,252,.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:8px 14px;text-align:left;font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:rgba(0,0,0,.38);border-bottom:1px solid rgba(0,0,0,.08);white-space:nowrap;cursor:pointer;user-select:none}
-table.dbt thead th:hover{color:rgba(0,0,0,.65)}
-table.dbt thead th .sort-ico{opacity:.35;margin-left:3px}
-table.dbt tbody tr{border-bottom:1px solid rgba(0,0,0,.05);transition:background .10s;cursor:default}
-table.dbt tbody tr:hover{background:rgba(255,255,255,.70)}
-table.dbt tbody td{padding:8px 14px;color:rgba(0,0,0,.72);white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
-table.dbt tbody td.mono{font-family:"SF Mono","JetBrains Mono",monospace;font-size:11.5px;color:rgba(0,0,0,.55)}
-table.dbt tbody td.status{font-weight:500}
-.db-null{color:rgba(0,0,0,.22);font-style:italic}
-.row-click td{cursor:pointer}
-.row-click:hover td{background:rgba(99,102,241,.05)}
-
-/* row detail drawer */
-#db-drawer{display:none;position:fixed;right:0;top:40px;bottom:0;width:360px;background:rgba(255,255,255,.90);backdrop-filter:blur(60px) saturate(200%);-webkit-backdrop-filter:blur(60px) saturate(200%);border-left:1px solid rgba(0,0,0,.10);box-shadow:-8px 0 40px rgba(0,0,0,.10);z-index:50;overflow-y:auto;padding:18px 20px}
-#db-drawer.on{display:block}
-#db-drawer::-webkit-scrollbar{width:3px}
-#db-drawer::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:2px}
-.drawer-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
-.drawer-title{font-size:13px;font-weight:600;color:rgba(0,0,0,.80)}
-.drawer-close{width:24px;height:24px;border-radius:6px;background:rgba(0,0,0,.07);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;color:rgba(0,0,0,.45);transition:background .15s}
-.drawer-close:hover{background:rgba(0,0,0,.12)}
-.drawer-field{margin-bottom:12px}
-.drawer-key{font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:rgba(0,0,0,.32);margin-bottom:3px}
-.drawer-val{font-size:12.5px;color:rgba(0,0,0,.78);word-break:break-all;line-height:1.55}
-.drawer-val.mono{font-family:"SF Mono","JetBrains Mono",monospace;font-size:11.5px;background:rgba(0,0,0,.04);border-radius:5px;padding:6px 8px;color:rgba(0,0,0,.62)}
-.drawer-sep{height:1px;background:rgba(0,0,0,.07);margin:14px 0}
-
-/* ════════════════════════════════
-   SKILL VIEW
-════════════════════════════════ */
-#view-skill{flex-direction:row}
-
-.sk-list{width:240px;flex-shrink:0;display:flex;flex-direction:column;background:rgba(255,255,255,.38);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-right:1px solid rgba(0,0,0,.07)}
-.sk-list-head{padding:14px 16px 10px;border-bottom:1px solid rgba(0,0,0,.07);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
-.sk-list-title{font-size:13px;font-weight:600;color:rgba(0,0,0,.80)}
-.sk-scroll{flex:1;overflow-y:auto;padding:8px}
-.sk-scroll::-webkit-scrollbar{width:3px}
-.sk-scroll::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:2px}
-
-.ski{padding:11px 12px;border-radius:10px;cursor:pointer;margin-bottom:4px;background:rgba(255,255,255,.55);border:1px solid rgba(0,0,0,.08);transition:background .15s,border-color .15s;box-shadow:0 1px 4px rgba(0,0,0,.05)}
-.ski:hover{background:rgba(255,255,255,.80);border-color:rgba(0,0,0,.12)}
-.ski.on{background:rgba(255,255,255,.90);border-color:rgba(99,102,241,.30);box-shadow:0 2px 10px rgba(99,102,241,.12)}
-.ski-name{font-size:13px;font-weight:600;color:rgba(0,0,0,.82);margin-bottom:3px}
-.ski-desc{font-size:11.5px;color:rgba(0,0,0,.42);line-height:1.45}
-.ski-tag{display:inline-block;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:500;background:rgba(99,102,241,.10);color:#4f46e5;border:1px solid rgba(99,102,241,.18);margin-top:5px;margin-right:3px}
-
-.sk-detail{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.sk-detail-head{padding:18px 22px 14px;background:rgba(255,255,255,.50);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border-bottom:1px solid rgba(0,0,0,.07);flex-shrink:0}
-.sk-name{font-size:15px;font-weight:700;color:rgba(0,0,0,.88);margin-bottom:4px}
-.sk-dsc{font-size:12.5px;color:rgba(0,0,0,.48);line-height:1.5}
-.sk-body{flex:1;overflow-y:auto;padding:18px 22px;display:flex;flex-direction:column;gap:16px}
-.sk-body::-webkit-scrollbar{width:3px}
-.sk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:2px}
-
-.sk-section-lbl{font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:rgba(0,0,0,.32);margin-bottom:8px}
-.sk-params{display:flex;flex-direction:column;gap:8px}
-.sk-param{display:flex;flex-direction:column;gap:4px}
-.sk-param-lbl{font-size:11.5px;font-weight:500;color:rgba(0,0,0,.50)}
-.sk-param-inp{background:rgba(255,255,255,.88);border:1px solid rgba(0,0,0,.11);border-radius:9px;padding:7px 11px;font-family:inherit;font-size:13px;color:rgba(0,0,0,.80);outline:none;transition:border-color .15s,box-shadow .15s}
-.sk-param-inp:focus{border-color:rgba(99,102,241,.42);box-shadow:0 0 0 2px rgba(99,102,241,.09)}
-.sk-run-btn{padding:9px 22px;border-radius:10px;background:#6366f1;border:none;font-family:inherit;font-size:13.5px;font-weight:700;color:#fff;cursor:pointer;box-shadow:0 2px 12px rgba(99,102,241,.36);transition:background .15s,transform .10s;align-self:flex-start}
-.sk-run-btn:hover{background:#5254cc}.sk-run-btn:active{transform:scale(.97)}
-
-.sk-runs-sep{height:1px;background:rgba(0,0,0,.07)}
-.sk-run-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.55);border:1px solid rgba(0,0,0,.07);box-shadow:0 1px 4px rgba(0,0,0,.04)}
-.sk-run-status{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.sk-run-done{background:#22c55e;box-shadow:0 0 4px rgba(34,197,94,.5)}
-.sk-run-fail{background:#ef4444;box-shadow:0 0 4px rgba(239,68,68,.5)}
-.sk-run-run{background:#6366f1;animation:pulse 1.5s ease-in-out infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
-.sk-run-info{flex:1;min-width:0}
-.sk-run-ts{font-size:11px;color:rgba(0,0,0,.38)}
-.sk-run-params-txt{font-size:11.5px;color:rgba(0,0,0,.55);font-family:"SF Mono","JetBrains Mono",monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
-.sk-debug{margin-top:4px;padding:10px 13px;border-radius:9px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.18)}
-.sk-debug-hd{font-size:11px;font-weight:600;color:#dc2626;margin-bottom:5px;display:flex;align-items:center;gap:5px}
-.sk-debug-msg{font-size:11.5px;color:rgba(0,0,0,.65);line-height:1.55;margin-bottom:8px;font-family:"SF Mono","JetBrains Mono",monospace;background:rgba(0,0,0,.04);border-radius:6px;padding:6px 9px}
-.sk-debug-ai{font-size:12.5px;color:rgba(0,0,0,.72);line-height:1.55;padding:8px 10px;background:rgba(255,255,255,.70);border-radius:8px;border:1px solid rgba(0,0,0,.07)}
-.sk-debug-fix{padding:5px 13px;border-radius:7px;background:#6366f1;border:none;font-family:inherit;font-size:12px;font-weight:600;color:#fff;cursor:pointer;margin-top:8px;transition:background .15s}
-.sk-debug-fix:hover{background:#5254cc}
-
-/* ── New task modal ── */
-#modal{display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center}
-#modal.on{display:flex}
-.modal-bg{position:absolute;inset:0;background:rgba(0,0,0,.18);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
-.modal-card{position:relative;width:480px;background:rgba(255,255,255,.88);backdrop-filter:blur(60px) saturate(200%);-webkit-backdrop-filter:blur(60px) saturate(200%);border:1px solid rgba(0,0,0,.10);border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.15)}
-.modal-title{font-size:16px;font-weight:700;color:rgba(0,0,0,.85);margin-bottom:16px}
-.modal-label{font-size:11.5px;font-weight:600;color:rgba(0,0,0,.45);margin-bottom:5px;letter-spacing:.02em}
-.modal-ta{width:100%;background:rgba(255,255,255,.85);border:1px solid rgba(0,0,0,.12);border-radius:10px;padding:10px 13px;font-family:inherit;font-size:13.5px;color:rgba(0,0,0,.80);resize:none;outline:none;height:80px;transition:border-color .15s}
-.modal-ta:focus{border-color:rgba(99,102,241,.45);box-shadow:0 0 0 2px rgba(99,102,241,.10)}
-.modal-sel{width:100%;background:rgba(255,255,255,.85);border:1px solid rgba(0,0,0,.12);border-radius:10px;padding:8px 11px;font-family:inherit;font-size:13px;color:rgba(0,0,0,.75);outline:none;margin-top:12px;cursor:pointer;transition:border-color .15s}
-.modal-sel:focus{border-color:rgba(99,102,241,.45)}
-.modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
-.mbtn{padding:8px 18px;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;border:none;font-family:inherit;transition:background .15s}
-.mbtn.sec{background:rgba(0,0,0,.07);color:rgba(0,0,0,.55)}.mbtn.sec:hover{background:rgba(0,0,0,.12)}
-.mbtn.pri{background:#6366f1;color:#fff;box-shadow:0 2px 10px rgba(99,102,241,.35)}.mbtn.pri:hover{background:#5254cc}
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div id="bg"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="blob b4"></div></div>
+
+<!-- Aurora background -->
+<div id="bg">
+  <div class="blob b1"></div>
+  <div class="blob b2"></div>
+  <div class="blob b3"></div>
+  <div class="blob b4"></div>
+</div>
 
 <div id="app">
-  <!-- Titlebar -->
+
+  <!-- ── Titlebar ── -->
   <div id="tb">
-    <div class="tls"><div class="tl tlr"></div><div class="tl tly"></div><div class="tl tlg"></div></div>
-    <!-- Workspace dropdown -->
-    <div id="ws-dropdown-wrap">
-      <div id="ws-btn" onclick="toggleWsMenu(event)">
-        <div id="ws-btn-dot"></div>
-        <div id="ws-btn-name">myproject</div>
-        <div id="ws-btn-caret">▾</div>
-      </div>
-      <div id="ws-menu">
-        <div class="wsm-item on" onclick="selectWorkspace(0,event)">
-          <div class="wsm-dot g"></div>
-          <div class="wsm-info"><div class="wsm-name">myproject</div><div class="wsm-path">~/myproject</div></div>
-        </div>
-        <div class="wsm-item" onclick="selectWorkspace(1,event)">
-          <div class="wsm-dot y"></div>
-          <div class="wsm-info"><div class="wsm-name">infra</div><div class="wsm-path">~/infra</div></div>
-        </div>
-        <div class="wsm-item" onclick="selectWorkspace(2,event)">
-          <div class="wsm-dot d"></div>
-          <div class="wsm-info"><div class="wsm-name">docs</div><div class="wsm-path">~/docs</div></div>
-        </div>
-        <div class="wsm-sep"></div>
-        <div class="wsm-add" onclick="addWorkspace(event)">＋ Add workspace</div>
-      </div>
+    <div class="tls">
+      <div class="tl tlr"></div>
+      <div class="tl tly"></div>
+      <div class="tl tlg"></div>
     </div>
+
+    <!-- Folder path button -->
+    <button id="tb-folder-btn" onclick="folderPickerClick()">
+      📁 <span id="tb-folder-path">~/myproject</span>
+    </button>
+
     <div id="tbname">Ghost</div>
-  </div>
+
+    <!-- Active agent counter -->
+    <button id="tb-agents-btn" onclick="toggleAgentsPopover(event)">
+      ⏳ 2 active
+    </button>
+
+    <!-- Agent popover -->
+    <div id="agents-popover">
+      <div id="agents-popover-list"><!-- filled by JS --></div>
+    </div>
+  </div><!-- /#tb -->
 
   <div id="body">
-    <!-- Sidebar -->
+
+    <!-- ── Sidebar ── -->
     <div id="sb">
-      <!-- Mode buttons -->
       <div class="modes">
-        <div class="mode on" onclick="setMode('code',this)">
-          <span class="mode-ico">💻</span> Code
+        <div class="mode on" data-mode="build" onclick="setMode('build')">
+          <span class="mode-ico">🤖</span> Build
         </div>
-        <div class="mode" onclick="setMode('skill',this)">
-          <span class="mode-ico">⚡</span> Skill
+        <div class="mode" data-mode="agents" onclick="setMode('agents')">
+          <span class="mode-ico">⚡</span> Agents
+          <span class="mode-badge" id="agents-badge">[3]</span>
+          <span class="mode-badge warn">⚠</span>
         </div>
-        <div class="mode" onclick="setMode('task',this)">
-          <span class="mode-ico">🌐</span> Task
+        <div class="mode" data-mode="skill" onclick="setMode('skill')">
+          <span class="mode-ico">🛠</span> Skills
         </div>
-        <div class="mode" onclick="setMode('data',this)">
-          <span class="mode-ico">🗄️</span> Data
+        <div class="mode" data-mode="data" onclick="setMode('data')">
+          <span class="mode-ico">🗄</span> Data
         </div>
       </div>
 
       <div class="sbfoot">
-        <div class="sbfoot-row" onclick="sv('settings')">
+        <div class="sbfoot-row">
           <div class="av">W</div>
           <div>
             <div class="sbfoot-txt">Wei Liu</div>
@@ -481,24 +74,26 @@ table.dbt tbody td.status{font-weight:500}
           </div>
         </div>
       </div>
-    </div>
+    </div><!-- /#sb -->
 
-    <!-- Main -->
+    <!-- ── Main ── -->
     <div id="main">
 
-      <!-- ── CODE MODE ── -->
-      <div id="view-code" class="view on">
+      <!-- ══════════════════════════════════════
+           BUILD VIEW
+      ══════════════════════════════════════ -->
+      <div id="view-build" class="view on">
 
-        <!-- window tab bar (Windows within the active workspace) -->
+        <!-- Window tab bar -->
         <div class="ws-tabbar">
-          <div class="ws-tab on" id="wstab-0" onclick="selectWsTab(0)">
+          <div class="ws-tab on" id="wstab-0" onclick="selectBuildTab(0)">
             <span class="ws-tab-dot g"></span>main
           </div>
-          <div class="ws-tab" id="wstab-1" onclick="selectWsTab(1)">
-            <span class="ws-tab-dot y"></span>debug
+          <div class="ws-tab" id="wstab-1" onclick="selectBuildTab(1)">
+            <span class="ws-tab-dot y"></span>auth
           </div>
-          <div class="ws-tab" id="wstab-2" onclick="selectWsTab(2)">
-            <span class="ws-tab-dot d"></span>ci
+          <div class="ws-tab" id="wstab-2" onclick="selectBuildTab(2)">
+            <span class="ws-tab-dot d"></span>tests
           </div>
           <div class="ws-tab-add" onclick="addWindow()">＋</div>
           <div class="ws-tabbar-right">
@@ -508,53 +103,83 @@ table.dbt tbody td.status{font-weight:500}
           </div>
         </div>
 
-        <!-- dashboard grid: all workspaces visible at once -->
+        <!-- Build grid -->
         <div class="ws-grid" id="ws-grid">
 
-          <!-- panel 0: myproject -->
+          <!-- Pane 0: main — active -->
           <div class="ws-panel active" id="wsp-0">
-            <div class="wsp-head" onclick="selectWsTab(0)">
-              <span class="wsp-dot g"></span>
-              <span class="wsp-name">myproject</span>
+            <div class="wsp-head" onclick="selectBuildTab(0)">
+              <div class="pane-status">
+                <span class="pane-dot active"></span>
+                <span class="pane-status-active">&#9654; Active</span>
+              </div>
+              <span class="wsp-name" style="margin-left:6px">main</span>
               <span class="wsp-ai">claude</span>
-              <span class="wsp-status">active</span>
             </div>
-            <div class="wsp-chat wsp-msgs" id="wspc-0">
-              <div class="msg ai"><div class="mav">🤖</div><div>
-                <div class="bbl"><p>Ready at <code>~/myproject</code>. What would you like to build?</p></div>
-                <div class="mt">2:41 PM</div>
-              </div></div>
-              <div class="msg usr"><div class="mav">W</div><div>
-                <div class="bbl">Add async streaming to the engine output</div>
-                <div class="mt">2:42 PM</div>
-              </div></div>
-              <div class="msg ai"><div class="mav">🤖</div><div>
-                <div class="bbl">
-                  <p>Here's the async generator pattern:</p>
-                  <pre><code>async def *stream_output(self, session_id):
+            <div class="wsp-chat wsp-msgs" id="build-msgs">
+              <div class="msg ai">
+                <div class="mav">🤖</div>
+                <div>
+                  <div class="bbl"><p>Ready at <code>~/myproject</code>. What would you like to build?</p></div>
+                  <div class="mt">2:41 PM</div>
+                </div>
+              </div>
+              <div class="msg usr">
+                <div class="mav">W</div>
+                <div>
+                  <div class="bbl">Add async streaming to the engine output</div>
+                  <div class="mt">2:42 PM</div>
+                </div>
+              </div>
+              <div class="msg ai">
+                <div class="mav">🤖</div>
+                <div>
+                  <div class="bbl">
+                    <p>Here's the async generator pattern:</p>
+                    <pre><code>async def stream_output(self, session_id):
     async for chunk in self._tmux.read():
         yield OutputChunk(text=chunk)</code><button class="ccbtn" onclick="cpc(this)">Copy</button></pre>
-                  <p>Wire into Discord adapter too?</p>
+                    <p>Wire into Discord adapter too?</p>
+                  </div>
+                  <div class="mt">2:42 PM</div>
                 </div>
-                <div class="mt">2:42 PM</div>
-              </div></div>
-              <div class="msg ai" id="typing" style="display:none"><div class="mav">🤖</div><div>
-                <div class="bbl"><div class="tdots"><span></span><span></span><span></span></div></div>
-              </div></div>
+              </div>
+              <div class="msg ai" id="typing" style="display:none">
+                <div class="mav">🤖</div>
+                <div>
+                  <div class="bbl"><div class="tdots"><span></span><span></span><span></span></div></div>
+                </div>
+              </div>
             </div>
             <div class="wsp-term" id="wspt-0">
-              <div class="tl-dim">gits-myproject · ~/myproject</div>
+              <div class="tl-dim">ghost · ~/myproject</div>
               <div class="tl-cmd">$ uv run pytest tests/test_engine.py -v</div>
               <div class="tl-out">test_stream_output ........ <span class="tl-ok">PASSED</span></div>
               <div class="tl-out">test_session_create ....... <span class="tl-ok">PASSED</span></div>
               <div class="tl-out">test_multi_workspace ...... <span class="tl-err">FAILED</span></div>
               <div class="tl-err">AssertionError: expected 2 sessions, got 1</div>
               <div class="tl-out">4 passed, 1 failed in 1.42s</div>
-              <div class="tl-dim">▋</div>
+              <div class="tl-dim">&#9607;</div>
             </div>
-            <div class="wsp-input wsp-chat">
-              <textarea id="inp" class="wsp-ta" placeholder="Ask…" rows="1" onkeydown="hk(event)" oninput="ar(this)"></textarea>
-              <button class="wsp-sbtn" onclick="send()">↑</button>
+            <div class="wsp-input wsp-chat" style="position:relative">
+              <textarea id="build-inp" class="wsp-ta" placeholder="Build something in ~/myproject…"
+                rows="1" onkeydown="hk(event)" oninput="ar(this)"></textarea>
+              <button class="wsp-sbtn" onclick="send()">&#8593;</button>
+              <!-- Slash command menu for pane 0 -->
+              <div class="slash-menu" id="slash-menu-0">
+                <div class="slash-item" onclick="insertSlashCmd('/agent',0)">
+                  <span class="slash-cmd">/agent</span><span class="slash-desc">Deploy a new agent</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/skill',0)">
+                  <span class="slash-cmd">/skill</span><span class="slash-desc">Run a saved skill</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/data',0)">
+                  <span class="slash-cmd">/data</span><span class="slash-desc">Query your data</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/status',0)">
+                  <span class="slash-cmd">/status</span><span class="slash-desc">Show fleet status</span>
+                </div>
+              </div>
             </div>
             <div class="wsp-tinput">
               <span class="wsp-ps">myproject $</span>
@@ -562,79 +187,147 @@ table.dbt tbody td.status{font-weight:500}
             </div>
           </div>
 
-          <!-- panel 1: infra -->
+          <!-- Pane 1: auth — idle -->
           <div class="ws-panel" id="wsp-1">
-            <div class="wsp-head" onclick="selectWsTab(1)">
-              <span class="wsp-dot y"></span>
-              <span class="wsp-name">infra</span>
-              <span class="wsp-ai">codex</span>
-              <span class="wsp-status">idle 3m</span>
+            <div class="wsp-head" onclick="selectBuildTab(1)">
+              <div class="pane-status">
+                <span class="pane-dot idle"></span>
+                <span class="pane-status-idle">&#9208; Idle</span>
+              </div>
+              <span class="wsp-name" style="margin-left:6px">auth</span>
+              <span class="wsp-ai">claude</span>
             </div>
             <div class="wsp-chat wsp-msgs" id="wspc-1">
-              <div class="msg ai"><div class="mav">🤖</div><div>
-                <div class="bbl"><p>Watching <code>~/infra</code>. Applied security group changes — 2 added, 1 changed.</p></div>
-                <div class="mt">2:11 PM</div>
-              </div></div>
-              <div class="msg usr"><div class="mav">W</div><div>
-                <div class="bbl">plan and apply the security group changes</div>
-                <div class="mt">2:11 PM</div>
-              </div></div>
+              <div class="msg ai">
+                <div class="mav">🤖</div>
+                <div>
+                  <div class="bbl"><p>Auth module loaded. Applied JWT session changes — 2 routes updated.</p></div>
+                  <div class="mt">2:11 PM</div>
+                </div>
+              </div>
+              <div class="msg usr">
+                <div class="mav">W</div>
+                <div>
+                  <div class="bbl">add refresh token support</div>
+                  <div class="mt">2:11 PM</div>
+                </div>
+              </div>
             </div>
             <div class="wsp-term" id="wspt-1">
-              <div class="tl-dim">gits-infra · ~/infra</div>
-              <div class="tl-cmd">$ terraform apply -auto-approve</div>
-              <div class="tl-ok">Apply complete! Resources: 2 added, 1 changed.</div>
-              <div class="tl-dim">▋</div>
+              <div class="tl-dim">ghost · ~/myproject/auth</div>
+              <div class="tl-cmd">$ uv run python -m auth.server</div>
+              <div class="tl-ok">Server running on :8080</div>
+              <div class="tl-dim">&#9607;</div>
             </div>
-            <div class="wsp-input wsp-chat">
-              <textarea class="wsp-ta" placeholder="Ask…" rows="1" oninput="ar(this)"></textarea>
-              <button class="wsp-sbtn">↑</button>
+            <div class="wsp-input wsp-chat" style="position:relative">
+              <textarea class="wsp-ta" placeholder="Build something in ~/myproject…" rows="1"
+                oninput="ar(this)" onkeydown="buildPaneKey(event,1)"></textarea>
+              <button class="wsp-sbtn">&#8593;</button>
+              <div class="slash-menu" id="slash-menu-1">
+                <div class="slash-item" onclick="insertSlashCmd('/agent',1)">
+                  <span class="slash-cmd">/agent</span><span class="slash-desc">Deploy a new agent</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/skill',1)">
+                  <span class="slash-cmd">/skill</span><span class="slash-desc">Run a saved skill</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/data',1)">
+                  <span class="slash-cmd">/data</span><span class="slash-desc">Query your data</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/status',1)">
+                  <span class="slash-cmd">/status</span><span class="slash-desc">Show fleet status</span>
+                </div>
+              </div>
             </div>
             <div class="wsp-tinput">
-              <span class="wsp-ps">infra $</span>
+              <span class="wsp-ps">myproject $</span>
               <input class="wsp-tinp" placeholder="command…" onkeydown="gridTermKey(event,1)">
             </div>
           </div>
 
-          <!-- panel 2: docs -->
+          <!-- Pane 2: tests — stopped -->
           <div class="ws-panel" id="wsp-2">
-            <div class="wsp-head" onclick="selectWsTab(2)">
-              <span class="wsp-dot d"></span>
-              <span class="wsp-name">docs</span>
+            <div class="wsp-head" onclick="selectBuildTab(2)">
+              <div class="pane-status">
+                <span class="pane-dot stopped"></span>
+                <span class="pane-status-stopped">&#9724; Stopped</span>
+              </div>
+              <span class="wsp-name" style="margin-left:6px">tests</span>
               <span class="wsp-ai">claude</span>
-              <span class="wsp-status">stopped</span>
             </div>
             <div class="wsp-chat wsp-msgs" id="wspc-2">
-              <div class="msg ai"><div class="mav">🤖</div><div>
-                <div class="bbl"><p>Session stopped. Click to resume <code>~/docs</code>.</p></div>
-                <div class="mt">1:28 PM</div>
-              </div></div>
+              <div class="msg ai">
+                <div class="mav">🤖</div>
+                <div>
+                  <div class="bbl"><p>Session stopped. Click to resume test suite.</p></div>
+                  <div class="mt">1:28 PM</div>
+                </div>
+              </div>
             </div>
             <div class="wsp-term" id="wspt-2">
-              <div class="tl-dim">gits-docs · ~/docs — stopped 42m ago</div>
+              <div class="tl-dim">ghost · ~/myproject — stopped 42m ago</div>
             </div>
-            <div class="wsp-input wsp-chat">
-              <textarea class="wsp-ta" placeholder="Ask…" rows="1" oninput="ar(this)"></textarea>
-              <button class="wsp-sbtn">↑</button>
+            <div class="wsp-input wsp-chat" style="position:relative">
+              <textarea class="wsp-ta" placeholder="Build something in ~/myproject…" rows="1"
+                oninput="ar(this)" onkeydown="buildPaneKey(event,2)"></textarea>
+              <button class="wsp-sbtn">&#8593;</button>
+              <div class="slash-menu" id="slash-menu-2">
+                <div class="slash-item" onclick="insertSlashCmd('/agent',2)">
+                  <span class="slash-cmd">/agent</span><span class="slash-desc">Deploy a new agent</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/skill',2)">
+                  <span class="slash-cmd">/skill</span><span class="slash-desc">Run a saved skill</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/data',2)">
+                  <span class="slash-cmd">/data</span><span class="slash-desc">Query your data</span>
+                </div>
+                <div class="slash-item" onclick="insertSlashCmd('/status',2)">
+                  <span class="slash-cmd">/status</span><span class="slash-desc">Show fleet status</span>
+                </div>
+              </div>
             </div>
             <div class="wsp-tinput">
-              <span class="wsp-ps">docs $</span>
+              <span class="wsp-ps">myproject $</span>
               <input class="wsp-tinp" placeholder="command…" onkeydown="gridTermKey(event,2)">
             </div>
           </div>
 
-          <!-- add cell -->
+          <!-- Add pane cell -->
           <div class="ws-panel-add" onclick="addPane()">＋</div>
 
         </div><!-- /#ws-grid -->
-      </div>
+      </div><!-- /#view-build -->
 
-      <!-- ── SKILL MODE ── -->
+
+      <!-- ══════════════════════════════════════
+           AGENTS VIEW — Fleet Control Center
+      ══════════════════════════════════════ -->
+      <div id="view-agents" class="view">
+
+        <!-- Left panel: agent list -->
+        <div class="ag-list">
+          <div class="ag-list-inner" id="ag-list-inner">
+            <!-- filled by JS -->
+          </div>
+        </div>
+
+        <!-- Right panel: agent detail -->
+        <div class="ag-detail" id="ag-detail">
+          <!-- filled by JS -->
+        </div>
+
+      </div><!-- /#view-agents -->
+
+
+      <!-- ══════════════════════════════════════
+           SKILLS VIEW
+      ══════════════════════════════════════ -->
       <div id="view-skill" class="view">
+
         <!-- Skill list -->
         <div class="sk-list">
           <div class="sk-list-head">
             <div class="sk-list-title">Skills</div>
+            <button class="sk-new-btn">＋ New Skill</button>
           </div>
           <div class="sk-scroll" id="sk-scroll">
             <div class="ski on" onclick="selSkill(this,'market')">
@@ -669,149 +362,36 @@ table.dbt tbody td.status{font-weight:500}
         <div class="sk-detail" id="sk-detail">
           <!-- filled by JS -->
         </div>
-      </div>
 
-      <!-- ── TASK MODE (browser agent) ── -->
-      <div id="view-task" class="view">
-        <!-- Task list -->
-        <div class="tklist">
-          <div class="tklist-head">
-            <div class="tklist-title">Tasks</div>
-            <button class="new-task-btn" onclick="openModal()">＋ New</button>
-          </div>
-          <div class="tkscroll" id="tkscroll">
-            <div class="tki on" onclick="selTask(this,'t1')">
-              <div class="tki-goal">Find the current BTC price on CoinGecko and save it</div>
-              <div class="tki-meta">
-                <span class="bdg bdg-done">Done</span>
-                <span class="tki-profile">Personal · Chrome</span>
-              </div>
-            </div>
-            <div class="tki" onclick="selTask(this,'t2')">
-              <div class="tki-goal">Download Goldman Sachs Q2 report from Nash-AI and extract key metrics</div>
-              <div class="tki-meta">
-                <span class="bdg bdg-run">Running</span>
-                <span class="tki-profile">nash-ai · Chrome</span>
-              </div>
-            </div>
-            <div class="tki" onclick="selTask(this,'t3')">
-              <div class="tki-goal">Log in to Notion and export my "Week 12" page as PDF</div>
-              <div class="tki-meta">
-                <span class="bdg bdg-wait">Needs input</span>
-                <span class="tki-profile">Work · Chrome</span>
-              </div>
-            </div>
-            <div class="tki" onclick="selTask(this,'t4')">
-              <div class="tki-goal">Search HackerNews for "AI agents" and save top 10 links to DB</div>
-              <div class="tki-meta">
-                <span class="bdg bdg-que">Queued</span>
-                <span class="tki-profile">Personal · Chrome</span>
-              </div>
-            </div>
-          </div>
-        </div>
+      </div><!-- /#view-skill -->
 
-        <!-- Task detail -->
-        <div class="tkdetail">
-          <div class="tkd-head">
-            <div class="tkd-goal" id="tkd-goal">Find the current BTC price on CoinGecko and save it</div>
-            <div class="tkd-meta">
-              <span class="bdg bdg-done">Done</span>
-              <div class="tkd-profile-chip">🌐 Personal · Chrome</div>
-              <span style="font-size:11px;color:rgba(0,0,0,.32)">6 steps · 18s</span>
-            </div>
-          </div>
 
-          <div class="steps-scroll" id="steps-scroll">
-            <div class="step">
-              <div class="step-ico">🧭</div>
-              <div class="step-body">
-                <div class="step-action">Navigate</div>
-                <div class="step-desc">https://www.coingecko.com/en/coins/bitcoin</div>
-                <div class="step-ts">2:41:02 PM</div>
-              </div>
-            </div>
-            <div class="step">
-              <div class="step-ico">📸</div>
-              <div class="step-body">
-                <div class="step-action">Snapshot</div>
-                <div class="step-desc">Captured 142 interactive elements</div>
-                <div class="step-ts">2:41:04 PM</div>
-              </div>
-            </div>
-            <div class="step">
-              <div class="step-ico">⚡</div>
-              <div class="step-body">
-                <div class="step-action">Evaluate JS</div>
-                <div class="step-desc">Extract price from <code>[data-target="price.price"]</code></div>
-                <div class="step-out">→ "$67,432.18"</div>
-                <div class="step-ts">2:41:05 PM</div>
-              </div>
-            </div>
-            <div class="step">
-              <div class="step-ico">💾</div>
-              <div class="step-body">
-                <div class="step-action">Save to DB</div>
-                <div class="step-desc">INSERT into artifacts — key: btc_price, value: $67,432.18</div>
-                <div class="step-out">→ saved, id: art_01hw...</div>
-                <div class="step-ts">2:41:06 PM</div>
-              </div>
-            </div>
-            <div class="step">
-              <div class="step-ico">✅</div>
-              <div class="step-body">
-                <div class="step-action">Done</div>
-                <div class="step-desc">BTC price extracted and saved. Task complete.</div>
-                <div class="step-ts">2:41:07 PM</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Artifacts -->
-          <div class="artifacts-bar" id="artifacts-bar">
-            <span style="font-size:10.5px;font-weight:600;color:rgba(0,0,0,.35);letter-spacing:.06em;text-transform:uppercase">Saved</span>
-            <div class="artifact"><span class="artifact-ico">📊</span> btc_price.json</div>
-            <div class="artifact"><span class="artifact-ico">📄</span> task_summary.txt</div>
-          </div>
-
-          <!-- Human in the loop (hidden by default) -->
-          <div class="hitl" id="hitl" style="display:none">
-            <span>🤔</span>
-            <div class="hitl-msg" id="hitl-msg">Agent is waiting for your input</div>
-            <input id="hitl-inp" placeholder="Type your response…">
-            <button class="hitl-send" onclick="sendHitl()">Send</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- ── DATA VIEW ── -->
+      <!-- ══════════════════════════════════════
+           DATA VIEW
+      ══════════════════════════════════════ -->
       <div id="view-data" class="view">
-        <!-- Table list sidebar -->
+
+        <!-- Collections left panel -->
         <div class="db-tables">
-          <div class="db-table-lbl">Tables</div>
-          <div class="db-tbl-item on" onclick="selTable(this,'tasks')">
-            📋 tasks <span class="db-tbl-count">4</span>
-          </div>
-          <div class="db-tbl-item" onclick="selTable(this,'steps')">
-            🔢 steps <span class="db-tbl-count">18</span>
-          </div>
-          <div class="db-tbl-item" onclick="selTable(this,'artifacts')">
-            📦 artifacts <span class="db-tbl-count">3</span>
-          </div>
-          <div class="db-tbl-item" onclick="selTable(this,'observations')">
-            🧠 observations <span class="db-tbl-count">6</span>
+          <div id="db-collections">
+            <!-- filled by JS -->
           </div>
         </div>
 
         <!-- Table main area -->
         <div class="db-main">
           <div class="db-topbar">
-            <div class="db-tname" id="db-tname">tasks</div>
+            <div class="db-tname" id="db-tname">btc_prices</div>
             <div class="db-toolbar">
+              <!-- Table / Cards switcher -->
+              <div class="db-view-tabs">
+                <div class="db-view-tab on" data-view="table" onclick="switchDbView('table')">Table</div>
+                <div class="db-view-tab" data-view="cards" onclick="switchDbView('cards')">Cards</div>
+              </div>
               <input class="db-search" id="db-search" placeholder="Filter rows…" oninput="filterTable()">
-              <span class="db-count" id="db-count">4 rows</span>
-              <div class="ibtn" title="Export CSV" onclick="exportCSV()">⬇</div>
-              <div class="ibtn" title="Refresh" onclick="refreshTable()">↻</div>
+              <span class="db-count" id="db-count">— rows</span>
+              <div class="ibtn" title="Export CSV" onclick="exportCSV()">&#8595;</div>
+              <div class="ibtn" title="Refresh" onclick="refreshTable()">&#8635;</div>
             </div>
           </div>
           <div class="db-scroll">
@@ -821,658 +401,29 @@ table.dbt tbody td.status{font-weight:500}
             </table>
           </div>
         </div>
-      </div>
+
+      </div><!-- /#view-data -->
 
       <!-- Row detail drawer -->
       <div id="db-drawer">
         <div class="drawer-head">
           <div class="drawer-title" id="drawer-title">Row detail</div>
-          <button class="drawer-close" onclick="closeDrawer()">✕</button>
+          <button class="drawer-close" onclick="closeDrawer()">&#10005;</button>
         </div>
         <div id="drawer-body"></div>
-      </div>
-
-      <!-- ── SETTINGS (minimal) ── -->
-      <div id="view-settings" class="view" style="align-items:center;justify-content:center">
-        <div style="text-align:center;color:rgba(0,0,0,.35)">
-          <div style="font-size:32px;margin-bottom:10px">⚙️</div>
-          <div style="font-size:14px;font-weight:600;color:rgba(0,0,0,.60);margin-bottom:6px">Settings</div>
-          <div style="font-size:12.5px">Claude Code · Codex · Discord · OpenClaw · SQLite</div>
-          <div style="margin-top:20px;font-size:11.5px;color:rgba(0,0,0,.28)">Full settings panel coming soon</div>
-        </div>
       </div>
 
     </div><!-- /#main -->
   </div><!-- /#body -->
 </div><!-- /#app -->
 
-<!-- New Task Modal -->
-<div id="modal">
-  <div class="modal-bg" onclick="closeModal()"></div>
-  <div class="modal-card">
-    <div class="modal-title">New Browser Task</div>
-    <div class="modal-label">GOAL</div>
-    <textarea class="modal-ta" id="modal-goal" placeholder="e.g. Go to HackerNews and save the top 10 story titles to the database"></textarea>
-    <div class="modal-label" style="margin-top:12px">CHROME PROFILE</div>
-    <select class="modal-sel" id="modal-profile">
-      <option>Personal</option>
-      <option>Work</option>
-      <option>nash-ai</option>
-      <option value="__new">＋ Create new profile…</option>
-    </select>
-    <div class="modal-foot">
-      <button class="mbtn sec" onclick="closeModal()">Cancel</button>
-      <button class="mbtn pri" onclick="startTask()">Start task</button>
-    </div>
-  </div>
+<!-- Toast notification -->
+<div id="toast">
+  <span id="toast-msg"></span>
+  <span class="toast-view" id="toast-view-link" style="display:none">View</span>
+  <button class="toast-close" onclick="dismissToast()">&#10005;</button>
 </div>
 
-<script>
-// ── Mode + view switching ─────────────────────────────────────────────────
-const WORKSPACES = [
-  {name:'myproject', ai:'claude', path:'~/myproject', dotCls:'g', sub:'working'},
-  {name:'infra',     ai:'codex',  path:'~/infra',     dotCls:'y', sub:'idle 3m'},
-  {name:'docs',      ai:'claude', path:'~/docs',       dotCls:'d', sub:'stopped'},
-];
-const PROFILES = ['Personal','Work','nash-ai'];
-
-let curMode = 'code';
-let curWorkspace = 0;
-
-function setMode(mode, el) {
-  curMode = mode;
-  document.querySelectorAll('.mode').forEach(m=>m.classList.remove('on'));
-  el.classList.add('on');
-  document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
-  if (mode === 'code') document.getElementById('view-code').classList.add('on');
-  else if (mode === 'skill') document.getElementById('view-skill').classList.add('on');
-  else if (mode === 'task') document.getElementById('view-task').classList.add('on');
-  else if (mode === 'data') document.getElementById('view-data').classList.add('on');
-}
-
-const WS_DOTS = ['g','y','d'];
-const WS_DOT_STYLES = {
-  g:'background:#22c55e;box-shadow:0 0 5px rgba(34,197,94,.5)',
-  y:'background:#f59e0b',
-  d:'background:rgba(0,0,0,.18)'
-};
-
-function selectWorkspace(idx, e) {
-  if (e) e.stopPropagation();
-  curWorkspace = idx;
-  const ws = WORKSPACES[idx];
-  // update button
-  const dot = WS_DOTS[idx] || 'd';
-  document.getElementById('ws-btn-dot').style.cssText = WS_DOT_STYLES[dot];
-  document.getElementById('ws-btn-name').textContent = ws.name;
-  // update menu active state
-  document.querySelectorAll('.wsm-item').forEach((w,i)=>w.classList.toggle('on', i===idx));
-  closeWsMenu();
-}
-
-function toggleWsMenu(e) {
-  e.stopPropagation();
-  document.getElementById('ws-menu').classList.toggle('on');
-}
-function closeWsMenu() {
-  document.getElementById('ws-menu').classList.remove('on');
-}
-document.addEventListener('click', closeWsMenu);
-
-function sv(name) {
-  document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
-  document.getElementById('view-'+name).classList.add('on');
-}
-
-// ── Window grid / tabs ────────────────────────────────────────────────────
-let activeWsTab = 0;
-let devMode = false;
-
-function selectWsTab(idx) {
-  activeWsTab = idx;
-  document.querySelectorAll('.ws-tab').forEach((t,i) => t.classList.toggle('on', i===idx));
-  document.querySelectorAll('.ws-panel').forEach((p,i) => p.classList.toggle('active', i===idx));
-}
-
-function toggleDevMode() {
-  devMode = !devMode;
-  document.getElementById('ws-grid').classList.toggle('devmode', devMode);
-  document.getElementById('devmode-btn').classList.toggle('on', devMode);
-  if (devMode) {
-    // focus terminal input of active panel
-    const inp = document.querySelector(`#wsp-${activeWsTab} .wsp-tinp`);
-    if (inp) setTimeout(()=>inp.focus(), 50);
-  }
-}
-
-function addWorkspace(e) {
-  if (e) e.stopPropagation();
-  const path = prompt('Project path (e.g. ~/newproject):'); if (!path) return;
-  const name = path.replace(/^.*\//,'');
-  const n = WORKSPACES.length;
-  WORKSPACES.push({name, ai:'claude', path, dotCls:'d', sub:'new'});
-  // add to menu (before the sep + add row)
-  const item = document.createElement('div');
-  item.className = 'wsm-item';
-  item.onclick = (ev) => selectWorkspace(n, ev);
-  item.innerHTML = `<div class="wsm-dot d"></div><div class="wsm-info"><div class="wsm-name">${name}</div><div class="wsm-path">${path}</div></div>`;
-  document.querySelector('.wsm-sep').before(item);
-  selectWorkspace(n);
-}
-
-function addWindow() {
-  const n = document.querySelectorAll('.ws-tab').length;
-  const tab = document.createElement('div');
-  tab.className = 'ws-tab'; tab.id = 'wstab-'+n;
-  tab.innerHTML = `<span class="ws-tab-dot d"></span>window ${n+1}`;
-  tab.onclick = () => selectWsTab(n);
-  document.querySelector('.ws-tab-add').before(tab);
-  selectWsTab(n);
-}
-
-function addPane() {
-  const n = document.querySelectorAll('.ws-panel').length;
-  const addCell = document.querySelector('.ws-panel-add');
-  const panel = document.createElement('div');
-  panel.className = 'ws-panel'; panel.id = 'wsp-'+n;
-  const ws = WORKSPACES[curWorkspace] || {name:'workspace', path:'~'};
-  panel.innerHTML = `
-    <div class="wsp-head" onclick="selectWsTab(${n})">
-      <span class="wsp-dot d"></span>
-      <span class="wsp-name">pane ${n+1}</span>
-      <span class="wsp-ai">claude</span>
-      <span class="wsp-status">new</span>
-    </div>
-    <div class="wsp-chat wsp-msgs" id="wspc-${n}">
-      <div class="msg ai"><div class="mav">🤖</div><div>
-        <div class="bbl"><p>Ready at <code>${ws.path}</code>.</p></div>
-      </div></div>
-    </div>
-    <div class="wsp-term" id="wspt-${n}">
-      <div class="tl-dim">gits-${ws.name} · ${ws.path}</div><div class="tl-dim">▋</div>
-    </div>
-    <div class="wsp-input wsp-chat">
-      <textarea class="wsp-ta" placeholder="Ask…" rows="1" oninput="ar(this)"></textarea>
-      <button class="wsp-sbtn">↑</button>
-    </div>
-    <div class="wsp-tinput">
-      <span class="wsp-ps">${ws.name} $</span>
-      <input class="wsp-tinp" placeholder="command…" onkeydown="gridTermKey(event,${n})">
-    </div>`;
-  addCell.before(panel);
-  selectWsTab(n);
-}
-
-function gridTermKey(e, idx) {
-  if (e.key !== 'Enter') return;
-  const inp = e.target, cmd = inp.value.trim(); if (!cmd) return;
-  inp.value = '';
-  const sc = document.getElementById('wspt-'+idx);
-  const add = (cls, txt) => { const d=document.createElement('div'); d.className=cls; d.innerHTML=txt; sc.appendChild(d); };
-  add('tl-cmd', '$ '+cmd);
-  if (cmd.startsWith('uv run pytest')) { add('tl-out','collecting…'); setTimeout(()=>{add('tl-ok','✓ all passed');sc.scrollTop=9999;},700); }
-  else if (cmd==='clear') { sc.innerHTML=''; }
-  else { add('tl-out','running…'); setTimeout(()=>{add('tl-dim','[done]');sc.scrollTop=9999;},400); }
-  sc.scrollTop = 9999;
-}
-
-// keep old termKey as alias
-function termKey(e,idx){gridTermKey(e,idx);}
-
-// ── Task selection ────────────────────────────────────────────────────────
-const TASKS = {
-  t1: {
-    goal: 'Find the current BTC price on CoinGecko and save it',
-    profile: 'Personal · Chrome', status: 'bdg-done', statusTxt: 'Done',
-    steps: [
-      {ico:'🧭',action:'Navigate',desc:'https://www.coingecko.com/en/coins/bitcoin',out:'',ts:'2:41:02 PM'},
-      {ico:'📸',action:'Snapshot',desc:'Captured 142 interactive elements',out:'',ts:'2:41:04 PM'},
-      {ico:'⚡',action:'Evaluate JS',desc:'Extract price from data-target',out:'→ "$67,432.18"',ts:'2:41:05 PM'},
-      {ico:'💾',action:'Save to DB',desc:'INSERT btc_price = $67,432.18',out:'→ saved, id: art_01hw...',ts:'2:41:06 PM'},
-      {ico:'✅',action:'Done',desc:'BTC price saved. Task complete.',out:'',ts:'2:41:07 PM'},
-    ],
-    artifacts:[{ico:'📊',name:'btc_price.json'},{ico:'📄',name:'task_summary.txt'}],
-    hitl: null, meta:'5 steps · 5s',
-  },
-  t2: {
-    goal: 'Download Goldman Sachs Q2 report from Nash-AI and extract key metrics',
-    profile: 'nash-ai · Chrome', status: 'bdg-run', statusTxt: 'Running',
-    steps: [
-      {ico:'🧭',action:'Navigate',desc:'https://www.nash-ai.cn/login.html',out:'',ts:'2:43:00 PM'},
-      {ico:'📸',action:'Snapshot',desc:'Found login form: 用户名, 密码, 登录 button',out:'',ts:'2:43:01 PM'},
-      {ico:'⌨️',action:'Type',desc:'Filled username field',out:'',ts:'2:43:02 PM'},
-      {ico:'⌨️',action:'Type',desc:'Filled password field',out:'',ts:'2:43:03 PM'},
-      {ico:'🖱️',action:'Click',desc:'"登录" button [ref=e42]',out:'→ Redirect to dashboard',ts:'2:43:05 PM'},
-      {ico:'⚡',action:'Evaluate JS',desc:"localStorage.getItem('token')",out:'→ eyJhbGc... (stored in memory)',ts:'2:43:06 PM'},
-      {ico:'🔍',action:'Search',desc:'POST /reports/foreign-rt/search — Goldman Sachs',out:'→ 47 results',ts:'2:43:08 PM'},
-      {ico:'⬇️',action:'Download',desc:'GET /reports/foreign-rt/pdf/download?id=686258',out:'→ Downloading…',ts:'2:43:10 PM'},
-    ],
-    artifacts:[{ico:'📄',name:'gs_q2_report.pdf'}],
-    hitl: null, meta:'8 steps · running',
-  },
-  t3: {
-    goal: 'Log in to Notion and export my "Week 12" page as PDF',
-    profile: 'Work · Chrome', status: 'bdg-wait', statusTxt: 'Needs input',
-    steps: [
-      {ico:'🧭',action:'Navigate',desc:'https://notion.so',out:'',ts:'2:45:00 PM'},
-      {ico:'📸',action:'Snapshot',desc:'Logged-in Notion dashboard',out:'',ts:'2:45:02 PM'},
-      {ico:'🔍',action:'Search',desc:'Searched for "Week 12"',out:'→ 3 results found',ts:'2:45:04 PM'},
-      {ico:'🤔',action:'Needs Input',desc:'Found 3 pages named "Week 12" — which one?',out:'',ts:'2:45:06 PM'},
-    ],
-    artifacts:[],
-    hitl: {msg: 'Found 3 pages named "Week 12". Which one? (Jan, Feb, or Mar)'},
-    meta:'4 steps · paused',
-  },
-  t4: {
-    goal: 'Search HackerNews for "AI agents" and save top 10 links to DB',
-    profile: 'Personal · Chrome', status: 'bdg-que', statusTxt: 'Queued',
-    steps: [], artifacts: [], hitl: null, meta:'queued',
-  },
-};
-
-function selTask(el, id) {
-  document.querySelectorAll('.tki').forEach(t=>t.classList.remove('on'));
-  el.classList.add('on');
-  const t = TASKS[id];
-  document.getElementById('tkd-goal').textContent = t.goal;
-  // meta
-  document.querySelector('.tkd-meta').innerHTML = `
-    <span class="bdg ${t.status}">${t.statusTxt}</span>
-    <div class="tkd-profile-chip">🌐 ${t.profile}</div>
-    <span style="font-size:11px;color:rgba(0,0,0,.32)">${t.meta}</span>`;
-  // steps
-  document.getElementById('steps-scroll').innerHTML = t.steps.length
-    ? t.steps.map(s=>`
-        <div class="step">
-          <div class="step-ico">${s.ico}</div>
-          <div class="step-body">
-            <div class="step-action">${s.action}</div>
-            <div class="step-desc">${s.desc}</div>
-            ${s.out?`<div class="step-out">${s.out}</div>`:''}
-            <div class="step-ts">${s.ts}</div>
-          </div>
-        </div>`).join('')
-    : '<div class="empty"><div class="empty-ico">⏳</div><div class="empty-txt">Waiting to start</div></div>';
-  // artifacts
-  const ab = document.getElementById('artifacts-bar');
-  ab.style.display = t.artifacts.length ? 'flex' : 'none';
-  ab.innerHTML = t.artifacts.length
-    ? `<span style="font-size:10.5px;font-weight:600;color:rgba(0,0,0,.35);letter-spacing:.06em;text-transform:uppercase">Saved</span>`
-      + t.artifacts.map(a=>`<div class="artifact"><span class="artifact-ico">${a.ico}</span> ${a.name}</div>`).join('')
-    : '';
-  // hitl
-  const hitl = document.getElementById('hitl');
-  if (t.hitl) {
-    hitl.style.display='flex';
-    document.getElementById('hitl-msg').textContent=t.hitl.msg;
-  } else {
-    hitl.style.display='none';
-  }
-}
-
-function sendHitl() {
-  const v=document.getElementById('hitl-inp').value.trim();
-  if(!v)return;
-  document.getElementById('hitl-inp').value='';
-  document.getElementById('hitl').style.display='none';
-  // add a new step
-  const sc=document.getElementById('steps-scroll');
-  const d=document.createElement('div');d.className='step';
-  d.innerHTML=`<div class="step-ico">💬</div><div class="step-body"><div class="step-action">User Input</div><div class="step-desc">${v}</div><div class="step-ts">Now</div></div>`;
-  sc.appendChild(d);sc.scrollTop=sc.scrollHeight;
-}
-
-// ── Modal ─────────────────────────────────────────────────────────────────
-function openModal(){document.getElementById('modal').classList.add('on');document.getElementById('modal-goal').focus();}
-function closeModal(){document.getElementById('modal').classList.remove('on');}
-function startTask(){
-  const g=document.getElementById('modal-goal').value.trim();if(!g)return;
-  closeModal();
-  setMode('task',document.querySelectorAll('.mode')[2]);
-  const id='t'+Date.now();
-  TASKS[id]={goal:g,profile:document.getElementById('modal-profile').value+' · Chrome',status:'bdg-que',statusTxt:'Queued',steps:[],artifacts:[],hitl:null,meta:'queued'};
-  const el=document.createElement('div');el.className='tki';el.onclick=()=>selTask(el,id);
-  el.innerHTML=`<div class="tki-goal">${g}</div><div class="tki-meta"><span class="bdg bdg-que">Queued</span><span class="tki-profile">${TASKS[id].profile}</span></div>`;
-  document.getElementById('tkscroll').prepend(el);
-  selTask(el,id);
-}
-
-// ── Chat (code mode) ──────────────────────────────────────────────────────
-const REPLIES=[
-  "Sure! Here's the Discord adapter wired with a 30s timeout:\n```python\nasync def handle(self, msg):\n    try:\n        async with asyncio.timeout(30):\n            async for chunk in engine.stream_output(session_id):\n                await msg.channel.send(chunk.text)\n    except TimeoutError:\n        await msg.channel.send('⏱ Timed out.')\n```",
-  "Done! `src/gits/adapters/discord/bot.py` updated. Run `uv run pytest` to verify.",
-  "Want me to add a `/browse` command that hands off to the Browser Agent? That way users can trigger web tasks directly from Discord.",
-  "All good. The async generator streams correctly — no more blocking on tmux output.",
-];
-let ri=0;
-function ar(ta){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,100)+'px';}
-function hk(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}
-function send(){
-  const inp=document.getElementById('inp'),txt=inp.value.trim();if(!txt)return;
-  if(txt.startsWith('/browse ')){
-    const goal=txt.slice(8).trim();
-    inp.value='';ar(inp);
-    const id='t'+Date.now();
-    TASKS[id]={goal,profile:'Personal · Chrome',status:'bdg-que',statusTxt:'Queued',steps:[],artifacts:[],hitl:null,meta:'queued'};
-    setMode('task',document.querySelectorAll('.mode')[2]);
-    const el=document.createElement('div');el.className='tki';el.onclick=()=>selTask(el,id);
-    el.innerHTML=`<div class="tki-goal">${goal}</div><div class="tki-meta"><span class="bdg bdg-que">Queued</span><span class="tki-profile">Personal · Chrome</span></div>`;
-    document.getElementById('tkscroll').prepend(el);selTask(el,id);
-    return;
-  }
-  addm('usr',txt);inp.value='';ar(inp);
-  document.getElementById('typing').style.display='flex';scrl();
-  setTimeout(()=>{document.getElementById('typing').style.display='none';addm('ai',REPLIES[ri++%REPLIES.length]);},900+Math.random()*500);
-}
-function addm(role,text){
-  const now=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-  const d=document.createElement('div');d.className=`msg ${role}`;
-  d.innerHTML=`<div class="mav">${role==='ai'?'🤖':'W'}</div><div><div class="bbl">${fmt(text)}</div><div class="mt">${now}</div></div>`;
-  document.getElementById('msgs').insertBefore(d,document.getElementById('typing'));scrl();
-}
-function fmt(t){
-  t=t.replace(/```(\w*)\n?([\s\S]*?)```/g,(_,l,c)=>`<pre><code>${esc(c.trim())}</code><button class="ccbtn" onclick="cpc(this)">Copy</button></pre>`);
-  t=t.replace(/`([^`]+)`/g,'<code>$1</code>');
-  return t.split('\n').map(l=>`<p>${l||'&nbsp;'}</p>`).join('');
-}
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function scrl(){const c=document.getElementById('msgs');setTimeout(()=>c.scrollTop=c.scrollHeight,10);}
-function cpc(btn){navigator.clipboard.writeText(btn.previousElementSibling.textContent).catch(()=>{});btn.textContent='Copied!';setTimeout(()=>btn.textContent='Copy',1500);}
-
-function termKey(e, paneIdx) {
-  if (e.key !== 'Enter') return;
-  const inp = e.target, cmd = inp.value.trim(); if (!cmd) return;
-  inp.value = '';
-  const sc = document.getElementById('wsc-term-' + paneIdx);
-  const addLine = (cls, txt) => {
-    const d = document.createElement('div'); d.className = cls; d.innerHTML = txt;
-    sc.appendChild(d);
-  };
-  addLine('tl-cmd', '$ ' + cmd);
-  if (cmd.startsWith('uv run pytest')) {
-    addLine('tl-out', 'collecting…');
-    setTimeout(()=>{ addLine('tl-ok', '✓ all passed'); sc.scrollTop=sc.scrollHeight; }, 800);
-  } else if (cmd.startsWith('uv run gits')) {
-    addLine('tl-ok', '✓ done');
-  } else if (cmd === 'clear') {
-    sc.innerHTML = '<div class="tl-cmd">▋</div>';
-    return;
-  } else {
-    addLine('tl-out', cmd + ': running…');
-    setTimeout(()=>{ addLine('tl-dim','[done]'); sc.scrollTop=sc.scrollHeight; }, 500);
-  }
-  sc.scrollTop = sc.scrollHeight;
-}
-
-
-// ── Skill View ────────────────────────────────────────────────────────────
-const SKILLS = {
-  market: {
-    name: 'Market Scanner',
-    desc: 'Fetches latest price data for a list of ticker symbols and saves results to the database.',
-    params: [
-      {key:'symbols', label:'Symbols', placeholder:'BTC,ETH,AAPL,TSLA'},
-      {key:'interval', label:'Interval (min)', placeholder:'60'},
-    ],
-    runs: [
-      {status:'done', ts:'Today 14:41', params:'symbols=BTC,ETH interval=60', error:null},
-      {status:'fail', ts:'Today 11:22', params:'symbols=BTC,ETH,XRP interval=30',
-        error:{msg:"KeyError: 'XRP' not found in price feed\n  at fetch_price.py:42",
-               ai:"The symbol 'XRP' isn't supported by the current price feed adapter. Either remove it from the list or add a fallback handler in `fetch_price.py` for unsupported symbols."}},
-      {status:'done', ts:'Yesterday 09:00', params:'symbols=BTC,ETH interval=60', error:null},
-    ]
-  },
-  screenshot: {
-    name: 'Screenshot Monitor',
-    desc: 'Captures a page screenshot at a given interval and saves diffs as artifacts.',
-    params: [
-      {key:'url', label:'URL', placeholder:'https://example.com'},
-      {key:'interval_s', label:'Interval (sec)', placeholder:'300'},
-    ],
-    runs: [
-      {status:'run', ts:'Now', params:'url=https://nash-ai.cn interval_s=300', error:null},
-    ]
-  },
-  csvproc: {
-    name: 'CSV Processor',
-    desc: 'Loads a CSV file, applies a transform script, and outputs a cleaned version.',
-    params: [
-      {key:'input', label:'Input path', placeholder:'~/Downloads/data.csv'},
-      {key:'script', label:'Transform', placeholder:'drop_duplicates, fill_nulls'},
-    ],
-    runs: []
-  },
-  report: {
-    name: 'Report Generator',
-    desc: 'Queries the local database and renders a formatted PDF report.',
-    params: [
-      {key:'query', label:'SQL query', placeholder:'SELECT * FROM tasks WHERE status=\'done\''},
-      {key:'title', label:'Report title', placeholder:'Weekly Summary'},
-    ],
-    runs: [
-      {status:'done', ts:'Yesterday 18:00', params:'title=Weekly Summary', error:null},
-    ]
-  },
-  discord: {
-    name: 'Discord Notifier',
-    desc: 'Posts a formatted embed message to a specified Discord channel.',
-    params: [
-      {key:'channel', label:'Channel ID', placeholder:'1234567890'},
-      {key:'message', label:'Message', placeholder:'Task completed successfully!'},
-    ],
-    runs: [
-      {status:'fail', ts:'Today 10:05', params:'channel=123456',
-        error:{msg:"HTTPError 403: Missing Permissions\n  at discord_notify.py:28",
-               ai:"The bot token doesn't have the 'Send Messages' permission in that channel. Grant the permission in Discord server settings under Roles, or use a channel where the bot already has access."}},
-    ]
-  },
-};
-
-let curSkill = 'market';
-
-function selSkill(el, id) {
-  document.querySelectorAll('.ski').forEach(s=>s.classList.remove('on'));
-  el.classList.add('on');
-  curSkill = id;
-  renderSkillDetail(id);
-}
-
-function renderSkillDetail(id) {
-  const sk = SKILLS[id];
-  const STATUS_ICO = {done:'✅', fail:'❌', run:'⏳'};
-  const runs = sk.runs.map(r=>`
-    <div class="sk-run-item">
-      <div class="sk-run-status sk-run-${r.status}"></div>
-      <div class="sk-run-info">
-        <div class="sk-run-ts">${r.ts}</div>
-        <div class="sk-run-params-txt">${r.params}</div>
-        ${r.error ? `
-        <div class="sk-debug">
-          <div class="sk-debug-hd">🤖 AI Debug</div>
-          <div class="sk-debug-msg">${r.error.msg}</div>
-          <div class="sk-debug-ai">${r.error.ai}</div>
-          <button class="sk-debug-fix" onclick="alert('Opening fix in Code mode…')">Apply fix in Code</button>
-        </div>` : ''}
-      </div>
-    </div>`).join('');
-
-  document.getElementById('sk-detail').innerHTML = `
-    <div class="sk-detail-head">
-      <div class="sk-name">${sk.name}</div>
-      <div class="sk-dsc">${sk.desc}</div>
-    </div>
-    <div class="sk-body">
-      <div>
-        <div class="sk-section-lbl">Parameters</div>
-        <div class="sk-params">
-          ${sk.params.map(p=>`
-            <div class="sk-param">
-              <div class="sk-param-lbl">${p.label}</div>
-              <input class="sk-param-inp" placeholder="${p.placeholder}">
-            </div>`).join('')}
-        </div>
-      </div>
-      <button class="sk-run-btn" onclick="runSkill('${id}')">▶ Run</button>
-      ${sk.runs.length ? `<div class="sk-runs-sep"></div><div class="sk-section-lbl">Recent runs</div>${runs}` : ''}
-    </div>`;
-}
-
-function runSkill(id) {
-  const sk = SKILLS[id];
-  const now = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-  sk.runs.unshift({status:'run', ts:'Now', params:'...', error:null});
-  renderSkillDetail(id);
-  setTimeout(()=>{ sk.runs[0].status='done'; sk.runs[0].ts='Just now'; renderSkillDetail(id); }, 2000);
-}
-
-// ── DB View ───────────────────────────────────────────────────────────────
-const DB = {
-  tasks: {
-    cols: ['id','goal','status','profile','created_at','summary'],
-    rows: [
-      {id:'tsk_01hw8m',goal:'Find the current BTC price on CoinGecko and save it',status:'done',profile:'Personal',created_at:'2026-03-14 14:41:02',summary:'BTC price $67,432.18 extracted and saved'},
-      {id:'tsk_01hw9k',goal:'Download Goldman Sachs Q2 report from Nash-AI',status:'running',profile:'nash-ai',created_at:'2026-03-14 14:43:00',summary:null},
-      {id:'tsk_01hwaq',goal:'Log in to Notion and export "Week 12" page as PDF',status:'needs_review',profile:'Work',created_at:'2026-03-14 14:45:00',summary:null},
-      {id:'tsk_01hwbr',goal:'Search HackerNews for "AI agents" and save top 10 links',status:'queued',profile:'Personal',created_at:'2026-03-14 14:47:00',summary:null},
-    ]
-  },
-  steps: {
-    cols: ['id','task_id','seq','action','input','output','ts'],
-    rows: [
-      {id:'stp_001',task_id:'tsk_01hw8m',seq:1,action:'navigate',input:'{"url":"https://coingecko.com/en/coins/bitcoin"}',output:'{"title":"Bitcoin price","url":"https://coingecko.com/..."}',ts:'2026-03-14 14:41:02'},
-      {id:'stp_002',task_id:'tsk_01hw8m',seq:2,action:'snapshot',input:'{}',output:'{"elements":142}',ts:'2026-03-14 14:41:04'},
-      {id:'stp_003',task_id:'tsk_01hw8m',seq:3,action:'evaluate',input:'{"fn":"document.querySelector(\'[data-target]\').innerText"}',output:'"$67,432.18"',ts:'2026-03-14 14:41:05'},
-      {id:'stp_004',task_id:'tsk_01hw8m',seq:4,action:'save_db',input:'{"key":"btc_price","value":"$67,432.18"}',output:'{"id":"art_01hw...","ok":true}',ts:'2026-03-14 14:41:06'},
-      {id:'stp_005',task_id:'tsk_01hw8m',seq:5,action:'done',input:'{}',output:'{"summary":"BTC price saved"}',ts:'2026-03-14 14:41:07'},
-      {id:'stp_006',task_id:'tsk_01hw9k',seq:1,action:'navigate',input:'{"url":"https://nash-ai.cn/login.html"}',output:'{"title":"Login - Nash AI"}',ts:'2026-03-14 14:43:00'},
-      {id:'stp_007',task_id:'tsk_01hw9k',seq:2,action:'snapshot',input:'{}',output:'{"elements":31}',ts:'2026-03-14 14:43:01'},
-      {id:'stp_008',task_id:'tsk_01hw9k',seq:3,action:'click',input:'{"ref":"e12","label":"密码登录 button"}',output:'{"ok":true}',ts:'2026-03-14 14:43:02'},
-      {id:'stp_009',task_id:'tsk_01hw9k',seq:4,action:'type',input:'{"ref":"e17","text":"sharon4life"}',output:'{"ok":true}',ts:'2026-03-14 14:43:03'},
-      {id:'stp_010',task_id:'tsk_01hw9k',seq:5,action:'type',input:'{"ref":"e18","text":"[redacted]"}',output:'{"ok":true}',ts:'2026-03-14 14:43:04'},
-      {id:'stp_011',task_id:'tsk_01hw9k',seq:6,action:'click',input:'{"ref":"e42","label":"登录 button"}',output:'{"ok":true,"redirect":"/dashboard"}',ts:'2026-03-14 14:43:05'},
-      {id:'stp_012',task_id:'tsk_01hw9k',seq:7,action:'evaluate',input:'{"fn":"localStorage.getItem(\'token\')"}',output:'"eyJhbGc..."',ts:'2026-03-14 14:43:06'},
-      {id:'stp_013',task_id:'tsk_01hwaq',seq:1,action:'navigate',input:'{"url":"https://notion.so"}',output:'{"title":"Notion"}',ts:'2026-03-14 14:45:00'},
-      {id:'stp_014',task_id:'tsk_01hwaq',seq:2,action:'snapshot',input:'{}',output:'{"elements":87}',ts:'2026-03-14 14:45:02'},
-      {id:'stp_015',task_id:'tsk_01hwaq',seq:3,action:'search',input:'{"query":"Week 12"}',output:'{"results":3}',ts:'2026-03-14 14:45:04'},
-      {id:'stp_016',task_id:'tsk_01hwaq',seq:4,action:'ask_user',input:'{"question":"Found 3 pages named Week 12 — which one?"}',output:null,ts:'2026-03-14 14:45:06'},
-    ]
-  },
-  artifacts: {
-    cols: ['id','task_id','type','filename','size_bytes','created_at'],
-    rows: [
-      {id:'art_01hw1',task_id:'tsk_01hw8m',type:'json',filename:'btc_price.json',size_bytes:48,created_at:'2026-03-14 14:41:06'},
-      {id:'art_01hw2',task_id:'tsk_01hw8m',type:'text',filename:'task_summary.txt',size_bytes:112,created_at:'2026-03-14 14:41:07'},
-      {id:'art_01hw3',task_id:'tsk_01hw9k',type:'pdf',filename:'gs_q2_report.pdf',size_bytes:2401280,created_at:'2026-03-14 14:43:10'},
-    ]
-  },
-  observations: {
-    cols: ['id','task_id','key','value','sensitive','ts'],
-    rows: [
-      {id:'obs_001',task_id:'tsk_01hw9k',key:'jwt',value:'[REDACTED]',sensitive:1,ts:'2026-03-14 14:43:06'},
-      {id:'obs_002',task_id:'tsk_01hw9k',key:'login_status',value:'ok',sensitive:0,ts:'2026-03-14 14:43:05'},
-      {id:'obs_003',task_id:'tsk_01hw9k',key:'report_count',value:'47',sensitive:0,ts:'2026-03-14 14:43:08'},
-      {id:'obs_004',task_id:'tsk_01hw8m',key:'btc_price',value:'$67,432.18',sensitive:0,ts:'2026-03-14 14:41:05'},
-      {id:'obs_005',task_id:'tsk_01hwaq',key:'search_results',value:'[{"title":"Week 12 Jan"},{"title":"Week 12 Feb"},{"title":"Week 12 Mar"}]',sensitive:0,ts:'2026-03-14 14:45:04'},
-      {id:'obs_006',task_id:'tsk_01hwaq',key:'user_response',value:null,sensitive:0,ts:'2026-03-14 14:45:06'},
-    ]
-  }
-};
-
-let curTable = 'tasks';
-let sortCol = null, sortDir = 1;
-let filterText = '';
-
-const STATUS_COLOR = {done:'#16a34a',running:'#4f46e5',queued:'rgba(0,0,0,.45)',needs_review:'#b45309',failed:'#dc2626'};
-
-function selTable(el, name) {
-  document.querySelectorAll('.db-tbl-item').forEach(x=>x.classList.remove('on'));
-  el.classList.add('on');
-  curTable = name;
-  sortCol = null; sortDir = 1; filterText = '';
-  document.getElementById('db-search').value = '';
-  closeDrawer();
-  renderTable();
-}
-
-function renderTable() {
-  const data = DB[curTable];
-  document.getElementById('db-tname').textContent = curTable;
-
-  // filter
-  let rows = data.rows.filter(r =>
-    !filterText || Object.values(r).some(v => v && String(v).toLowerCase().includes(filterText))
-  );
-
-  // sort
-  if (sortCol) {
-    rows = [...rows].sort((a,b)=>{
-      const av=a[sortCol]??'', bv=b[sortCol]??'';
-      return String(av).localeCompare(String(bv), undefined, {numeric:true}) * sortDir;
-    });
-  }
-
-  document.getElementById('db-count').textContent = `${rows.length} row${rows.length!==1?'s':''}`;
-
-  // thead
-  document.getElementById('db-thead').innerHTML = '<tr>' + data.cols.map(c=>{
-    const ico = sortCol===c ? (sortDir>0?'↑':'↓') : '';
-    return `<th onclick="sortBy('${c}')">${c} <span class="sort-ico">${ico}</span></th>`;
-  }).join('') + '</tr>';
-
-  // tbody
-  const mono = new Set(['id','task_id','ts','created_at','input','output','value','size_bytes','seq']);
-  document.getElementById('db-tbody').innerHTML = rows.map((r,ri)=>
-    `<tr class="row-click" onclick="openDrawer(${ri}, ${JSON.stringify(JSON.stringify(r))})">` +
-    data.cols.map(c=>{
-      const v = r[c];
-      if (v===null||v===undefined) return `<td><span class="db-null">null</span></td>`;
-      if (c==='status') return `<td class="status" style="color:${STATUS_COLOR[v]||'inherit'}">${v}</td>`;
-      if (c==='size_bytes' && v>0) return `<td class="mono">${(v/1024).toFixed(1)} KB</td>`;
-      if (c==='sensitive') return `<td>${v?'🔒':''}</td>`;
-      const s = String(v);
-      const disp = s.length>60 ? s.slice(0,58)+'…' : s;
-      return `<td class="${mono.has(c)?'mono':''}">${disp}</td>`;
-    }).join('') + '</tr>'
-  ).join('');
-}
-
-function sortBy(col) {
-  if (sortCol===col) sortDir*=-1; else { sortCol=col; sortDir=1; }
-  renderTable();
-}
-
-function filterTable() {
-  filterText = document.getElementById('db-search').value.toLowerCase();
-  renderTable();
-}
-
-function openDrawer(ri, rjson) {
-  const r = JSON.parse(rjson);
-  document.getElementById('drawer-title').textContent = curTable + ' · row';
-  document.getElementById('drawer-body').innerHTML = Object.entries(r).map(([k,v])=>{
-    const isLong = v && String(v).length > 40;
-    const disp = v===null||v===undefined ? '<span class="db-null">null</span>'
-      : `<div class="drawer-val${isLong?' mono':''}">${String(v)}</div>`;
-    return `<div class="drawer-field"><div class="drawer-key">${k}</div>${disp}</div>`;
-  }).join('<div class="drawer-sep"></div>');
-  document.getElementById('db-drawer').classList.add('on');
-}
-
-function closeDrawer() { document.getElementById('db-drawer').classList.remove('on'); }
-
-function exportCSV() {
-  const data = DB[curTable];
-  const lines = [data.cols.join(','), ...data.rows.map(r=>data.cols.map(c=>JSON.stringify(r[c]??'')).join(','))];
-  const blob = new Blob([lines.join('\n')],{type:'text/csv'});
-  const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=curTable+'.csv'; a.click();
-}
-
-function refreshTable() { renderTable(); }
-
-// ── Init ──────────────────────────────────────────────────────────────────
-renderSkillDetail('market');
-renderTable();
-scrl();
-</script>
+<script src="app.js"></script>
 </body>
 </html>
