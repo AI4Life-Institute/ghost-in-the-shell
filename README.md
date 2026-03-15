@@ -99,7 +99,7 @@ gits start --dev
 
 | Command | Description |
 |---|---|
-| `/bind <path> [mode] [cli]` | Bind channel to a project, launch CLI |
+| `/bind <path> [mode] [cli]` | Bind channel to a project, launch CLI. `mode`: `default` (confirm) or `bypassPermissions` (YOLO) |
 | `/unbind` | Unbind and close the window |
 | `/status` | Show binding status and session info |
 | `/screenshot` | Send a terminal screenshot |
@@ -109,14 +109,12 @@ gits start --dev
 | `/bash <command>` | Run a shell command in the project directory |
 | `/keys <keys>` | Send keystrokes (Enter, Escape, Ctrl-C, Up, Down…) |
 | `/model [name]` | Switch model (sonnet, opus, haiku, o3, gpt-4o…) |
-| `/mode <mode>` | Switch permission mode without restarting |
+| `/mode <mode>` | Switch permission mode without restarting. Supports all four: `default`, `bypassPermissions`, `auto`, `acceptEdits` |
 | `/thread <message>` | Create a sub-thread sharing the same directory |
 | `/fork <title>` | Create a sub-thread with an isolated git worktree |
 | `/browse <goal>` | Run a browser agent task |
 | `/compact` `/clear` `/cost` `/diff` `/memory` `/context` `/usage` | Forwarded directly to the CLI |
 | `/cc <command>` | Forward any slash command to the CLI |
-
-> **Permission modes** — `/bind` and `/mode` accept: `default` (confirm), `bypassPermissions` (YOLO), `auto` (auto-run tools), `acceptEdits` (auto-edit). `/bind` supports the first two; `/mode` supports all four.
 
 ---
 
