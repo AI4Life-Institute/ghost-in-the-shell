@@ -13,7 +13,7 @@ Control coding CLIs (Claude Code / Codex / Copilot / OpenCode) from Discord. Sen
 | Claude Code | `npm i -g @anthropic-ai/claude-code` | `gits hook --install` |
 | Codex | `npm i -g @openai/codex` | `gits hook --install-codex` |
 | Copilot CLI | `npm i -g @github/copilot-cli` | `gits hook --install-copilot` |
-| OpenCode | `go install github.com/anomalyco/opencode@latest` | Not needed |
+| OpenCode | `curl -fsSL opencode.ai/install | bash` | `gits hook --install-opencode` |
 
 ## Install
 
@@ -42,12 +42,15 @@ The Discord bot needs **Message Content Intent** enabled and must be invited to 
 
 ## Install hooks
 
-Hooks let GITS track CLI session IDs so responses can be forwarded back to Discord:
+Hooks let GITS track CLI session IDs so responses can be forwarded back to Discord.
+
+**All hooks are auto-installed on `gits start`**, so manual setup is usually not needed. To install individually:
 
 ```bash
-gits hook --install          # Claude Code
-gits hook --install-codex    # Codex (auto-enables codex_hooks experimental feature)
-gits hook --install-copilot  # Copilot
+gits hook --install           # Claude Code (SessionStart hook in ~/.claude/settings.json)
+gits hook --install-codex     # Codex (hooks.json + codex_hooks feature flag)
+gits hook --install-copilot   # Copilot (hooks.json)
+gits hook --install-opencode  # OpenCode (plugin in opencode.json config)
 ```
 
 ## Start

@@ -51,6 +51,11 @@ def main() -> None:
         action="store_true",
         help="Install the hook into ~/.codex/hooks.json and enable codex_hooks feature",
     )
+    hook_p.add_argument(
+        "--install-opencode",
+        action="store_true",
+        help="Install the session plugin into OpenCode config",
+    )
 
     # gits status
     sub.add_parser("status", help="Show current bindings")
@@ -167,6 +172,10 @@ def _cmd_hook(args: argparse.Namespace) -> None:
     if args.install_codex:
         logger.info("Hook install requested (Codex)")
         sys.exit(_install_codex_hook())
+
+    if args.install_opencode:
+        logger.info("Hook install requested (OpenCode)")
+        sys.exit(_install_opencode_plugin())
 
     # --- Normal hook processing: read JSON from stdin ---
     logger.debug("Processing hook event from stdin")
@@ -509,6 +518,84 @@ def _install_codex_hook() -> int:
         return 1
 
     print(f"Hook installed successfully in {hooks_file}")
+    return 0
+
+
+def _install_opencode_plugin() -> int:
+    """Install the GITS session plugin into OpenCode's config.
+
+    OpenCode v1.2.26+ loads plugins declared in opencode.json via the
+    ``"plugin"`` key. Directory auto-loading (``~/.config/opencode/plugins/``)
+    does NOT work as of v1.2.26 despite documentation claims.
+
+    This function:
+    1. Copies the plugin package to ``~/.config/opencode/plugins/gits-session-hook/``
+    2. Adds ``"gits-session-hook@file:<path>"`` to ``opencode.json``'s ``plugin`` array
+    """
+    from pathlib import Path
+    import shutil
+
+    # 1. Copy plugin package to a stable location
+    plugin_src = Path(__file__).parent / "plugins" / "opencode"
+    if not plugin_src.exists():
+        print(f"Plugin source not found at {plugin_src}", file=sys.stderr)
+        return 1
+
+    plugin_dest = Path.home() / ".config" / "opencode" / "plugins" / "gits-session-hook"
+    plugin_dest.mkdir(parents=True, exist_ok=True)
+
+    for filename in ("gits-session-hook.mjs", "package.json"):
+        src = plugin_src / filename
+        dst = plugin_dest / filename
+        if not src.exists():
+            print(f"Missing {src}", file=sys.stderr)
+            return 1
+        # Overwrite if content differs (update check)
+        if dst.exists() and dst.read_bytes() == src.read_bytes():
+            continue
+        shutil.copy2(src, dst)
+
+    # 2. Add plugin entry to opencode.json
+    config_dir = Path.home() / ".config" / "opencode"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "opencode.json"
+
+    config: dict = {}
+    if config_file.exists():
+        try:
+            config = json.loads(config_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Error reading {config_file}: {e}", file=sys.stderr)
+            return 1
+
+    if "plugin" not in config:
+        config["plugin"] = []
+
+    plugin_entry = f"gits-session-hook@file:{plugin_dest}"
+
+    # Check if already installed (any gits-session-hook entry)
+    for entry in config["plugin"]:
+        if isinstance(entry, str) and "gits-session-hook" in entry:
+            if entry == plugin_entry:
+                print(f"OpenCode plugin already installed in {config_file}")
+                return 0
+            # Update path if it changed
+            config["plugin"].remove(entry)
+            break
+
+    config["plugin"].append(plugin_entry)
+
+    try:
+        config_file.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+        )
+    except OSError as e:
+        print(f"Error writing {config_file}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"OpenCode plugin installed: {plugin_entry}")
+    print(f"  Plugin files: {plugin_dest}")
+    print(f"  Config: {config_file}")
     return 0
 
 

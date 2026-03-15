@@ -109,13 +109,17 @@ class Engine:
 
     @staticmethod
     def _ensure_hooks_installed() -> None:
-        """Auto-install CLI hooks (Claude, Copilot) if not already present."""
-        try:
-            from ..__main__ import _install_hook
+        """Auto-install CLI hooks for all supported CLIs."""
+        from ..__main__ import _install_hook, _install_opencode_plugin
 
-            _install_hook()
-        except Exception:
-            logger.warning("Failed to auto-install Claude hook", exc_info=True)
+        for name, installer in [
+            ("Claude", _install_hook),
+            ("OpenCode", _install_opencode_plugin),
+        ]:
+            try:
+                installer()
+            except Exception:
+                logger.warning("Failed to auto-install %s hook", name, exc_info=True)
 
     # ------------------------------------------------------------------
     # Message handler (plain text forwarding)
