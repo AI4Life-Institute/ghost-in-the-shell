@@ -116,16 +116,7 @@ gits start --dev
 | `/compact` `/clear` `/cost` `/diff` `/memory` `/context` `/usage` | Forwarded directly to the CLI |
 | `/cc <command>` | Forward any slash command to the CLI |
 
-### Permission modes
-
-`/bind` supports `default` and `bypassPermissions`. `/mode` also adds:
-
-| Mode | Behavior |
-|---|---|
-| `default` | Normal interactive — prompts require approval |
-| `bypassPermissions` | YOLO — auto-approve all operations |
-| `auto` | Auto-run tools, prompt for file edits |
-| `acceptEdits` | Auto-accept file edits |
+> **Permission modes** — `/bind` and `/mode` accept: `default` (confirm), `bypassPermissions` (YOLO), `auto` (auto-run tools), `acceptEdits` (auto-edit). `/bind` supports the first two; `/mode` supports all four.
 
 ---
 
