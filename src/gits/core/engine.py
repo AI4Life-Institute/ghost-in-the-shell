@@ -966,7 +966,7 @@ def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
     - claude: --permission-mode {mode}
     - codex: --full-auto (for bypass) or --approval-mode {mode}
     - copilot: similar to claude
-    - opencode: flags TBD
+    - opencode: no permission flags (not supported)
     """
     if cli == "codex":
         if mode == "bypassPermissions":
@@ -974,6 +974,9 @@ def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:
         elif mode == "auto":
             cmd += " --full-auto"
         # codex doesn't have fine-grained modes like acceptEdits
+    elif cli == "opencode":
+        # OpenCode has no permission mode flags — silently ignore
+        pass
     elif cli == "copilot":
         # Copilot uses similar flags to Claude
         cmd += f" --permission-mode {mode}"
