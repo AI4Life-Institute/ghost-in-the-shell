@@ -4,7 +4,7 @@
 
 # Ghost in the Shell (GITS)
 
-Control coding CLIs (Claude Code / Codex / Copilot / OpenCode) from Discord. Send messages, receive responses, handle interactive prompts, take screenshots — all from Discord.
+Control coding CLIs (Claude Code / Codex / OpenCode) from Discord. Send messages, receive responses, handle interactive prompts, take screenshots — all from Discord.
 
 ## Dependencies
 
@@ -16,7 +16,6 @@ Control coding CLIs (Claude Code / Codex / Copilot / OpenCode) from Discord. Sen
 |---|---|---|
 | Claude Code | `npm i -g @anthropic-ai/claude-code` | `gits hook --install` |
 | Codex | `npm i -g @openai/codex` | `gits hook --install-codex` |
-| Copilot CLI | `npm i -g @github/copilot-cli` | `gits hook --install-copilot` |
 | OpenCode | `curl -fsSL opencode.ai/install | bash` | `gits hook --install-opencode` |
 
 ## Install
@@ -53,7 +52,6 @@ Hooks let GITS track CLI session IDs so responses can be forwarded back to Disco
 ```bash
 gits hook --install           # Claude Code (SessionStart hook in ~/.claude/settings.json)
 gits hook --install-codex     # Codex (hooks.json + codex_hooks feature flag)
-gits hook --install-copilot   # Copilot (hooks.json)
 gits hook --install-opencode  # OpenCode (plugin in opencode.json config)
 ```
 

@@ -43,7 +43,6 @@ Polls CLI session files every 2 seconds for new assistant messages. Each CLI sto
 |---|---|---|
 | Claude | `~/.claude/projects/<dir-hash>/<session-id>.jsonl` | JSONL: `type=assistant`, `message.content` |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session-id>.jsonl` | JSONL: `type=response_item`, `payload.role=assistant` |
-| Copilot | `~/.copilot/session-state/<session-id>/events.jsonl` | JSONL: various event types |
 | OpenCode | `~/.local/share/opencode/storage/message/<session-id>/*.json` | Individual JSON files per message |
 
 The monitor tracks byte offsets per file and only reads new content. On first discovery it skips to end-of-file to avoid replaying history.
@@ -82,12 +81,7 @@ CLI starts → SessionStart hook fires
 { "hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": "gits hook", "timeout": 5 }] }] } }
 ```
 
-**Copilot** — `~/.copilot/hooks/hooks.json`:
-```json
-{ "sessionStart": [{ "type": "command", "command": "gits hook", "timeout": 5000 }] }
-```
-
-**OpenCode** — no hook support. Uses directory polling to detect new message files.
+**OpenCode** — uses a session plugin (`gits hook --install-opencode`) to write session info.
 
 ### Fallback (when hooks miss)
 
@@ -101,7 +95,6 @@ When the session ID doesn't match (e.g. CLI restarted), the JSONL monitor falls 
 |---|---|---|---|
 | Claude | `Enter` | `--permission-mode bypassPermissions` | `--permission-mode auto` |
 | Codex | `Escape Enter` | `--dangerously-bypass-approvals-and-sandbox` | `--full-auto` |
-| Copilot | `Escape Enter` | `--yolo` | `--allow-all-tools` |
 | OpenCode | `Enter` | (not supported) | (not supported) |
 
 Codex also gets `--enable codex_hooks` appended to enable hook support.
