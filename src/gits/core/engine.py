@@ -131,7 +131,11 @@ class Engine:
     # ------------------------------------------------------------------
 
     async def handle_bind(
-        self, channel_id: str, path: str | None, interaction: Any
+        self,
+        channel_id: str,
+        path: str | None,
+        interaction: Any,
+        mode: str | None = None,
     ) -> None:
         """Handle /bind — bind channel to a project directory.
 
@@ -170,6 +174,7 @@ class Engine:
                     "window_name": window_name,
                     "cli": cli,
                     "sessions": sessions,
+                    "mode": mode,
                     "created_at": time.time(),
                 }
                 msg = self._build_session_picker_message(
@@ -191,13 +196,15 @@ class Engine:
                         f"show picker. Starting fresh.",
                     )
                     await self._create_bind(
-                        channel_id, str(p), window_name, cli, interaction
+                        channel_id, str(p), window_name, cli, interaction,
+                        mode=mode,
                     )
                 return
             else:
                 # No sessions found — start fresh directly
                 await self._create_bind(
-                    channel_id, str(p), window_name, cli, interaction
+                    channel_id, str(p), window_name, cli, interaction,
+                    mode=mode,
                 )
         else:
             await self._reply(
@@ -214,13 +221,21 @@ class Engine:
         cli: str,
         interaction: Any,
         session_id: str | None = None,
+        mode: str | None = None,
     ) -> None:
         """Create a tmux window, binding, and reply with confirmation.
 
         If *session_id* is provided the CLI is launched in resume mode.
+        If *mode* is provided, adds the corresponding flag to the CLI command:
+        - ``"auto"`` → ``--allowedTools Edit,Write,... ``
+        - ``"yolo"`` → ``--dangerously-skip-permissions``
         """
         p = Path(work_dir)
         cmd = self.launcher.build_launch_command(cli=cli, session_id=session_id)
+
+        # Append permission mode flag
+        if mode and mode != "default":
+            cmd += f" --permission-mode {mode}"
 
         win = await self.tmux.create_window(
             name=window_name, cwd=str(p), command=cmd
@@ -833,6 +848,7 @@ class Engine:
             cli=pending["cli"],
             interaction=None,
             session_id=session.session_id,
+            mode=pending.get("mode"),
         )
 
         # Send confirmation via adapter since we have no interaction object
@@ -876,6 +892,7 @@ class Engine:
             window_name=pending["window_name"],
             cli=pending["cli"],
             interaction=None,
+            mode=pending.get("mode"),
         )
 
         # Send confirmation via adapter

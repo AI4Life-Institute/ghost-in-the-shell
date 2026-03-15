@@ -286,8 +286,9 @@ class DiscordAdapter(PlatformAdapter):
         @app_commands.choices(
             mode=[
                 app_commands.Choice(name="default (ask for permissions)", value="default"),
-                app_commands.Choice(name="auto-accept (accept edits automatically)", value="auto"),
-                app_commands.Choice(name="yolo (skip all permission prompts)", value="yolo"),
+                app_commands.Choice(name="acceptEdits (auto-accept edits)", value="acceptEdits"),
+                app_commands.Choice(name="auto (auto-accept most tools)", value="auto"),
+                app_commands.Choice(name="bypassPermissions / yolo (skip all prompts)", value="bypassPermissions"),
             ]
         )
         async def cmd_bind(
