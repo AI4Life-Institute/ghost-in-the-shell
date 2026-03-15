@@ -21,6 +21,7 @@ from ..base import (
     MessageCallback,
     OutgoingMessage,
     PlatformAdapter,
+    SelectOption,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,18 @@ class DiscordAdapter(PlatformAdapter):
 
         self.bot.event(self.on_interaction)
 
+        @self.bot.event
+        async def on_thread_create(thread: discord.Thread) -> None:
+            await self._handle_thread_create(thread)
+
+        @self.bot.event
+        async def on_thread_update(before: discord.Thread, after: discord.Thread) -> None:
+            await self._handle_thread_update(before, after)
+
+        @self.bot.event
+        async def on_thread_delete(thread: discord.Thread) -> None:
+            await self._handle_thread_delete(thread)
+
         # We'll register slash commands in _setup_commands()
         self._engine: Any = None  # Set by Core Engine
 
@@ -116,8 +129,12 @@ class DiscordAdapter(PlatformAdapter):
                     kwargs["file"] = discord.File(
                         io.BytesIO(msg.image), filename="screenshot.png"
                     )
-                if msg.buttons:
-                    kwargs["view"] = self._build_view(msg.buttons)
+                if msg.select_options or msg.buttons:
+                    kwargs["view"] = self._build_view(
+                        button_rows=msg.buttons,
+                        select_options=msg.select_options,
+                        select_placeholder=msg.select_placeholder,
+                    )
 
             sent = await channel.send(**kwargs)
 
@@ -140,8 +157,12 @@ class DiscordAdapter(PlatformAdapter):
         kwargs: dict[str, Any] = {}
         if msg.text is not None:
             kwargs["content"] = msg.text[:2000]
-        if msg.buttons:
-            kwargs["view"] = self._build_view(msg.buttons)
+        if msg.select_options or msg.buttons:
+            kwargs["view"] = self._build_view(
+                button_rows=msg.buttons,
+                select_options=msg.select_options,
+                select_placeholder=msg.select_placeholder,
+            )
 
         await message.edit(**kwargs)
 
@@ -239,10 +260,25 @@ class DiscordAdapter(PlatformAdapter):
             (message.content or "")[:80],
         )
 
+        # Only react and forward if this channel is bound
+        channel_id = str(message.channel.id)
+        is_bound = bool(
+            self._engine and self._engine.session_mgr.get_binding(channel_id)
+        )
+        if not is_bound:
+            await self.bot.process_commands(message)
+            return
+
+        # React 👀 to acknowledge we received the message
+        try:
+            await message.add_reaction("👀")
+        except Exception:
+            logger.debug("Failed to add 👀 reaction")
+
         # Convert to IncomingMessage
         incoming = IncomingMessage(
             platform="discord",
-            channel_id=str(message.channel.id),
+            channel_id=channel_id,
             user_id=str(message.author.id),
             text=message.content or None,
             image_paths=[],  # TODO: handle attachments
@@ -256,20 +292,103 @@ class DiscordAdapter(PlatformAdapter):
             except Exception:
                 logger.exception("Message callback error")
 
+        # React ⚙️ after forwarding to tmux
+        try:
+            await message.add_reaction("⚙️")
+        except Exception:
+            logger.debug("Failed to add ⚙️ reaction")
+
         # Let commands.Bot process prefix commands (e.g. !bash)
         await self.bot.process_commands(message)
 
+    async def _handle_thread_create(self, thread: discord.Thread) -> None:
+        """Handle a new thread being created in a bound channel.
+
+        If the parent channel has an active binding and this thread
+        was NOT created by the bot itself, auto-create a child session.
+        """
+        if not self._engine:
+            return
+
+        # Ignore threads created by the bot (e.g. from /thread or /fork)
+        if thread.owner_id == self.bot.user.id:
+            return
+
+        # Check access
+        guild_id = thread.guild.id if thread.guild else None
+        if thread.owner_id and not self._check_access(thread.owner_id, guild_id):
+            return
+
+        parent_id = str(thread.parent_id) if thread.parent_id else None
+        if not parent_id:
+            return
+
+        # Get starter message
+        starter_message = ""
+        try:
+            if thread.starter_message:
+                starter_message = thread.starter_message.content or ""
+            else:
+                # Fetch it
+                starter = await thread.fetch_message(thread.id)
+                starter_message = starter.content or ""
+        except Exception:
+            logger.debug("Could not fetch starter message for thread %s", thread.id)
+
+        try:
+            await self._engine.handle_thread_auto(
+                thread_id=str(thread.id),
+                parent_channel_id=parent_id,
+                starter_message=starter_message,
+            )
+        except Exception:
+            logger.exception("Failed to auto-create session for thread %s", thread.id)
+
+    async def _handle_thread_update(
+        self, before: discord.Thread, after: discord.Thread
+    ) -> None:
+        """Kill session when a thread is archived."""
+        if not self._engine:
+            return
+        if not before.archived and after.archived:
+            thread_id = str(after.id)
+            try:
+                await self._engine._kill_single(thread_id)
+            except Exception:
+                logger.debug("Failed to kill session for archived thread %s", thread_id)
+
+    async def _handle_thread_delete(self, thread: discord.Thread) -> None:
+        """Kill session when a thread is deleted."""
+        if not self._engine:
+            return
+        thread_id = str(thread.id)
+        try:
+            await self._engine._kill_single(thread_id)
+        except Exception:
+            logger.debug("Failed to kill session for deleted thread %s", thread_id)
+
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Handle button interactions."""
+        """Handle button and select menu interactions."""
         if interaction.type != discord.InteractionType.component:
             return
 
         if not interaction.data:
             return
 
-        custom_id = interaction.data.get("custom_id", "")
-        if not custom_id:
-            return
+        # component_type: 2 = button, 3 = select menu
+        component_type = interaction.data.get("component_type", 2)
+
+        if component_type == 3:
+            # Select menu — use the selected value as callback_data
+            values = interaction.data.get("values", [])
+            if not values:
+                return
+            callback_data = values[0]
+        else:
+            # Button
+            callback_data = interaction.data.get("custom_id", "")
+            if not callback_data:
+                return
 
         # Acknowledge the interaction
         await interaction.response.defer()
@@ -279,7 +398,7 @@ class DiscordAdapter(PlatformAdapter):
 
         for cb in self._button_callbacks:
             try:
-                await cb(channel_id, user_id, custom_id)
+                await cb(channel_id, user_id, callback_data)
             except Exception:
                 logger.exception("Button callback error")
 
@@ -348,15 +467,32 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), interaction
                 )
 
-        @tree.command(name="fork", description="Create a sub-task thread")
+        @tree.command(name="thread", description="Create a thread with a new session (shared directory)")
+        @app_commands.describe(
+            message="Initial message to send to the new session",
+        )
+        async def cmd_thread(
+            interaction: discord.Interaction,
+            message: str,
+        ):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_thread(
+                    str(interaction.channel_id), message, interaction
+                )
+
+        @tree.command(name="fork", description="Create a thread with isolated git worktree")
         @app_commands.describe(
             title="Thread title",
-            subdir="Optional subdirectory (relative to project root)",
         )
         async def cmd_fork(
             interaction: discord.Interaction,
             title: str,
-            subdir: str | None = None,
         ):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
@@ -366,7 +502,7 @@ class DiscordAdapter(PlatformAdapter):
             await interaction.response.defer()
             if self._engine:
                 await self._engine.handle_fork(
-                    str(interaction.channel_id), title, subdir, interaction
+                    str(interaction.channel_id), title, interaction
                 )
 
         @tree.command(name="screenshot", description="Take a terminal screenshot")
@@ -639,16 +775,42 @@ class DiscordAdapter(PlatformAdapter):
     # Button builder
     # ------------------------------------------------------------------
 
-    def _build_view(self, button_rows: list[list[Button]]) -> discord.ui.View:
-        """Convert our Button model to a discord.py View."""
+    def _build_view(
+        self,
+        button_rows: list[list[Button]] | None = None,
+        select_options: list[SelectOption] | None = None,
+        select_placeholder: str | None = None,
+    ) -> discord.ui.View:
+        """Convert our Button/SelectOption models to a discord.py View."""
         view = discord.ui.View(timeout=None)
-        for row in button_rows:
-            for btn in row:
-                view.add_item(
-                    discord.ui.Button(
-                        label=btn.label,
-                        custom_id=btn.callback_data,
-                        style=discord.ButtonStyle.secondary,
-                    )
+
+        # Add Select Menu first (appears above buttons in Discord)
+        if select_options:
+            opts = [
+                discord.SelectOption(
+                    label=opt.label[:100],
+                    value=opt.value[:100],
+                    description=(opt.description[:100] if opt.description else None),
                 )
+                for opt in select_options[:25]  # Discord max 25
+            ]
+            select = discord.ui.Select(
+                placeholder=(select_placeholder or "Select an option…")[:150],
+                options=opts,
+                custom_id="session_picker",
+            )
+            view.add_item(select)
+
+        # Add buttons below
+        if button_rows:
+            for row in button_rows:
+                for btn in row:
+                    view.add_item(
+                        discord.ui.Button(
+                            label=btn.label,
+                            custom_id=btn.callback_data,
+                            style=discord.ButtonStyle.secondary,
+                        )
+                    )
+
         return view
