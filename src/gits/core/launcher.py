@@ -119,16 +119,17 @@ class CodingCLILauncher:
             try:
                 stat = jsonl_file.stat()
                 session_id = jsonl_file.stem
-                # Read first line for summary
+                # Find the first user message for summary
                 summary = ""
                 msg_count = 0
                 with open(jsonl_file) as f:
                     for line in f:
                         msg_count += 1
-                        if msg_count == 1:
+                        if not summary:
                             try:
                                 data = json.loads(line)
-                                if "message" in data:
+                                # Look for the first user message as summary
+                                if data.get("type") == "user" and "message" in data:
                                     content = data["message"].get("content", "")
                                     if isinstance(content, list):
                                         for block in content:
@@ -136,12 +137,16 @@ class CodingCLILauncher:
                                                 isinstance(block, dict)
                                                 and block.get("type") == "text"
                                             ):
-                                                summary = block.get("text", "")[:60]
+                                                summary = block.get("text", "")[:80]
                                                 break
                                     elif isinstance(content, str):
-                                        summary = content[:60]
+                                        summary = content[:80]
                             except json.JSONDecodeError:
                                 pass
+
+                # Collapse whitespace for clean single-line display
+                if summary:
+                    summary = " ".join(summary.split())
 
                 sessions.append(
                     CLISession(

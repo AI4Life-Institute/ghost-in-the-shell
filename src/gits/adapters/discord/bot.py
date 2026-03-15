@@ -279,8 +279,22 @@ class DiscordAdapter(PlatformAdapter):
         # ── A. Native Commands ────────────────────────────────────────
 
         @tree.command(name="bind", description="Bind this channel to a project directory")
-        @app_commands.describe(path="Project directory path")
-        async def cmd_bind(interaction: discord.Interaction, path: str):
+        @app_commands.describe(
+            path="Project directory path",
+            mode="Permission mode for Claude Code",
+        )
+        @app_commands.choices(
+            mode=[
+                app_commands.Choice(name="default (ask for permissions)", value="default"),
+                app_commands.Choice(name="auto-accept (accept edits automatically)", value="auto"),
+                app_commands.Choice(name="yolo (skip all permission prompts)", value="yolo"),
+            ]
+        )
+        async def cmd_bind(
+            interaction: discord.Interaction,
+            path: str,
+            mode: str | None = None,
+        ):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
                     "Access denied.", ephemeral=True
@@ -289,7 +303,7 @@ class DiscordAdapter(PlatformAdapter):
             await interaction.response.defer()
             if self._engine:
                 await self._engine.handle_bind(
-                    str(interaction.channel_id), path, interaction
+                    str(interaction.channel_id), path, interaction, mode=mode
                 )
 
         @cmd_bind.autocomplete("path")
