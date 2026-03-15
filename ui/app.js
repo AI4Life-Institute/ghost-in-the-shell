@@ -319,6 +319,10 @@ let slashMenuOpen = false;
 let toastTimer = null;
 let skillRunExpanded = {}; // tracks which run history entries are expanded
 
+// Runner Agent state (from backend agents_list / skills_list events)
+let runnerAgents = {}; // skill_name → most recent run object
+let skillDefs = {};    // skill_name → skill definition object (trigger, steps, on_failure, guard)
+
 // ── Utility ───────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -882,6 +886,195 @@ function _mockBrowserScreen(a) {
   </div>`;
 }
 
+// ── Runner Agent cards (task 6.1–6.6) ──────────────────────────────────────
+
+/**
+ * Build HTML for a single Runner Agent card from a run object.
+ * run: { skill_name, status, started_at, finished_at, run_id, ... }
+ */
+function renderRunnerCard(run) {
+  const name = run.skill_name || 'Unknown Skill';
+
+  // Status dot color: green=success, red=failed, yellow=running, orange=guarded
+  const dotColorMap = {
+    success: '#22c55e',
+    done:    '#22c55e',
+    failed:  '#ef4444',
+    fail:    '#ef4444',
+    running: '#eab308',
+    guarded: '#f97316',
+  };
+  const dotColor = dotColorMap[run.status] || 'rgba(0,0,0,.25)';
+
+  // Badge label
+  const badgeMap = {
+    success: ['fleet-badge-done',    '✓ Success'],
+    done:    ['fleet-badge-done',    '✓ Done'],
+    failed:  ['fleet-badge-waiting', '✗ Failed'],
+    fail:    ['fleet-badge-waiting', '✗ Failed'],
+    running: ['fleet-badge-running', '▶ Running'],
+    guarded: ['fleet-badge-waiting', '⚠ Guarded'],
+  };
+  const [badgeCls, badgeTxt] = badgeMap[run.status] || ['fleet-badge-idle', run.status || '—'];
+
+  // Last run time
+  let lastRunTxt = '—';
+  if (run.started_at) {
+    try {
+      const d = new Date(run.started_at);
+      lastRunTxt = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+    } catch(e) {
+      lastRunTxt = run.started_at;
+    }
+  }
+
+  // Duration
+  let durationTxt = '';
+  if (run.started_at && run.finished_at) {
+    try {
+      const dur = Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000);
+      durationTxt = ` · ${dur}s`;
+    } catch(e) {}
+  }
+
+  // Trigger badge from skillDefs
+  const sk = skillDefs[name];
+  let triggerBadge = '';
+  if (sk && sk.trigger) {
+    const ttype = (sk.trigger.type || sk.trigger).toLowerCase();
+    const trigLabel = ttype === 'loop' ? 'Loop' : ttype === 'reactive' ? 'Reactive' : sk.trigger.type || sk.trigger;
+    triggerBadge = `<span class="runner-trigger-badge runner-trigger-${ttype}">${trigLabel}</span>`;
+  }
+
+  const isPaused = run._paused === true;
+
+  return `<div class="fleet-card runner-card ${run.status || 'idle'}" onclick="openRunnerDrawer(this,'${esc(name)}')">
+    <div class="fleet-card-top">
+      <div class="fleet-card-name" style="display:flex;align-items:center;gap:6px">
+        <span class="runner-status-dot" style="background:${dotColor};width:8px;height:8px;border-radius:50%;flex-shrink:0;display:inline-block"></span>
+        ${esc(name)}
+      </div>
+      <div class="fleet-card-badge ${badgeCls}">${badgeTxt}</div>
+    </div>
+    <div class="fleet-card-sub">Last run: ${lastRunTxt}${durationTxt}</div>
+    <div style="display:flex;align-items:center;gap:5px;margin-top:4px">
+      <div class="fleet-card-type">Runner Agent</div>
+      ${triggerBadge}
+    </div>
+    <div class="runner-card-actions" onclick="event.stopPropagation()">
+      <button class="runner-btn" onclick="runnerRunNow('${esc(name)}')">▶ Run Now</button>
+      <button class="runner-btn runner-btn-sec" onclick="runnerTogglePause('${esc(name)}',this)">
+        ${isPaused ? '▶ Resume' : '⏸ Pause'}
+      </button>
+    </div>
+  </div>`;
+}
+
+/** Render all runner agent cards into the runner-grid section */
+function renderRunnerGrid() {
+  const grid = document.getElementById('runner-grid');
+  if (!grid) return;
+  const runs = Object.values(runnerAgents);
+  if (runs.length === 0) {
+    grid.innerHTML = '<div style="font-size:12px;color:rgba(0,0,0,.35);padding:6px 0;font-style:italic">No runner agents yet.</div>';
+    return;
+  }
+  grid.innerHTML = runs.map(renderRunnerCard).join('');
+}
+
+/** Open the fleet drawer for a runner agent — shows log panel */
+function openRunnerDrawer(el, skillName) {
+  document.querySelectorAll('.fleet-card').forEach(c => c.classList.remove('on'));
+  if (el) el.classList.add('on');
+
+  const run = runnerAgents[skillName];
+  const drawer = document.getElementById('fleet-drawer');
+  const titleEl = document.getElementById('fleet-drawer-title');
+  const bodyEl = document.getElementById('fleet-drawer-body');
+  if (!drawer || !bodyEl) return;
+
+  drawer.classList.add('on');
+  if (titleEl) titleEl.textContent = skillName + ' · Runner Agent';
+
+  const sk = skillDefs[skillName];
+  let metaRows = '';
+  if (sk) {
+    const ttype = sk.trigger ? (sk.trigger.type || sk.trigger) : '—';
+    const onFail = sk.on_failure || '—';
+    const guard = sk.guard ? (sk.guard.enabled ? '✓ Enabled' : '✗ Disabled') : '—';
+    const steps = Array.isArray(sk.steps) ? sk.steps.length : '—';
+    metaRows = `
+      <div class="runner-meta-row">
+        <span class="runner-meta-key">Trigger</span><span class="runner-meta-val">${esc(String(ttype))}</span>
+        <span class="runner-meta-key">On failure</span><span class="runner-meta-val">${esc(String(onFail))}</span>
+        <span class="runner-meta-key">Guard</span><span class="runner-meta-val">${esc(String(guard))}</span>
+        <span class="runner-meta-key">Steps</span><span class="runner-meta-val">${esc(String(steps))}</span>
+      </div>`;
+  }
+
+  const runId = run ? run.run_id : null;
+  const logPanelId = 'runner-log-panel-' + skillName.replace(/[^a-z0-9]/gi, '_');
+
+  bodyEl.innerHTML = `
+    <div class="drawer-col-left">
+      <div class="ag-run-bar">
+        <div class="ag-run-status">${run ? esc(run.status || '—') : 'No runs yet'}</div>
+      </div>
+      ${metaRows}
+      <div class="ag-actions">
+        <button class="ag-btn" onclick="runnerRunNow('${esc(skillName)}')">▶ Run Now</button>
+        <button class="ag-btn" onclick="runnerTogglePauseById('${esc(skillName)}')">⏸ Pause / ▶ Resume</button>
+      </div>
+    </div>
+    <div class="drawer-col-right">
+      <div class="ag-log-hd">— Live Log</div>
+      <div class="ag-log-scroll runner-log-scroll" id="${logPanelId}">
+        <div style="color:rgba(0,0,0,.30);font-size:12px;padding:8px 0">Fetching log…</div>
+      </div>
+    </div>`;
+
+  // Request log from backend (task 6.4)
+  if (window.ghost && skillName && runId) {
+    window.ghost.send('agent_log', { skill_name: skillName, run_id: runId });
+  } else {
+    // No backend — show placeholder
+    const lp = document.getElementById(logPanelId);
+    if (lp) lp.innerHTML = '<div style="color:rgba(0,0,0,.30);font-size:12px;padding:8px 0">No log available (not connected to backend).</div>';
+  }
+}
+
+/** Send skill_run IPC command */
+function runnerRunNow(skillName) {
+  if (window.ghost) {
+    window.ghost.send('skill_run', { skill_name: skillName });
+    showToast(`▶ Running "${skillName}"…`);
+  } else {
+    showToast(`▶ Run Now: ${skillName} (no backend connected)`);
+  }
+}
+
+/** Toggle pause/resume for a runner agent */
+function runnerTogglePause(skillName, btn) {
+  const run = runnerAgents[skillName];
+  if (!run) return;
+  const wasPaused = run._paused === true;
+  run._paused = !wasPaused;
+  if (btn) btn.textContent = run._paused ? '▶ Resume' : '⏸ Pause';
+  if (window.ghost) {
+    window.ghost.send(run._paused ? 'skill_pause' : 'skill_resume', { skill_name: skillName });
+    showToast(run._paused ? `⏸ Paused "${skillName}"` : `▶ Resumed "${skillName}"`);
+  } else {
+    showToast((run._paused ? '⏸ Paused ' : '▶ Resumed ') + skillName + ' (no backend)');
+  }
+}
+
+function runnerTogglePauseById(skillName) {
+  const run = runnerAgents[skillName];
+  if (!run) return;
+  runnerTogglePause(skillName, null);
+  renderRunnerGrid();
+}
+
 // ── Data file tree ──────────────────────────────────────────────────────────
 function _findDataNode(nodes, id) {
   for (const n of nodes) {
@@ -1119,6 +1312,46 @@ function runSkill(id) {
     if (streamPanel) { streamPanel.appendChild(d); streamPanel.scrollTop = streamPanel.scrollHeight; }
     i++;
   }, 350);
+}
+
+// ── Skills Panel — runner skill cards (tasks 7.1–7.3) ──────────────────────
+
+/**
+ * Render Skill cards from the backend skills_list into #runner-skills-list.
+ * Each card shows: trigger badge, on_failure policy, guard status, step count.
+ */
+function renderSkillPanel(skills) {
+  const container = document.getElementById('runner-skills-list');
+  if (!container) return;
+  if (!skills || skills.length === 0) {
+    container.innerHTML = '<div style="font-size:12px;color:rgba(0,0,0,.35);padding:8px 0;font-style:italic">No skills loaded from ~/.gits/skills/.</div>';
+    return;
+  }
+  container.innerHTML = skills.map(sk => {
+    const name = sk.name || '—';
+    const ttype = sk.trigger ? ((sk.trigger.type || sk.trigger) + '').toLowerCase() : 'unknown';
+    const trigLabel = ttype === 'loop' ? 'Loop' : ttype === 'reactive' ? 'Reactive' : ttype;
+    const onFail = sk.on_failure || '—';
+    const guardEnabled = sk.guard ? !!sk.guard.enabled : false;
+    const guardTxt = guardEnabled ? '✓ Guard on' : '✗ Guard off';
+    const stepCount = Array.isArray(sk.steps) ? sk.steps.length : 0;
+    const stepsHtml = Array.isArray(sk.steps) && sk.steps.length > 0
+      ? sk.steps.map((s, i) => `<div class="runner-step-item">${i+1}. ${esc(s.tool || s.name || s.cmd || String(s))}</div>`).join('')
+      : '<div class="runner-step-item" style="color:rgba(0,0,0,.32)">No steps defined</div>';
+
+    return `<div class="runner-skill-card">
+      <div class="runner-skill-card-head">
+        <div class="runner-skill-name">${esc(name)}</div>
+        <span class="runner-trigger-badge runner-trigger-${ttype}">${trigLabel}</span>
+      </div>
+      <div class="runner-skill-meta">
+        <span class="runner-meta-chip">On fail: ${esc(String(onFail))}</span>
+        <span class="runner-meta-chip${guardEnabled ? ' runner-meta-chip-on' : ''}">${guardTxt}</span>
+        <span class="runner-meta-chip">${stepCount} step${stepCount !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="runner-steps-list">${stepsHtml}</div>
+    </div>`;
+  }).join('');
 }
 
 // ── New Skill Modal (task 1.27) ─────────────────────────────────────────────
@@ -1359,7 +1592,9 @@ document.addEventListener('click', e => {
 // works unchanged in both runtimes. Runs only when window.__TAURI__ is present.
 (function installTauriShim() {
   if (window.ghost || !window.__TAURI__) return;
-  const { invoke, event: tauriEvent } = window.__TAURI__;
+  // Tauri v2: invoke lives at window.__TAURI__.core.invoke
+  const invoke = window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke;
+  const tauriEvent = window.__TAURI__.event;
 
   window.ghost = {
     send(cmd, payload = {}) {
@@ -1552,7 +1787,7 @@ function initPtyTerminal(idx, channelId) {
   term.onData((data) => {
     if (window.__TAURI__) {
       const encoded = btoa(data);
-      window.__TAURI__.invoke('pty_input', { channel_id: channelId, data: encoded });
+      (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('pty_input', { channel_id: channelId, data: encoded });
     }
   });
 
@@ -1561,7 +1796,7 @@ function initPtyTerminal(idx, channelId) {
   if (binding && window.__TAURI__) {
     const rows = term.rows;
     const cols = term.cols;
-    window.__TAURI__.invoke('open_pty', {
+    (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('open_pty', {
       channel_id: channelId,
       tmux_session: tmuxSession,
       window_id: binding.window_id,
@@ -1574,7 +1809,7 @@ function initPtyTerminal(idx, channelId) {
   const resizeObserver = new ResizeObserver(() => {
     fitAddon.fit();
     if (window.__TAURI__ && term.rows && term.cols) {
-      window.__TAURI__.invoke('resize_pty', {
+      (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('resize_pty', {
         channel_id: channelId,
         rows: term.rows,
         cols: term.cols,
@@ -1595,10 +1830,14 @@ function ghostSetup() {
 
   window.ghost.on('ready', () => {
     window.ghost.send('sessions');
+    window.ghost.send('agents', {});
+    window.ghost.send('skills', {});
   });
 
-  // Request sessions immediately in case ready already fired
+  // Request sessions, agents, and skills immediately in case ready already fired
   window.ghost.send('sessions');
+  window.ghost.send('agents', {});
+  window.ghost.send('skills', {});
 
   window.ghost.on('sessions', (data) => {
     allSessions = data.sessions || [];
@@ -1646,6 +1885,57 @@ function ghostSetup() {
         }
       }
     }
+  });
+
+  // agents_list: group runs by skill_name, keep most recent per skill (task 6.1)
+  window.ghost.on('agents_list', (data) => {
+    const runs = data.runs || [];
+    runnerAgents = {};
+    runs.forEach(run => {
+      const key = run.skill_name;
+      if (!key) return;
+      const existing = runnerAgents[key];
+      if (!existing) {
+        runnerAgents[key] = run;
+      } else {
+        // Keep most recent by started_at
+        const existingTs = existing.started_at ? new Date(existing.started_at).getTime() : 0;
+        const newTs = run.started_at ? new Date(run.started_at).getTime() : 0;
+        if (newTs > existingTs) runnerAgents[key] = run;
+      }
+    });
+    renderRunnerGrid();
+    updateAgentBadge();
+  });
+
+  // skills_list: render Skill cards in the runner section and Skills panel (tasks 7.1–7.3)
+  window.ghost.on('skills_list', (data) => {
+    const skills = data.skills || [];
+    skillDefs = {};
+    skills.forEach(sk => {
+      if (sk.name) skillDefs[sk.name] = sk;
+    });
+    renderRunnerGrid();
+    renderSkillPanel(skills);
+  });
+
+  // agent_log: append lines to the open runner drawer's log panel (task 6.4)
+  window.ghost.on('agent_log', (data) => {
+    const skillName = data.skill_name;
+    if (!skillName) return;
+    const logPanelId = 'runner-log-panel-' + skillName.replace(/[^a-z0-9]/gi, '_');
+    const lp = document.getElementById(logPanelId);
+    if (!lp) return;
+    const line = data.line || data.text || '';
+    if (!line) return;
+    // Clear placeholder on first real line
+    if (lp.querySelector('div[style]')) lp.innerHTML = '';
+    const d = document.createElement('div');
+    d.className = 'ag-log-row';
+    d.style.cssText = 'font-size:11.5px;font-family:monospace;color:rgba(0,0,0,.7);padding:2px 0;border-bottom:1px solid rgba(0,0,0,.04)';
+    d.textContent = line;
+    lp.appendChild(d);
+    lp.scrollTop = lp.scrollHeight;
   });
 
   // PTY output → xterm.js write

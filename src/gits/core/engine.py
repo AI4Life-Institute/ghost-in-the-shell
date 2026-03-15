@@ -15,6 +15,7 @@ from typing import Any
 
 from ..adapters.base import Button, IncomingMessage, OutgoingMessage, SelectOption
 from ..config import Settings
+from .guard import GuardHandler
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
 from .launcher import CLISession, CodingCLILauncher
@@ -61,6 +62,9 @@ class Engine:
             poll_interval=settings.jsonl_poll_interval,
         )
 
+        # Guard handler (initialized in start())
+        self.guard: GuardHandler | None = None
+
         # Platform adapter (set externally)
         self._adapter: Any = None
 
@@ -80,6 +84,14 @@ class Engine:
         self._ensure_hooks_installed()
 
         await self.tmux.ensure_session()
+
+        # Initialize guard handler for ops session
+        from .skill_loader import SkillLoader
+        loader = SkillLoader()
+        ops_session = loader.load_ops_session()
+        self.guard = GuardHandler(tmux=self.tmux, ops_session=ops_session)
+        await self.guard.ensure_ops_session()
+
         await self.health.start()
 
         # Register health recovery callback
@@ -105,6 +117,17 @@ class Engine:
         await self.health.stop()
         # Cancel all message drainer tasks
         logger.info("Engine stopped")
+
+    async def inject_message(self, session_name: str, text: str) -> None:
+        """Inject text into a named tmux session (for Guard and other uses)."""
+        from .guard import _get_session_window
+        window_id = await asyncio.to_thread(
+            lambda: _get_session_window(session_name)
+        )
+        if window_id:
+            await self.tmux.send_text(window_id, text, submit_keys="\n")
+        else:
+            logger.warning("inject_message: no window found for session %s", session_name)
 
     # ------------------------------------------------------------------
     # Hook auto-install
@@ -751,6 +774,8 @@ class Engine:
                 resume_cmd = templates["by_id"].format(id=binding.cli_session_id)
             else:
                 resume_cmd = f"{cli} --resume {binding.cli_session_id}"
+            if binding.permission_mode and binding.permission_mode != "default":
+                resume_cmd = _append_permission_flag(resume_cmd, cli, binding.permission_mode)
             lines.append(f"\n**Resume:**\n```\ncd {binding.work_dir}\n{resume_cmd}\n```")
 
         await self._reply(interaction, "\n".join(lines))

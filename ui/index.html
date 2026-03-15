@@ -358,6 +358,15 @@
             <div class="fleet-grid" id="reactive-grid"><!-- filled by JS --></div>
           </div>
 
+          <!-- Runner Agents (from SkillRunner backend) -->
+          <div class="fleet-section">
+            <div class="fleet-section-hd">
+              <div class="fleet-section-lbl">🛠 Runner</div>
+              <div class="fleet-section-sub">Skill-backed · scheduled or reactive · managed by SkillRunner</div>
+            </div>
+            <div class="fleet-grid" id="runner-grid"><!-- filled by JS --></div>
+          </div>
+
         </div>
 
         <!-- Agent detail drawer (slides up from bottom) -->
@@ -415,6 +424,17 @@
         <!-- Skill detail -->
         <div class="sk-detail" id="sk-detail">
           <!-- filled by JS -->
+        </div>
+
+        <!-- Runner Skills panel (from backend skills_list) -->
+        <div class="runner-skills-panel" id="runner-skills-panel">
+          <div class="runner-skills-panel-head">
+            <div class="runner-skills-panel-title">🛠 Runner Skills</div>
+            <div class="runner-skills-panel-sub">Loaded from ~/.gits/skills/ · scheduled &amp; reactive</div>
+          </div>
+          <div class="runner-skills-list" id="runner-skills-list">
+            <div style="font-size:12px;color:rgba(0,0,0,.35);padding:8px 0;font-style:italic">Connect to backend to load skills.</div>
+          </div>
         </div>
 
       </div><!-- /#view-skill -->

@@ -749,6 +749,7 @@ def _cmd_desktop(args: argparse.Namespace) -> None:
 
     async def _run() -> None:
         loop = asyncio.get_event_loop()
+        skill_runner: Any = None
 
         def _emit(obj: dict) -> None:
             """Write a JSON event to stdout (Electron picks this up)."""
@@ -772,6 +773,24 @@ def _cmd_desktop(args: argparse.Namespace) -> None:
             await engine.start()
         finally:
             sys.stdout = _old_stdout
+
+        # Start SkillRunner
+        from .core.skill_loader import SkillLoader
+        from .core.skill_runner import SkillRunner
+        from .storage.db import DEFAULT_DB_PATH
+
+        _loader = SkillLoader()
+        _tools = _loader.load_tools()
+        _skills = _loader.load_skills(_tools)
+        _shell_env = _loader.get_shell_env()
+        _loader.load_ops_session()
+
+        skill_runner = SkillRunner(
+            emit_fn=_emit,
+            db_path=DEFAULT_DB_PATH,
+        )
+        skill_runner.load(_skills, tools=_tools, shell_env=_shell_env)
+        await skill_runner.start()
 
         # Emit ready + initial session list
         _emit({"event": "ready", "version": _get_version()})
@@ -843,6 +862,45 @@ def _cmd_desktop(args: argparse.Namespace) -> None:
                         else:
                             _emit({"event": "error", "msg": "button requires channel_id and callback_data"})
 
+                    elif cmd == "skills":
+                        # Scan ~/.gits/skills/*.md → emit skills_list
+                        asyncio.ensure_future(_handle_skills(skill_runner, _emit))
+
+                    elif cmd == "agents":
+                        # Query runs from DB → emit agents_list
+                        asyncio.ensure_future(_handle_agents(_emit))
+
+                    elif cmd == "skill_run":
+                        skill_name = payload.get("skill_name", "")
+                        if skill_name and skill_runner:
+                            asyncio.ensure_future(skill_runner.run_now(skill_name))
+                        else:
+                            _emit({"event": "error", "msg": "skill_run requires skill_name"})
+
+                    elif cmd == "skill_pause":
+                        skill_name = payload.get("skill_name", "")
+                        if skill_name and skill_runner:
+                            skill_runner.pause(skill_name)
+                            _emit({"event": "skill_paused", "skill_name": skill_name})
+                        else:
+                            _emit({"event": "error", "msg": "skill_pause requires skill_name"})
+
+                    elif cmd == "skill_resume":
+                        skill_name = payload.get("skill_name", "")
+                        if skill_name and skill_runner:
+                            skill_runner.resume(skill_name)
+                            _emit({"event": "skill_resumed", "skill_name": skill_name})
+                        else:
+                            _emit({"event": "error", "msg": "skill_resume requires skill_name"})
+
+                    elif cmd == "agent_log":
+                        skill_name = payload.get("skill_name", "")
+                        run_id = payload.get("run_id", "")
+                        if skill_name:
+                            asyncio.ensure_future(_handle_agent_log(skill_name, run_id, _emit))
+                        else:
+                            _emit({"event": "error", "msg": "agent_log requires skill_name"})
+
                     else:
                         _emit({"event": "error", "msg": f"Unknown command: {cmd}"})
 
@@ -850,6 +908,8 @@ def _cmd_desktop(args: argparse.Namespace) -> None:
                     logger.exception("Desktop: error handling cmd %s", cmd)
                     _emit({"event": "error", "cmd": cmd, "msg": str(exc)})
         finally:
+            if skill_runner:
+                await skill_runner.stop()
             await engine.stop()
 
     try:
@@ -912,6 +972,59 @@ def _get_version() -> str:
         return __version__
     except ImportError:
         return "unknown"
+
+
+async def _handle_skills(skill_runner: Any, emit_fn: Any) -> None:
+    from .core.skill_loader import SkillLoader
+    loader = SkillLoader()
+    tools = loader.load_tools()
+    skills = loader.load_skills(tools)
+    emit_fn({
+        "event": "skills_list",
+        "skills": [
+            {
+                "name": s.name,
+                "description": s.description,
+                "trigger": "loop" if s.loop else "reactive",
+                "on_failure": s.on_failure,
+                "guard_enabled": s.guard.enabled,
+                "steps": len(s.steps),
+                "paused": skill_runner._paused.__contains__(s.name) if skill_runner else False,
+            }
+            for s in skills.values()
+        ]
+    })
+
+
+async def _handle_agents(emit_fn: Any) -> None:
+    from .storage.db import RunsDB, DEFAULT_DB_PATH
+    try:
+        async with RunsDB(DEFAULT_DB_PATH) as db:
+            runs = await db.query_runs(limit=100)
+        emit_fn({"event": "agents_list", "runs": runs})
+    except Exception as exc:
+        emit_fn({"event": "agents_list", "runs": [], "error": str(exc)})
+
+
+async def _handle_agent_log(skill_name: str, run_id: str, emit_fn: Any) -> None:
+    from pathlib import Path
+    agents_dir = Path.home() / ".gits" / "agents"
+    if run_id:
+        safe_id = run_id.replace(":", "-")
+        log_file = agents_dir / skill_name / f"{safe_id}.log"
+    else:
+        log_file = agents_dir / skill_name / "current.log"
+
+    if not log_file.exists():
+        emit_fn({"event": "agent_log", "skill_name": skill_name, "run_id": run_id, "line": None, "eof": True})
+        return
+
+    try:
+        for line in log_file.read_text().splitlines():
+            emit_fn({"event": "agent_log", "skill_name": skill_name, "run_id": run_id, "line": line})
+        emit_fn({"event": "agent_log", "skill_name": skill_name, "run_id": run_id, "line": None, "eof": True})
+    except OSError as exc:
+        emit_fn({"event": "error", "msg": f"agent_log: {exc}"})
 
 
 if __name__ == "__main__":
