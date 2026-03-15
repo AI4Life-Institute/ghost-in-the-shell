@@ -9,18 +9,92 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
-      - name: Install dependencies
-        run: uv sync --extra dev
-
       - name: Install tmux
         run: sudo apt-get install -y tmux
 
       - name: Run tests
-        run: uv run pytest --tb=short -q --cov=gits --cov-report=term-missing
+        run: uv sync --extra dev && uv run pytest --tb=short -q --cov=gits --cov-report=term-missing
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    # Only run on master push (not PRs)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history for tags
+
+      - name: Check if version changed
+        id: version
+        run: |
+          VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists — skipping release."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version v${VERSION} detected — releasing."
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag & create GitHub Release
+        if: steps.version.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --generate-notes
+
+      - name: Compute tarball sha256
+        if: steps.version.outputs.new == 'true'
+        id: meta
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz"
+          sleep 5
+          SHA=$(curl -fsSL "$URL" | shasum -a 256 | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "url=$URL"    >> "$GITHUB_OUTPUT"
+
+      - name: Update homebrew-tap
+        if: steps.version.outputs.new == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA="${{ steps.meta.outputs.sha256 }}"
+          URL="${{ steps.meta.outputs.url }}"
+
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TAP_DEPLOY_KEY }}" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          echo "Host github-tap
+            HostName github.com
+            IdentityFile ~/.ssh/tap_key
+            StrictHostKeyChecking no" >> ~/.ssh/config
+
+          git clone git@github-tap:AI4Life-Institute/homebrew-tap.git tap
+          cd tap
+
+          sed -i "s|url \".*archive.*\"|url \"${URL}\"|"  Formula/ghost.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|"     Formula/ghost.rb
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ghost.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "ghost ${VERSION}"
+          git push

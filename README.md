@@ -47,12 +47,16 @@ Watch your AI write code, review its terminal output, and approve permission pro
 **1. Install**
 
 ```bash
-git clone https://github.com/AI4Life-Institute/ghost-in-the-shell.git
-cd ghost-in-the-shell
-uv sync
+curl -fsSL https://raw.githubusercontent.com/AI4Life-Institute/ghost-in-the-shell/main/install.sh | bash
 ```
 
-System requirements: Python >= 3.12, tmux, uv
+Or via Homebrew:
+
+```bash
+brew install ai4life/tap/ghost
+```
+
+> The install script handles uv and tmux automatically. Python >= 3.12 is required.
 
 **2. Install a coding CLI (at least one)**
 
