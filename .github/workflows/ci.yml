@@ -17,7 +17,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --extra dev
 
       - name: Install tmux
         run: sudo apt-get install -y tmux
