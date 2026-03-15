@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" width="200" alt="Ghost in the Shell">
+</p>
+
 # Ghost in the Shell (GITS)
 
 Control coding CLIs (Claude Code / Codex / Copilot / OpenCode) from Discord. Send messages, receive responses, handle interactive prompts, take screenshots — all from Discord.
