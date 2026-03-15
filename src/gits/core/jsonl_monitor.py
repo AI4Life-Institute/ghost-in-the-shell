@@ -222,8 +222,8 @@ class JsonlMonitor:
         self._offsets: dict[str, int] = {}   # file_path -> byte offset
         self._mtimes: dict[str, float] = {}  # file_path -> last mtime
 
-        # OpenCode tracking (directory-based)
-        self._known_parts: dict[str, set[str]] = {}  # session_id -> known part files
+        # OpenCode tracking (SQLite timestamp-based)
+        self._oc_timestamps: dict[str, int] = {}  # session_id -> last part timestamp
 
         # Callback: (channel_id, text) -> None
         self._on_message: Callable[[str, str], Awaitable[None]] | None = None
@@ -533,37 +533,45 @@ class JsonlMonitor:
     async def _check_opencode_binding(self, binding: Any) -> None:
         """Check an OpenCode binding for new assistant messages.
 
-        OpenCode stores messages as individual JSON files:
-          message/<sessionID>/<msgID>.json  — message metadata (role, etc.)
-          part/<msgID>/<partID>.json        — content parts (type=text, etc.)
-
-        We scan for new assistant messages, then read their text parts.
+        OpenCode v1.2.26+ stores messages in SQLite at
+        ``~/.local/share/opencode/opencode.db``.  We query for assistant
+        text parts newer than the last-seen timestamp.
         """
-        storage = Path.home() / ".local" / "share" / "opencode" / "storage"
-        msg_dir = storage / "message" / binding.cli_session_id
-        if not msg_dir.exists():
+        import sqlite3
+
+        db_path = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+        if not db_path.exists():
             return
 
         session_key = binding.cli_session_id
-        known = self._known_parts.get(session_key)
-
-        # First time: snapshot all existing parts (don't replay history)
-        if known is None:
-            known = set()
-            for msg_file in msg_dir.glob("*.json"):
-                part_dir = storage / "part" / msg_file.stem
-                if part_dir.exists():
-                    known.update(str(p) for p in part_dir.glob("*.json"))
-            self._known_parts[session_key] = known
+        if not session_key:
             return
 
-        # Find new assistant message part files
-        new_texts = await asyncio.to_thread(
-            self._read_new_opencode_parts, storage, msg_dir, known
+        # Track last-seen part timestamp per session (stored as int in _known_parts)
+        last_ts: int = self._oc_timestamps.get(session_key, -1)
+
+        new_texts, max_ts = await asyncio.to_thread(
+            self._read_opencode_db, db_path, session_key, last_ts,
         )
+
+        # First time: snapshot only (don't replay history)
+        if last_ts == -1:
+            self._oc_timestamps[session_key] = max_ts
+            logger.info(
+                "OpenCode first-seen for ch=%s sid=%s (ts=%s)",
+                binding.channel_id, session_key, max_ts,
+            )
+            return
+
+        if max_ts > last_ts:
+            self._oc_timestamps[session_key] = max_ts
 
         # Fire callbacks
         if new_texts and self._on_message:
+            logger.info(
+                "OpenCode new content for ch=%s: %d texts",
+                binding.channel_id, len(new_texts),
+            )
             for text in new_texts:
                 chunks = split_message(text, MAX_MESSAGE_LENGTH)
                 for chunk in chunks:
@@ -573,50 +581,56 @@ class JsonlMonitor:
                         logger.exception("OpenCode monitor callback error")
 
     @staticmethod
-    def _read_new_opencode_parts(
-        storage: Path, msg_dir: Path, known: set[str]
-    ) -> list[str]:
-        """Read new OpenCode assistant text parts.
+    def _read_opencode_db(
+        db_path: Path, session_id: str, after_ts: int,
+    ) -> tuple[list[str], int]:
+        """Read new assistant text parts from OpenCode's SQLite DB.
 
-        Scans message dir for assistant messages, then checks their
-        part dirs for new type=text files.
+        Returns (list_of_texts, max_timestamp).
         """
+        import sqlite3
+
         texts: list[str] = []
+        max_ts = after_ts
 
-        for msg_file in sorted(msg_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
-            try:
-                msg_data = json.loads(msg_file.read_text())
-            except (json.JSONDecodeError, OSError):
-                continue
+        try:
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cur = db.cursor()
+            cur.execute("""
+                SELECT p.data, p.time_updated, m.data
+                FROM part p
+                JOIN message m ON p.message_id = m.id
+                WHERE m.session_id = ?
+                  AND p.time_updated > ?
+                ORDER BY p.time_updated ASC
+            """, (session_id, after_ts))
 
-            # Only process assistant messages
-            if msg_data.get("role") != "assistant":
-                continue
-
-            part_dir = storage / "part" / msg_file.stem
-            if not part_dir.exists():
-                continue
-
-            for part_file in sorted(
-                part_dir.glob("*.json"), key=lambda p: p.stat().st_mtime
-            ):
-                part_key = str(part_file)
-                if part_key in known:
-                    continue
-
-                # New part — read it
-                known.add(part_key)
+            for pdata_str, ts, mdata_str in cur.fetchall():
+                if ts and ts > max_ts:
+                    max_ts = ts
+                # Only assistant messages
                 try:
-                    part_data = json.loads(part_file.read_text())
-                except (json.JSONDecodeError, OSError):
+                    mdata = json.loads(mdata_str) if mdata_str else {}
+                except (json.JSONDecodeError, ValueError):
                     continue
+                if mdata.get("role") != "assistant":
+                    continue
+                # Only text parts
+                try:
+                    pdata = json.loads(pdata_str) if pdata_str else {}
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if pdata.get("type") != "text":
+                    continue
+                text = pdata.get("text", "").strip()
+                if text:
+                    texts.append(text)
 
-                if part_data.get("type") == "text":
-                    text = part_data.get("text", "").strip()
-                    if text:
-                        texts.append(text)
+            db.close()
+        except Exception:
+            logger.warning("Error reading OpenCode DB", exc_info=True)
 
-        return texts
+        return texts, max_ts
 
     @staticmethod
     def _read_new_entries(file_path: Path, offset: int) -> list[str]:

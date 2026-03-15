@@ -14,10 +14,10 @@ Key findings:
 ## 2. Productionize (after POC validated)
 
 - [x] 2.1 Bundle plugin source in `src/gits/plugins/opencode/gits-session-hook.mjs`
-- [ ] 2.2 Add `_install_opencode_plugin()` in `__main__.py` — write plugin dir + modify opencode.json
-- [ ] 2.3 Add `--install-opencode` flag to `gits hook` subcommand
-- [ ] 2.4 Update `_ensure_hooks_installed()` in `engine.py` to auto-install plugin
-- [ ] 2.5 Make install idempotent (skip if plugin already in opencode.json config)
+- [x] 2.2 Add `_install_opencode_plugin()` in `__main__.py` — write plugin dir + modify opencode.json
+- [x] 2.3 Add `--install-opencode` flag to `gits hook` subcommand
+- [x] 2.4 Update `_ensure_hooks_installed()` in `engine.py` to auto-install plugin
+- [x] 2.5 Make install idempotent (skip if plugin already in opencode.json config)
 
 ## 3. Testing
 

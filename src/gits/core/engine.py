@@ -465,6 +465,34 @@ class Engine:
             f"Thread: <#{thread_id}> | tmux: `{win.window_id}`",
         )
 
+    async def _auto_screenshot(
+        self, channel_id: str, binding: Any, interaction: Any, delay: float = 0.5
+    ) -> None:
+        """Automatically capture and send a screenshot after a command.
+
+        Waits *delay* seconds for the terminal to settle, then captures
+        and sends the screenshot as a follow-up message.
+        """
+        await asyncio.sleep(delay)
+        try:
+            ansi_text = await self.tmux.capture_pane_ansi(binding.window_id)
+            png_bytes = await self.screenshot.capture(ansi_text)
+
+            if self._adapter:
+                await self._adapter.send_message(
+                    channel_id,
+                    OutgoingMessage(image=png_bytes),
+                )
+            elif interaction and hasattr(interaction, "channel"):
+                import io
+
+                import discord
+
+                file = discord.File(io.BytesIO(png_bytes), filename="screenshot.png")
+                await interaction.channel.send(file=file)
+        except Exception:
+            logger.debug("Auto-screenshot failed for %s", channel_id)
+
     async def handle_screenshot(self, channel_id: str, interaction: Any) -> None:
         """Handle /screenshot — take a terminal screenshot."""
         binding = self.session_mgr.get_binding(channel_id)
@@ -541,6 +569,7 @@ class Engine:
             await asyncio.sleep(0.15)
 
         await self._reply(interaction, f"Sent: `{keys}`")
+        await self._auto_screenshot(channel_id, binding, interaction)
 
     async def handle_stop(self, channel_id: str, interaction: Any) -> None:
         """Handle /stop — send Escape to interrupt."""
@@ -553,6 +582,7 @@ class Engine:
         await asyncio.sleep(0.2)
         await self.tmux.send_keys(binding.window_id, "Escape")
         await self._reply(interaction, "Sent `Escape Escape` — operation interrupted.")
+        await self._auto_screenshot(channel_id, binding, interaction)
 
     async def handle_kill(self, channel_id: str, interaction: Any) -> None:
         """Handle /kill — kill tmux window and archive thread."""
@@ -623,6 +653,7 @@ class Engine:
         submit = _submit_keys_for_cli(binding.coding_cli)
         await self.tmux.send_text(binding.window_id, bash_cmd, submit_keys=submit)
         await self._reply(interaction, f"Sent to tmux: `{bash_cmd}`")
+        await self._auto_screenshot(channel_id, binding, interaction, delay=1.0)
 
     async def handle_model(
         self, channel_id: str, name: str | None, interaction: Any
