@@ -32,16 +32,13 @@ Watch your AI write code, review its terminal output, and approve permission pro
 
 ## Why GITS?
 
-| | GITS | OpenClaw | Native Claude Code / Codex |
+| | GITS | OpenClaw | Native CLI |
 |---|:---:|:---:|:---:|
-| Mobile & remote control | ✅ Discord | ✅ Web UI | ❌ Local terminal only |
-| Team collaboration & sharing | ✅ Discord channels & threads | ❌ | ❌ |
-| Works with your subscription (no API key) | ✅ | ❌ Requires API key | ✅ |
-| ToS compliant | ✅ Drives official CLI as a human would | ⚠️ API access may violate ToS | ✅ |
-| Multi-CLI (Claude Code + Codex + OpenCode) | ✅ | ❌ Claude only | ❌ One CLI only |
-| Real terminal access (tmux) | ✅ | ❌ | ✅ |
-| Interactive prompts as buttons | ✅ | ❌ | ❌ |
-| Isolated worktrees per task | ✅ `/fork` | ❌ | ❌ |
+| Remote control via Discord | ✅ | ✅ | ❌ |
+| Team collaboration | ✅ | ✅ | ❌ |
+| Works with Pro/Max subscription — no API key needed | ✅ | ⚠️ API key required for stable use | ✅ |
+| Account-safe — no ToS gray area | ✅ | ⚠️ Documented account suspensions | ✅ |
+| Real local terminal (tmux) | ✅ | ❌ | ✅ |
 
 ---
 
