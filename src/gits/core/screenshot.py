@@ -1,6 +1,6 @@
 """ScreenshotEngine — terminal ANSI text to PNG rendering.
 
-Based on ccbot screenshot.py. Uses Pillow for rendering with
+Uses Pillow for rendering with
 3-tier font fallback: JetBrainsMono -> NotoSansCJK -> Symbola.
 """
 

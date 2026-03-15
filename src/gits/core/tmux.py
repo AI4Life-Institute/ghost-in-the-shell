@@ -1,6 +1,5 @@
 """TmuxController — tmux session/window management via libtmux.
 
-Based on ccbot tmux_manager.py, adapted for Ghost in the Shell.
 All blocking libtmux / subprocess calls are wrapped in ``asyncio.to_thread()``
 so the event loop is never blocked.
 """
@@ -193,7 +192,7 @@ class TmuxController:
     ) -> None:
         """Send text to a window's active pane.
 
-        Special handling (mirrors ccbot behaviour):
+        Special handling:
 
         * Regular text: ``literal=True`` + 500 ms delay + submit
         * ``!command``: send ``!`` first, wait 1 s, then send the rest
