@@ -423,13 +423,19 @@ class JsonlMonitor:
         return None
 
     def _find_codex_jsonl(self, binding: Any) -> Path | None:
-        """Find Codex JSONL: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl"""
+        """Find Codex JSONL: ~/.codex/sessions/YYYY/MM/DD/rollout-*-{session_id}.jsonl
+
+        Codex filenames are like:
+            rollout-2026-03-14T18-38-36-019cef25-2ae6-73f0-97fc-795524e3cdbe.jsonl
+        The session_id is the UUID suffix after the timestamp prefix.
+        """
         codex_dir = Path.home() / ".codex" / "sessions"
         if not codex_dir.exists():
             return None
 
-        # session_id for codex is the rollout filename stem
-        for jsonl_file in codex_dir.rglob(f"{binding.cli_session_id}.jsonl"):
+        sid = binding.cli_session_id
+        # Match files ending with the session_id (glob *{sid}.jsonl)
+        for jsonl_file in codex_dir.rglob(f"*{sid}.jsonl"):
             return jsonl_file
         return None
 
