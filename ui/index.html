@@ -303,16 +303,45 @@
       ══════════════════════════════════════ -->
       <div id="view-agents" class="view">
 
-        <!-- Left panel: agent list -->
-        <div class="ag-list">
-          <div class="ag-list-inner" id="ag-list-inner">
-            <!-- filled by JS -->
+        <div class="fleet-scroll" id="fleet-scroll">
+
+          <!-- Browser Profiles -->
+          <div class="fleet-section">
+            <div class="fleet-section-hd">
+              <div class="fleet-section-lbl">🌐 Browser</div>
+              <div class="fleet-section-sub">Real Chrome · your sessions · no re-logging in</div>
+            </div>
+            <div class="profile-row" id="profile-row"><!-- filled by JS --></div>
+            <div class="profile-agents-row" id="profile-agents-row"><!-- filled by JS --></div>
           </div>
+
+          <!-- Loop Agents -->
+          <div class="fleet-section">
+            <div class="fleet-section-hd">
+              <div class="fleet-section-lbl">⟳ Loop</div>
+              <div class="fleet-section-sub">Scheduled · runs on a timer</div>
+            </div>
+            <div class="fleet-grid" id="loop-grid"><!-- filled by JS --></div>
+          </div>
+
+          <!-- Reactive Agents -->
+          <div class="fleet-section">
+            <div class="fleet-section-hd">
+              <div class="fleet-section-lbl">⚡ Reactive</div>
+              <div class="fleet-section-sub">Event-driven · triggered by external events</div>
+            </div>
+            <div class="fleet-grid" id="reactive-grid"><!-- filled by JS --></div>
+          </div>
+
         </div>
 
-        <!-- Right panel: agent detail -->
-        <div class="ag-detail" id="ag-detail">
-          <!-- filled by JS -->
+        <!-- Agent detail drawer (slides up from bottom) -->
+        <div class="fleet-drawer" id="fleet-drawer">
+          <div class="fleet-drawer-head">
+            <div class="fleet-drawer-title" id="fleet-drawer-title">Agent Detail</div>
+            <button class="fleet-drawer-close" onclick="closeFleetDrawer()">✕</button>
+          </div>
+          <div class="fleet-drawer-body" id="fleet-drawer-body"><!-- filled by JS --></div>
         </div>
 
       </div><!-- /#view-agents -->
@@ -371,11 +400,12 @@
       ══════════════════════════════════════ -->
       <div id="view-data" class="view">
 
-        <!-- Collections left panel -->
-        <div class="db-tables">
-          <div id="db-collections">
-            <!-- filled by JS -->
+        <!-- File tree left panel -->
+        <div class="data-tree-panel">
+          <div class="data-tree-head">
+            <div class="data-tree-path">📁 ~/myproject/data</div>
           </div>
+          <div class="data-tree-inner" id="data-tree-inner"><!-- filled by JS --></div>
         </div>
 
         <!-- Table main area -->
@@ -383,7 +413,6 @@
           <div class="db-topbar">
             <div class="db-tname" id="db-tname">btc_prices</div>
             <div class="db-toolbar">
-              <!-- Table / Cards switcher -->
               <div class="db-view-tabs">
                 <div class="db-view-tab on" data-view="table" onclick="switchDbView('table')">Table</div>
                 <div class="db-view-tab" data-view="cards" onclick="switchDbView('cards')">Cards</div>

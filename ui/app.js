@@ -227,11 +227,43 @@ const DB = {
   notes: {cols:['id','text','created_at'],rows:[{id:1,text:'Check Nash-AI reports weekly',created_at:'2026-03-12'}]},
 };
 
+// ── Data file tree ─────────────────────────────────────────────────────────
+const DATA_FILES = [
+  {
+    type:'folder', id:'f-agents', name:'agents', open:true,
+    children:[
+      {
+        type:'sqlite', id:'db-btc', name:'btc_monitor.db', open:false,
+        tables:[{id:'btc_prices', name:'btc_prices', rows:128}]
+      },
+      {
+        type:'sqlite', id:'db-hn', name:'hn_digest.db', open:true,
+        tables:[
+          {id:'hn_links', name:'hn_links', rows:340},
+          {id:'nash_reports', name:'nash_reports', rows:47}
+        ]
+      }
+    ]
+  },
+  {
+    type:'folder', id:'f-skills', name:'skills', open:false,
+    children:[
+      {
+        type:'sqlite', id:'db-market', name:'market.db', open:false,
+        tables:[{id:'market_scans', name:'market_scans', rows:86}]
+      },
+      {type:'folder', id:'f-screenshots', name:'screenshots', open:false, children:[]}
+    ]
+  },
+  {type:'csv', id:'csv-notes', name:'notes.csv', tableId:'notes', rows:8}
+];
+
 // ── State ─────────────────────────────────────────────────────────────────
 let curMode = 'build';
 let activeWsTab = 0;
 let devMode = false;
 let curAgentId = 'nash-reporter';
+let curProfileId = 'personal-chrome';
 let curSkill = 'market';
 let curTableId = 'btc_prices';
 let sortCol = null, sortDir = 1;
@@ -502,21 +534,110 @@ function _flatAgent(id) {
   return null;
 }
 
-function selAgent(el, id) {
-  curAgentId = id;
-  document.querySelectorAll('.ag-card').forEach(c => c.classList.remove('on'));
-  if (el) el.classList.add('on');
-  renderAgentDetail(id);
+function _fleetCardHTML(a) {
+  const badgeMap = {
+    running:  ['fleet-badge-running',  '▶ Running'],
+    done:     ['fleet-badge-done',     '✓ Done'],
+    idle:     ['fleet-badge-idle',     '⏸ Idle'],
+    listening:['fleet-badge-listening','● Listening'],
+    waiting:  ['fleet-badge-waiting',  '⚠ Waiting'],
+  };
+  const [badgeCls, badgeTxt] = badgeMap[a.status] || ['fleet-badge-idle', a.status];
+  return `<div class="fleet-card ${a.status}${curAgentId===a.id?' on':''}" onclick="openFleetDrawer(this,'${a.id}')">
+    <div class="fleet-card-top">
+      <div class="fleet-card-name">${esc(a.name)}</div>
+      <div class="fleet-card-badge ${badgeCls}">${badgeTxt}</div>
+    </div>
+    <div class="fleet-card-sub">${esc(a.sub)}</div>
+    <div class="fleet-card-type">${esc(a.type)}</div>
+  </div>`;
 }
 
-function renderAgentDetail(id) {
-  const a = _flatAgent(id);
-  const panel = document.getElementById('ag-detail');
-  if (!a) { panel.innerHTML = '<div class="empty"><div class="empty-ico">⚡</div><div class="empty-txt">Select an agent</div></div>'; return; }
+function renderFleet() {
+  // Profile cards
+  const profileRow = document.getElementById('profile-row');
+  if (profileRow) {
+    let html = '';
+    AGENTS.browser.profiles.forEach(p => {
+      const running = p.agents.filter(a => a.status === 'running').length;
+      const count = p.agents.length;
+      const isOn = p.id === curProfileId;
+      const statusCls = running > 0 ? 'running' : 'idle';
+      const statusTxt = running > 0 ? `▶ ${running} running` : count > 0 ? '⏸ Idle' : '● No agents';
+      html += `<div class="profile-card${isOn?' on':''}" onclick="selProfile(this,'${p.id}')">
+        <div class="profile-card-ico">🌐</div>
+        <div class="profile-card-name">${esc(p.label)}</div>
+        <div class="profile-card-count">${count} agent${count!==1?'s':''}</div>
+        <div class="profile-card-status ${statusCls}">${statusTxt}</div>
+      </div>`;
+    });
+    html += `<div class="profile-card add" onclick="showToast('Add Chrome profile — coming soon')">＋<br>Add Profile</div>`;
+    profileRow.innerHTML = html;
+  }
+  renderProfileAgents(curProfileId);
+
+  // Loop grid
+  const loopGrid = document.getElementById('loop-grid');
+  if (loopGrid) {
+    let html = AGENTS.loop.map(_fleetCardHTML).join('');
+    html += `<div class="fleet-card-add" onclick="showToast('Type /agent in Build to create a Loop Agent')">＋ New Loop Agent</div>`;
+    loopGrid.innerHTML = html;
+  }
+
+  // Reactive grid
+  const reactiveGrid = document.getElementById('reactive-grid');
+  if (reactiveGrid) {
+    let html = AGENTS.reactive.map(_fleetCardHTML).join('');
+    html += `<div class="fleet-card-add" onclick="showToast('Type /agent in Build to create a Reactive Agent')">＋ New Reactive Agent</div>`;
+    reactiveGrid.innerHTML = html;
+  }
+}
+
+function renderProfileAgents(profileId) {
+  const profile = AGENTS.browser.profiles.find(p => p.id === profileId);
+  const row = document.getElementById('profile-agents-row');
+  if (!row || !profile) return;
+  if (profile.agents.length === 0) {
+    row.innerHTML = `<div style="padding:6px 10px;font-size:12px;color:rgba(0,0,0,.35);font-style:italic">No agents in this profile. Ask the Build agent to create one.</div>`;
+    return;
+  }
+  row.innerHTML = profile.agents.map(_fleetCardHTML).join('');
+}
+
+function selProfile(el, profileId) {
+  curProfileId = profileId;
+  document.querySelectorAll('.profile-card').forEach(c => c.classList.remove('on'));
+  if (el) el.classList.add('on');
+  renderProfileAgents(profileId);
+}
+
+function openFleetDrawer(el, agentId) {
+  curAgentId = agentId;
+  document.querySelectorAll('.fleet-card').forEach(c => c.classList.remove('on'));
+  if (el) el.classList.add('on');
+  document.getElementById('fleet-drawer').classList.add('on');
+  _renderFleetDrawer(agentId);
+}
+
+function closeFleetDrawer() {
+  document.getElementById('fleet-drawer').classList.remove('on');
+  document.querySelectorAll('.fleet-card').forEach(c => c.classList.remove('on'));
+  curAgentId = null;
+}
+
+function _renderFleetDrawer(agentId) {
+  const a = _flatAgent(agentId);
+  const titleEl = document.getElementById('fleet-drawer-title');
+  const bodyEl = document.getElementById('fleet-drawer-body');
+  if (!a || !bodyEl) return;
+  if (titleEl) titleEl.textContent = a.name + ' · ' + a.type;
 
   const d = a.detail;
-  const statusMap = {running:'▶ Running', done:'✓ Done', idle:'⏸ Idle', listening:'● Listening', waiting:'⚠ Waiting'};
-  const statusTxt = statusMap[a.status] || a.status;
+  const runProgress = d.running
+    ? `▶ Running · step ${d.steps} of ~${d.totalSteps} · ${d.elapsed} elapsed`
+    : a.status === 'done' ? `✓ Done · ${d.steps} steps · ${d.elapsed}`
+    : a.status === 'listening' ? '● Listening for events…'
+    : '⏸ Idle';
 
   const logRows = d.log.map(l => {
     const out = l.out ? `<div class="ag-log-out">${esc(l.out)}</div>` : '';
@@ -525,51 +646,101 @@ function renderAgentDetail(id) {
       <div class="ag-log-ico">${l.ico}</div>
       <div class="ag-log-body">
         <div class="ag-log-action">${l.action}</div>
-        <div class="ag-log-desc">${esc(l.desc)}</div>
-        ${out}${pending}
-      </div>
-      ${l.ts ? `<div class="ag-log-ts">${l.ts}</div>` : ''}
+        <div class="ag-log-desc">${esc(l.desc)}</div>${out}${pending}
+      </div>${l.ts ? `<div class="ag-log-ts">${l.ts}</div>` : ''}
     </div>`;
   }).join('');
 
   const chromeBanner = a.type === 'Browser Agent' ? `
     <div class="ag-chrome-banner">
-      <div class="ag-chrome-banner-inner">
-        🌐 Real Chrome · ${esc(a.profile)} — your sessions, your cookies, no re-logging in
+      <div class="ag-chrome-banner-inner">🌐 Real Chrome · ${esc(a.profile)} — your sessions, your cookies, no re-logging in</div>
+    </div>` : '';
+
+  bodyEl.innerHTML = `
+    <div class="drawer-col-left">
+      ${chromeBanner}
+      <div class="ag-run-bar"><div class="ag-run-status">${runProgress}</div></div>
+      <div class="ag-actions">
+        <button class="ag-btn">⏸ Pause</button>
+        <button class="ag-btn">▶ Run Now</button>
+        <button class="ag-btn link" onclick="setMode('data')">View in Data →</button>
       </div>
-    </div>` : '';
-
-  const hitlBanner = d.hitl ? `
-    <div class="ag-hitl">
-      <span>⚠</span>
-      <div class="ag-hitl-msg">${esc(d.hitl.msg)}</div>
-      <input placeholder="Type your response…">
-      <button class="ag-hitl-send">Send</button>
-    </div>` : '';
-
-  const runProgress = d.running
-    ? `▶ Running · step ${d.steps} of ~${d.totalSteps} · ${d.elapsed} elapsed`
-    : a.status === 'done' ? `✓ Done · ${d.steps} steps · ${d.elapsed}`
-    : a.status === 'listening' ? '● Listening for events…'
-    : '⏸ Idle';
-
-  panel.innerHTML = `
-    <div class="ag-detail-head">
-      <div class="ag-detail-name">${esc(a.name)}</div>
-      <div class="ag-detail-type">${esc(a.type)}${a.profile ? ' &nbsp;·&nbsp; 🌐 Real Chrome · ' + esc(a.profile) : ''}</div>
     </div>
-    ${chromeBanner}
-    <div class="ag-run-bar">
-      <div class="ag-run-status">${runProgress}</div>
-    </div>
-    <div class="ag-actions">
-      <button class="ag-btn">⏸ Pause</button>
-      <button class="ag-btn">▶ Run Now</button>
-      <button class="ag-btn link" onclick="setMode('data')">View in Data →</button>
-    </div>
-    <div class="ag-log-hd">— Execution Log ——————————————————</div>
-    <div class="ag-log-scroll">${logRows || '<div style="color:rgba(0,0,0,.30);font-size:12px;padding:8px 0">No log entries yet.</div>'}</div>
-    ${hitlBanner}`;
+    <div class="drawer-col-right">
+      <div class="ag-log-hd">— Execution Log</div>
+      <div class="ag-log-scroll">${logRows || '<div style="color:rgba(0,0,0,.30);font-size:12px;padding:8px 0">No log entries yet.</div>'}</div>
+    </div>`;
+}
+
+// ── Data file tree ──────────────────────────────────────────────────────────
+function _findDataNode(nodes, id) {
+  for (const n of nodes) {
+    if (n.id === id) return n;
+    if (n.children) { const f = _findDataNode(n.children, id); if (f) return f; }
+  }
+  return null;
+}
+
+function _renderTreeNodes(nodes, depth) {
+  const pad = d => `padding-left:${10 + d * 16}px`;
+  let html = '';
+  nodes.forEach(n => {
+    if (n.type === 'folder') {
+      const arrow = n.children.length
+        ? `<span class="dtree-arrow${n.open?' open':''}" style="margin-left:auto">›</span>` : '';
+      html += `<div class="dtree-node" style="${pad(depth)}" onclick="toggleDataNode('${n.id}')">
+        <span class="dtree-ico">📁</span><span class="dtree-name">${esc(n.name)}</span>${arrow}</div>`;
+      if (n.children.length) {
+        html += `<div class="dtree-children${n.open?' open':''}" id="dtree-ch-${n.id}">`;
+        html += _renderTreeNodes(n.children, depth + 1);
+        html += '</div>';
+      }
+    } else if (n.type === 'sqlite') {
+      const arrow = `<span class="dtree-arrow${n.open?' open':''}" style="margin-left:auto">›</span>`;
+      html += `<div class="dtree-node" style="${pad(depth)}" onclick="toggleDataNode('${n.id}')">
+        <span class="dtree-ico">🗄</span><span class="dtree-name">${esc(n.name)}</span>${arrow}</div>`;
+      html += `<div class="dtree-children${n.open?' open':''}" id="dtree-ch-${n.id}">`;
+      n.tables.forEach(t => {
+        const sel = curTableId === t.id;
+        html += `<div class="dtree-node table-item${sel?' sel':''}" style="${pad(depth+1)}"
+          onclick="selDataTable(this,'${t.id}')">
+          <span class="dtree-ico" style="font-size:10px;color:rgba(0,0,0,.30)">↳</span>
+          <span class="dtree-name">${esc(t.name)}</span>
+          <span class="dtree-count">${t.rows}</span>
+        </div>`;
+      });
+      html += '</div>';
+    } else if (n.type === 'csv') {
+      const sel = curTableId === n.tableId;
+      html += `<div class="dtree-node${sel?' sel':''}" style="${pad(depth)}"
+        onclick="selDataTable(this,'${n.tableId}')">
+        <span class="dtree-ico">📄</span>
+        <span class="dtree-name">${esc(n.name)}</span>
+        <span class="dtree-count">${n.rows}</span>
+      </div>`;
+    }
+  });
+  return html;
+}
+
+function renderDataTree() {
+  const inner = document.getElementById('data-tree-inner');
+  if (inner) inner.innerHTML = _renderTreeNodes(DATA_FILES, 0);
+}
+
+function toggleDataNode(nodeId) {
+  const node = _findDataNode(DATA_FILES, nodeId);
+  if (node) { node.open = !node.open; renderDataTree(); }
+}
+
+function selDataTable(el, tableId) {
+  curTableId = tableId;
+  sortCol = null; sortDir = 1; filterText = '';
+  const s = document.getElementById('db-search');
+  if (s) s.value = '';
+  closeDrawer();
+  renderDataTree();
+  renderTable();
 }
 
 // ── Skill view ─────────────────────────────────────────────────────────────
@@ -800,61 +971,10 @@ document.addEventListener('click', e => {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 (function init() {
-  // render agent list
-  const agList = document.getElementById('ag-list-inner');
-  if (agList) {
-    let html = '';
+  // fleet grid
+  renderFleet();
 
-    // BROWSER section
-    html += '<div class="ag-section-lbl">Browser</div>';
-    AGENTS.browser.profiles.forEach(profile => {
-      html += `<div class="ag-profile-hd"><span class="ag-profile-ico">🌐</span>${esc(profile.label)}</div>`;
-      if (profile.agents.length === 0) {
-        html += `<div class="ag-idle-row">idle</div>`;
-      } else {
-        profile.agents.forEach(a => {
-          const statusLabels = {running:'▶ Running', done:'✓ Done', idle:'⏸ Idle', listening:'● Listening', waiting:'⚠ Waiting'};
-          html += `<div class="ag-card ${a.status}${a.id===curAgentId?' on':''}" onclick="selAgent(this,'${a.id}')">
-            <div class="ag-card-body">
-              <div class="ag-card-name">${esc(a.name)}</div>
-              <div class="ag-card-sub">${esc(a.sub)}</div>
-              <div class="ag-card-status ${a.status}">${statusLabels[a.status]||a.status}</div>
-            </div>
-          </div>`;
-        });
-      }
-    });
-    html += `<div class="ag-add-row">＋ Add Chrome profile</div>`;
-
-    // LOOP section
-    html += '<div class="ag-section-lbl">Loop</div>';
-    AGENTS.loop.forEach(a => {
-      const statusLabels = {running:'▶ Running', done:'✓ Done', idle:'⏸ Idle'};
-      html += `<div class="ag-card ${a.status}${a.id===curAgentId?' on':''}" onclick="selAgent(this,'${a.id}')">
-        <div class="ag-card-body">
-          <div class="ag-card-name">${esc(a.name)}</div>
-          <div class="ag-card-sub">${esc(a.sub)}</div>
-          <div class="ag-card-status ${a.status}">${statusLabels[a.status]||a.status}</div>
-        </div>
-      </div>`;
-    });
-
-    // REACTIVE section
-    html += '<div class="ag-section-lbl">Reactive</div>';
-    AGENTS.reactive.forEach(a => {
-      html += `<div class="ag-card ${a.status}${a.id===curAgentId?' on':''}" onclick="selAgent(this,'${a.id}')">
-        <div class="ag-card-body">
-          <div class="ag-card-name">${esc(a.name)}</div>
-          <div class="ag-card-sub">${esc(a.sub)}</div>
-          <div class="ag-card-status listening">● Listening</div>
-        </div>
-      </div>`;
-    });
-
-    agList.innerHTML = html;
-  }
-
-  // render agents popover
+  // agents popover
   const pop = document.getElementById('agents-popover-list');
   if (pop) {
     let html = '';
@@ -867,37 +987,16 @@ document.addEventListener('click', e => {
     pop.innerHTML = html || '<div class="ap-item" style="color:rgba(0,0,0,.38)">No active agents</div>';
   }
 
-  // render data collections sidebar
-  const dbTables = document.getElementById('db-collections');
-  if (dbTables) {
-    let html = '';
-    const groups = [
-      {key:'fromAgents', label:'From Agents', items: DB_COLLECTIONS.fromAgents},
-      {key:'fromSkills', label:'From Skills',  items: DB_COLLECTIONS.fromSkills},
-      {key:'manual',     label:'Manual',       items: DB_COLLECTIONS.manual},
-    ];
-    groups.forEach(g => {
-      html += `<div class="db-group-lbl">${g.label}</div>`;
-      g.items.forEach(item => {
-        html += `<div class="db-tbl-item${item.table===curTableId?' on':''}" onclick="selTable(this,'${item.table}')">
-          <div class="db-tbl-item-inner">
-            <div class="db-tbl-name">${item.icon} ${esc(item.name)}</div>
-            <div class="db-tbl-meta">${item.rows} rows · ${item.updated}</div>
-          </div>
-        </div>`;
-      });
-    });
-    dbTables.innerHTML = html;
-  }
+  // data file tree
+  renderDataTree();
 
   // initial renders
-  renderAgentDetail(curAgentId);
   renderSkillDetail('market');
   renderTable();
   updateAgentBadge();
 
   // toast after 3s — simulate agent completing
   setTimeout(() => {
-    showToast('⏳ Nash-AI Reporter · ✓ Done → View in Agents', () => setMode('agents'));
+    showToast('Nash-AI Reporter · ✓ Done → View in Agents', () => setMode('agents'));
   }, 3000);
 })();
