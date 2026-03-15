@@ -38,11 +38,16 @@ jobs:
 
   notify:
     needs: bump
-    if: failure()
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Discord notification
         run: |
+          if [ "${{ needs.bump.result }}" = "failure" ]; then
+            ICON="❌"
+          else
+            ICON="✅"
+          fi
           curl -fsSL -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"❌ **Auto version bump failed** — ${{ github.workflow }}\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+            -d "{\"content\": \"${ICON} **Auto version bump**\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"

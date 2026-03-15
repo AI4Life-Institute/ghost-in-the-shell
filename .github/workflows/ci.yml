@@ -106,11 +106,16 @@ jobs:
 
   notify:
     needs: [test, release]
-    if: failure()
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Discord notification
         run: |
+          if [ "${{ needs.test.result }}" = "failure" ] || [ "${{ needs.release.result }}" = "failure" ]; then
+            ICON="❌"
+          else
+            ICON="✅"
+          fi
           curl -fsSL -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"❌ **CI failed** — ${{ github.workflow }}\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+            -d "{\"content\": \"${ICON} **CI** — ${{ github.event.head_commit.message || github.event.pull_request.title }}\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"

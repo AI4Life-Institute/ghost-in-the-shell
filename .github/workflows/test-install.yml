@@ -30,11 +30,16 @@ jobs:
 
   notify:
     needs: install
-    if: failure()
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Discord notification
         run: |
+          if [ "${{ needs.install.result }}" = "failure" ]; then
+            ICON="❌"
+          else
+            ICON="✅"
+          fi
           curl -fsSL -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"❌ **Install test failed** — ${{ github.workflow }}\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+            -d "{\"content\": \"${ICON} **Install test**\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
