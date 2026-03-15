@@ -1,0 +1,29 @@
+name: Test Install Script
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - install.sh
+  pull_request:
+    paths:
+      - install.sh
+  workflow_dispatch:
+
+jobs:
+  install:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run install script
+        run: bash install.sh
+
+      - name: Verify ghost runs
+        run: |
+          ghost --help
+          gits --help
