@@ -68,6 +68,8 @@ Key goals:
 ## External Dependencies
 - **Discord API** — via discord.py for bot interactions, slash commands, threads, buttons
 - **tmux server** — local process; health-monitored with auto-recovery
-- **Claude Code / Codex CLI / OpenCode** — coding CLIs launched inside tmux windows
-- **Claude Code JSONL logs** — `~/.claude/projects/<hash>/*.jsonl` for session discovery and output monitoring (Phase 2)
-- **Claude Code hooks** — `~/.claude/settings.json` SessionStart hook for automatic session ID capture
+- **Coding CLIs** — launched inside tmux windows:
+  - **Claude Code** — JSONL at `~/.claude/projects/<hash>/*.jsonl`, hooks via `~/.claude/settings.json`
+  - **Codex CLI (OpenAI)** — JSONL at `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, submit via Escape+Enter
+  - **Copilot CLI (GitHub)** — JSONL at `~/.copilot/session-state/<id>/events.jsonl`, hooks via `~/.copilot/hooks/hooks.json`, submit via Escape+Enter
+  - **OpenCode (anomalyco)** — JSON files at `~/.local/share/opencode/storage/`, dir-polling for output, also has REST API (`opencode serve`) and SDK (`@opencode-ai/sdk`)

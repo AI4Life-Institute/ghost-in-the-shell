@@ -184,18 +184,32 @@ class TmuxController:
     # Input
     # ------------------------------------------------------------------
 
-    async def send_text(self, window_id: str, text: str, enter: bool = True) -> None:
+    async def send_text(
+        self,
+        window_id: str,
+        text: str,
+        enter: bool = True,
+        submit_keys: str = "Enter",
+    ) -> None:
         """Send text to a window's active pane.
 
         Special handling (mirrors ccbot behaviour):
 
-        * Regular text: ``literal=True`` + 500 ms delay + Enter
+        * Regular text: ``literal=True`` + 500 ms delay + submit
         * ``!command``: send ``!`` first, wait 1 s, then send the rest
           (triggers Claude Code bash mode).
-        """
-        await asyncio.to_thread(self._send_text_sync, window_id, text, enter)
 
-    def _send_text_sync(self, window_id: str, text: str, enter: bool) -> None:
+        ``submit_keys`` controls how input is submitted:
+        * ``"Enter"`` — bare Enter (Claude Code)
+        * ``"Escape Enter"`` — Escape then Enter (Codex CLI, Copilot CLI)
+        """
+        await asyncio.to_thread(
+            self._send_text_sync, window_id, text, enter, submit_keys
+        )
+
+    def _send_text_sync(
+        self, window_id: str, text: str, enter: bool, submit_keys: str = "Enter"
+    ) -> None:
         pane = self._find_pane(window_id)
         if pane is None:
             raise ValueError(f"Window {window_id} not found")
@@ -207,12 +221,22 @@ class TmuxController:
             pane.send_keys(text[1:], literal=True, enter=False)
             if enter:
                 time.sleep(0.3)
-                pane.send_keys("Enter", literal=False)
+                self._send_submit_keys(pane, submit_keys)
         else:
             pane.send_keys(text, literal=True, enter=False)
             if enter:
                 time.sleep(0.5)
-                pane.send_keys("Enter", literal=False)
+                self._send_submit_keys(pane, submit_keys)
+
+    @staticmethod
+    def _send_submit_keys(pane: libtmux.Pane, submit_keys: str) -> None:
+        """Send the submit key sequence to a pane.
+
+        Supports multi-key sequences like "Escape Enter" (space-separated).
+        """
+        for key in submit_keys.split():
+            pane.send_keys(key, literal=False)
+            time.sleep(0.2)
 
     async def send_keys(self, window_id: str, keys: str) -> None:
         """Send special keys (Escape, C-c, Up, Down, Enter, etc.)."""

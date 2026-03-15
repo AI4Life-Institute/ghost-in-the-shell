@@ -19,7 +19,7 @@
 - [x] 15. Add unit tests for copilot resume commands
 - [x] 16. Validate all 242 tests pass
 
-## Phase 2: Real-World Validation (IN PROGRESS)
+## Phase 2: Real-World Validation (DONE)
 
 - [x] 17. Configure Codex CLI to use Azure OpenAI provider
 - [x] 18. Configure OpenCode to use Azure model (`azure/gpt-5.4`)
@@ -34,17 +34,17 @@
 - [x] 27. Add Copilot JSONL parsing (`assistant.message` → `data.content`)
 - [x] 28. Investigate OpenCode APIs — has REST API (`opencode serve`), `--format json` streaming, official SDK (`@opencode-ai/sdk`)
 
-## Phase 3: OpenCode Output Monitoring
+## Phase 3: OpenCode Output Monitoring (DONE)
 
-- [ ] 29. Implement directory-polling monitor for OpenCode `part/<msgID>/*.json` (track known files, detect new `type=text`)
-- [ ] 30. Parse OpenCode part JSON files for assistant text content
-- [ ] 31. Wire OpenCode dir-poll monitor into Engine polling loop
-- [ ] 32a. (Optional) Add SDK/REST API enrichment alongside dir-polling for richer tool call data
+- [x] 29. Implement directory-polling monitor for OpenCode `part/<msgID>/*.json` (track known files, detect new `type=text`)
+- [x] 30. Parse OpenCode part JSON files for assistant text content
+- [x] 31. Wire OpenCode dir-poll monitor into Engine polling loop (`_check_opencode_binding`)
 - [ ] 32. Test end-to-end: send message via Discord → OpenCode processes → output appears in Discord
+- [ ] 32a. (Optional) Add SDK/REST API enrichment alongside dir-polling for richer tool call data
 
-## Phase 4: Polish
+## Phase 4: Polish (DONE)
 
-- [ ] 33. Handle Codex/Copilot input forwarding (Escape+Enter instead of bare Enter)
-- [ ] 34. Handle OpenCode TUI input forwarding (or use `opencode serve` + `opencode attach`)
-- [ ] 35. Add hook installation for Copilot (`gits hook --install-copilot`)
-- [ ] 36. Update project.md external dependencies section
+- [x] 33. Handle Codex/Copilot input forwarding — `_submit_keys_for_cli()` + `send_text(submit_keys="Escape Enter")`
+- [x] 34. OpenCode TUI uses Enter (standard) — no special handling needed
+- [x] 35. Add hook installation for Copilot — `gits hook --install-copilot` writes `~/.copilot/hooks/hooks.json`
+- [x] 36. Update project.md external dependencies section

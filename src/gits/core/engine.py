@@ -122,7 +122,10 @@ class Engine:
                 msg.text[:80],
             )
             try:
-                await self.tmux.send_text(binding.window_id, msg.text)
+                submit = _submit_keys_for_cli(binding.coding_cli)
+                await self.tmux.send_text(
+                    binding.window_id, msg.text, submit_keys=submit
+                )
             except Exception:
                 logger.exception("Failed to send text to tmux")
 
@@ -923,6 +926,17 @@ class Engine:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+# CLIs that need Escape+Enter to submit (multi-line editor mode)
+_ESCAPE_ENTER_CLIS = frozenset({"codex", "copilot"})
+
+
+def _submit_keys_for_cli(cli: str) -> str:
+    """Return the tmux submit key sequence for a given CLI type."""
+    if cli in _ESCAPE_ENTER_CLIS:
+        return "Escape Enter"
+    return "Enter"
 
 
 def _append_permission_flag(cmd: str, cli: str, mode: str) -> str:

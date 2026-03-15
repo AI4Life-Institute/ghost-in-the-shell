@@ -35,11 +35,16 @@ def main() -> None:
     )
 
     # gits hook
-    hook_p = sub.add_parser("hook", help="Claude Code session hook")
+    hook_p = sub.add_parser("hook", help="Coding CLI session hook")
     hook_p.add_argument(
         "--install",
         action="store_true",
         help="Install the hook into ~/.claude/settings.json",
+    )
+    hook_p.add_argument(
+        "--install-copilot",
+        action="store_true",
+        help="Install the hook into ~/.copilot/hooks/hooks.json",
     )
 
     # gits status
@@ -147,8 +152,12 @@ def _cmd_hook(args: argparse.Namespace) -> None:
     logger = logging.getLogger("gits.hook")
 
     if args.install:
-        logger.info("Hook install requested")
+        logger.info("Hook install requested (Claude)")
         sys.exit(_install_hook())
+
+    if args.install_copilot:
+        logger.info("Hook install requested (Copilot)")
+        sys.exit(_install_copilot_hook())
 
     # --- Normal hook processing: read JSON from stdin ---
     logger.debug("Processing hook event from stdin")
@@ -354,6 +363,55 @@ def _install_hook() -> int:
         return 1
 
     print(f"Hook installed successfully in {settings_file}")
+    return 0
+
+
+def _install_copilot_hook() -> int:
+    """Install the gits hook into Copilot's hooks.json. Returns 0 on success.
+
+    Copilot CLI uses ~/.copilot/hooks/hooks.json (or .github/hooks/hooks.json)
+    with events like sessionStart.
+    """
+    from pathlib import Path
+
+    hooks_dir = Path.home() / ".copilot" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hooks_file = hooks_dir / "hooks.json"
+
+    hooks: dict = {}
+    if hooks_file.exists():
+        try:
+            hooks = json.loads(hooks_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Error reading {hooks_file}: {e}", file=sys.stderr)
+            return 1
+
+    # Check if already installed
+    session_start = hooks.get("sessionStart", [])
+    gits_path = _find_gits_path()
+    hook_command = f"{gits_path} hook"
+
+    for entry in session_start:
+        if isinstance(entry, dict) and entry.get("command", "").endswith("gits hook"):
+            print(f"Hook already installed in {hooks_file}")
+            return 0
+
+    session_start.append({
+        "type": "command",
+        "command": hook_command,
+        "timeout": 5000,
+    })
+    hooks["sessionStart"] = session_start
+
+    try:
+        hooks_file.write_text(
+            json.dumps(hooks, indent=2, ensure_ascii=False) + "\n"
+        )
+    except OSError as e:
+        print(f"Error writing {hooks_file}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Hook installed successfully in {hooks_file}")
     return 0
 
 

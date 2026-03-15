@@ -191,9 +191,12 @@ class JsonlMonitor:
         self._running = False
         self._task: asyncio.Task | None = None
 
-        # Per-file tracking
+        # Per-file tracking (JSONL-based CLIs)
         self._offsets: dict[str, int] = {}   # file_path -> byte offset
         self._mtimes: dict[str, float] = {}  # file_path -> last mtime
+
+        # OpenCode tracking (directory-based)
+        self._known_parts: dict[str, set[str]] = {}  # session_id -> known part files
 
         # Callback: (channel_id, text) -> None
         self._on_message: Callable[[str, str], Awaitable[None]] | None = None
@@ -281,10 +284,14 @@ class JsonlMonitor:
             if not binding.cli_session_id:
                 continue
             try:
-                await self._check_binding(binding)
+                cli = getattr(binding, "coding_cli", "claude")
+                if cli == "opencode":
+                    await self._check_opencode_binding(binding)
+                else:
+                    await self._check_binding(binding)
             except Exception:
                 logger.debug(
-                    "Error checking JSONL for channel %s", binding.channel_id,
+                    "Error checking output for channel %s", binding.channel_id,
                     exc_info=True,
                 )
 
@@ -435,6 +442,94 @@ class JsonlMonitor:
         if events_file.exists():
             return events_file
         return None
+
+    async def _check_opencode_binding(self, binding: Any) -> None:
+        """Check an OpenCode binding for new assistant messages.
+
+        OpenCode stores messages as individual JSON files:
+          message/<sessionID>/<msgID>.json  — message metadata (role, etc.)
+          part/<msgID>/<partID>.json        — content parts (type=text, etc.)
+
+        We scan for new assistant messages, then read their text parts.
+        """
+        storage = Path.home() / ".local" / "share" / "opencode" / "storage"
+        msg_dir = storage / "message" / binding.cli_session_id
+        if not msg_dir.exists():
+            return
+
+        session_key = binding.cli_session_id
+        known = self._known_parts.get(session_key)
+
+        # First time: snapshot all existing parts (don't replay history)
+        if known is None:
+            known = set()
+            for msg_file in msg_dir.glob("*.json"):
+                part_dir = storage / "part" / msg_file.stem
+                if part_dir.exists():
+                    known.update(str(p) for p in part_dir.glob("*.json"))
+            self._known_parts[session_key] = known
+            return
+
+        # Find new assistant message part files
+        new_texts = await asyncio.to_thread(
+            self._read_new_opencode_parts, storage, msg_dir, known
+        )
+
+        # Fire callbacks
+        if new_texts and self._on_message:
+            for text in new_texts:
+                if len(text) > MAX_MESSAGE_LENGTH:
+                    text = text[:MAX_MESSAGE_LENGTH] + "\n\u2026 (truncated)"
+                try:
+                    await self._on_message(binding.channel_id, text)
+                except Exception:
+                    logger.exception("OpenCode monitor callback error")
+
+    @staticmethod
+    def _read_new_opencode_parts(
+        storage: Path, msg_dir: Path, known: set[str]
+    ) -> list[str]:
+        """Read new OpenCode assistant text parts.
+
+        Scans message dir for assistant messages, then checks their
+        part dirs for new type=text files.
+        """
+        texts: list[str] = []
+
+        for msg_file in sorted(msg_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
+            try:
+                msg_data = json.loads(msg_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            # Only process assistant messages
+            if msg_data.get("role") != "assistant":
+                continue
+
+            part_dir = storage / "part" / msg_file.stem
+            if not part_dir.exists():
+                continue
+
+            for part_file in sorted(
+                part_dir.glob("*.json"), key=lambda p: p.stat().st_mtime
+            ):
+                part_key = str(part_file)
+                if part_key in known:
+                    continue
+
+                # New part — read it
+                known.add(part_key)
+                try:
+                    part_data = json.loads(part_file.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+                if part_data.get("type") == "text":
+                    text = part_data.get("text", "").strip()
+                    if text:
+                        texts.append(text)
+
+        return texts
 
     @staticmethod
     def _read_new_entries(file_path: Path, offset: int) -> list[str]:
