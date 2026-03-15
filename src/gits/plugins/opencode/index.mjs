@@ -1,10 +1,10 @@
 // GITS session hook for OpenCode
-// Listens for session.created events via the plugin "event" hook
+// Listens for session.created events via the generic "event" hook
 // and writes session info to ~/.gits/session_map.json so the
 // GITS JSONL monitor can discover OpenCode session IDs.
 //
-// Install: add to opencode.json config:
-//   "plugin": ["gits-session-hook@file:/path/to/this/directory"]
+// IMPORTANT: Must use the generic "event" hook, NOT named event hooks
+// like "session.created" — named hooks are NOT dispatched by opencode.
 
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
@@ -27,7 +27,7 @@ export const GitsSessionHook = async (ctx) => {
       let key;
       try {
         key = execSync(
-          `tmux display-message -t "${pane}" -p "#{session_name}:#{window_id}"`,
+          'tmux display-message -t "' + pane + '" -p "#{session_name}:#{window_id}"',
           { encoding: "utf8" },
         ).trim();
       } catch {

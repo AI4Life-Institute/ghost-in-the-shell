@@ -544,7 +544,7 @@ def _install_opencode_plugin() -> int:
     plugin_dest = Path.home() / ".config" / "opencode" / "plugins" / "gits-session-hook"
     plugin_dest.mkdir(parents=True, exist_ok=True)
 
-    for filename in ("gits-session-hook.mjs", "package.json"):
+    for filename in ("index.mjs", "package.json"):
         src = plugin_src / filename
         dst = plugin_dest / filename
         if not src.exists():

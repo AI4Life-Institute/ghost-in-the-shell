@@ -1,6 +1,5 @@
 {
   "name": "gits-session-hook",
   "version": "0.0.1",
-  "type": "module",
-  "main": "gits-session-hook.mjs"
+  "main": "./index.mjs"
 }
