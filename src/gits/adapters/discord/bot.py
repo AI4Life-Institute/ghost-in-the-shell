@@ -424,8 +424,8 @@ class DiscordAdapter(PlatformAdapter):
         )
         @app_commands.choices(
             mode=[
-                app_commands.Choice(name="普通 (需要确认)", value="default"),
-                app_commands.Choice(name="YOLO (全自动)", value="bypassPermissions"),
+                app_commands.Choice(name="Normal (confirm)", value="default"),
+                app_commands.Choice(name="YOLO (auto)", value="bypassPermissions"),
             ],
             cli=[
                 app_commands.Choice(name="Claude Code", value="claude"),
@@ -513,10 +513,10 @@ class DiscordAdapter(PlatformAdapter):
         @app_commands.describe(mode="Permission mode to switch to")
         @app_commands.choices(
             mode=[
-                app_commands.Choice(name="普通 (需要確認)", value="default"),
-                app_commands.Choice(name="YOLO (全自動)", value="bypassPermissions"),
-                app_commands.Choice(name="Auto (自動執行工具)", value="auto"),
-                app_commands.Choice(name="AcceptEdits (自動編輯)", value="acceptEdits"),
+                app_commands.Choice(name="Normal (confirm)", value="default"),
+                app_commands.Choice(name="YOLO (auto)", value="bypassPermissions"),
+                app_commands.Choice(name="Auto (run tools)", value="auto"),
+                app_commands.Choice(name="AcceptEdits (auto-edit)", value="acceptEdits"),
             ]
         )
         async def cmd_mode(
@@ -570,19 +570,6 @@ class DiscordAdapter(PlatformAdapter):
             await interaction.response.defer()
             if self._engine:
                 await self._engine.handle_esc(
-                    str(interaction.channel_id), interaction
-                )
-
-        @tree.command(name="stop", description="Interrupt current operation (Escape)")
-        async def cmd_stop(interaction: discord.Interaction):
-            if not self._check_interaction_access(interaction):
-                await interaction.response.send_message(
-                    "Access denied.", ephemeral=True
-                )
-                return
-            await interaction.response.defer()
-            if self._engine:
-                await self._engine.handle_stop(
                     str(interaction.channel_id), interaction
                 )
 
@@ -658,18 +645,8 @@ class DiscordAdapter(PlatformAdapter):
 
         # ── Model command (native with Discord choices) ────────────────
 
-        @tree.command(name="model", description="Switch the AI model")
-        @app_commands.describe(name="Model to switch to")
-        @app_commands.choices(
-            name=[
-                app_commands.Choice(name="Sonnet 4.6 (default daily coding)", value="sonnet"),
-                app_commands.Choice(name="Opus 4.6 (complex reasoning)", value="opus"),
-                app_commands.Choice(name="Haiku 4.5 (fast, simple tasks)", value="haiku"),
-                app_commands.Choice(name="Sonnet 4.6 [1M context]", value="sonnet[1m]"),
-                app_commands.Choice(name="Opus 4.6 [1M context]", value="opus[1m]"),
-                app_commands.Choice(name="Opus planning + Sonnet execution", value="opusplan"),
-            ]
-        )
+        @tree.command(name="model", description="Switch the AI model (claude: sonnet/opus/haiku, codex: o3/gpt-4o, etc.)")
+        @app_commands.describe(name="Model name to switch to (e.g. sonnet, opus, o3, gpt-4o)")
         async def cmd_model(
             interaction: discord.Interaction, name: str | None = None
         ):

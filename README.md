@@ -2,23 +2,39 @@
   <img src="docs/logo.png" width="200" alt="Ghost in the Shell">
 </p>
 
-# Ghost in the Shell (GITS)
+<h1 align="center">Ghost in the Shell (GITS)</h1>
 
-Control coding CLIs (Claude Code / Codex / OpenCode) from Discord. Send messages, receive responses, handle interactive prompts, take screenshots — all from Discord.
+<p align="center">
+  Control AI coding agents on your machine — from Discord, on any device.
+</p>
 
-## Dependencies
+---
 
-**System:** Python >= 3.12, tmux, uv (recommended)
+Watch your AI write code, review its terminal output, and approve permission prompts — all from your phone via Discord.
 
-**Coding CLI (install at least one):**
+<p align="center">
+  <img src="docs/demo.gif" width="300" alt="GITS demo">
+</p>
 
-| CLI | Install | Hook setup |
-|---|---|---|
-| Claude Code | `npm i -g @anthropic-ai/claude-code` | `gits hook --install` |
-| Codex | `npm i -g @openai/codex` | `gits hook --install-codex` |
-| OpenCode | `curl -fsSL opencode.ai/install | bash` | `gits hook --install-opencode` |
+---
 
-## Install
+## Key Features
+
+- **Desktop ↔ mobile continuity** — start a session on your Mac, walk away, and pick it up on your phone; the AI keeps working while you switch devices
+- **Remote control from anywhere** — bind a project directory to a Discord channel; every message you type is forwarded to the coding CLI running on your machine
+- **Terminal screenshots** — `/screenshot` sends a live snapshot of the terminal directly into Discord
+- **Interactive prompts as buttons** — when the CLI asks for permission, it becomes a Discord button you tap to approve or deny
+- **Multi-CLI support** — works with Claude Code, Codex CLI, and OpenCode; switch between them per channel
+- **Threads & isolated worktrees** — `/fork` spins up a sub-task thread backed by a fresh git worktree, keeping parallel work cleanly separated
+- **Session resume** — reconnecting to a directory shows a session picker so you can continue where you left off
+- **tmux-backed sessions** — each project runs in a real tmux window; developers get full terminal access locally while GITS handles the Discord bridge
+- **Subscription-safe** — GITS drives the official CLI tools (Claude Code, Codex) exactly as a human would; no API key required, no terms-of-service gray area — your existing Pro/Max subscription just works
+
+---
+
+## Quick Start
+
+**1. Install**
 
 ```bash
 git clone https://github.com/AI4Life-Institute/ghost-in-the-shell.git
@@ -26,9 +42,19 @@ cd ghost-in-the-shell
 uv sync
 ```
 
-## Configure
+System requirements: Python >= 3.12, tmux, uv
 
-Create `.env`:
+**2. Install a coding CLI (at least one)**
+
+| CLI | Install |
+|---|---|
+| Claude Code | `npm i -g @anthropic-ai/claude-code` |
+| Codex | `npm i -g @openai/codex` |
+| OpenCode | `curl -fsSL opencode.ai/install \| bash` |
+
+**3. Configure**
+
+Create `.env` in the project root:
 
 ```bash
 # Required
@@ -41,76 +67,70 @@ TMUX_SESSION_NAME=gits
 LOG_LEVEL=INFO
 ```
 
-The Discord bot needs **Message Content Intent** enabled and must be invited to your server with permissions to send messages and create threads.
+The Discord bot needs **Message Content Intent** enabled and must be invited with permissions to send messages and create threads.
 
-## Install hooks
-
-Hooks let GITS track CLI session IDs so responses can be forwarded back to Discord.
-
-**All hooks are auto-installed on `gits start`**, so manual setup is usually not needed. To install individually:
-
-```bash
-gits hook --install           # Claude Code (SessionStart hook in ~/.claude/settings.json)
-gits hook --install-codex     # Codex (hooks.json + codex_hooks feature flag)
-gits hook --install-opencode  # OpenCode (plugin in opencode.json config)
-```
-
-## Start
+**4. Start**
 
 ```bash
 gits start
 ```
 
-### Dev mode
-
-Auto-restart on source file changes:
+Hooks are auto-installed on first start. For dev mode with auto-restart on file changes:
 
 ```bash
 gits start --dev
 ```
+
+---
 
 ## Usage
 
 ### Basic workflow
 
 1. Create a Discord channel (e.g. `#my-feature`)
-2. Run `/bind /path/to/project` — creates a tmux window and launches the CLI
+2. `/bind /path/to/project` — launches the CLI in a tmux window
 3. Type in the channel — messages are forwarded to the CLI
-4. CLI responses are automatically forwarded back to Discord
-5. Interactive prompts (permission requests, etc.) become Discord buttons
-6. `/screenshot` to see the terminal
+4. CLI responses stream back to Discord automatically
+5. Permission prompts appear as buttons — tap to approve or deny
+6. `/screenshot` to see the terminal at any time
 7. `/kill` when done
 
-### Discord commands
+### Commands
 
 | Command | Description |
 |---|---|
-| `/bind <path> [mode] [cli]` | Bind channel to a project directory, launch CLI |
+| `/bind <path> [mode] [cli]` | Bind channel to a project, launch CLI |
 | `/unbind` | Unbind and close the window |
-| `/screenshot` | Terminal screenshot |
+| `/screenshot` | Send a terminal screenshot |
 | `/stop` | Send Escape (interrupt current operation) |
 | `/kill` | Close window and archive thread |
 | `/new` | Reset CLI session |
-| `/bash <command>` | Run shell command in project directory |
-| `/keys <keys>` | Send keystrokes (Enter, Escape, Ctrl-C, Up, Down, etc.) |
-| `/model [name]` | Switch model (sonnet, opus, haiku, etc.) |
-| `/fork <title>` | Create a sub-task thread |
-| `/compact` `/clear` `/cost` `/diff` | Forwarded to the CLI |
-| `/cc <command>` | Forward any command to the CLI |
+| `/bash <command>` | Run a shell command in the project directory |
+| `/keys <keys>` | Send keystrokes (Enter, Escape, Ctrl-C, Up, Down…) |
+| `/model [name]` | Switch model (sonnet, opus, haiku…) |
+| `/fork <title>` | Create a sub-task thread with an isolated git worktree |
+| `/compact` `/clear` `/cost` `/diff` | Forwarded directly to the CLI |
+| `/cc <command>` | Forward any slash command to the CLI |
 
-### Bind modes
+### Permission modes
 
-- **default** — normal interactive mode
-- **bypassPermissions** (YOLO) — auto-approve all operations
+Set via `/bind` or `/mode`:
 
-### Session resume
+| Mode | Behavior |
+|---|---|
+| `default` | Normal interactive mode — prompts require approval |
+| `bypassPermissions` | YOLO — auto-approve all operations |
+| `auto` | Auto-run tools, prompt for edits |
+| `acceptEdits` | Auto-accept file edits |
 
-When you `/bind` a directory with existing sessions, GITS shows a session picker. You can resume a previous session or start fresh.
+---
 
-## Technical docs
+## Docs
 
 See [docs/architecture.md](docs/architecture.md) for architecture, internals, and configuration reference.
 
+---
+
 ## License
 
-MIT
+MIT — © 2026 [ai4life institute](https://github.com/AI4Life-Institute)
