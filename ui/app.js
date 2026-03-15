@@ -1417,20 +1417,36 @@ document.addEventListener('click', e => {
   const invoke = window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke;
   const tauriEvent = window.__TAURI__.event;
 
+  // Internal event bus so multiple .on() calls for same event all fire
+  const _listeners = [];  // { event, cb }
+
+  function _dispatch(event, data) {
+    _listeners.forEach(l => { if (l.event === '*' || l.event === event) l.cb(data); });
+  }
+
+  // Route Python IPC events (emitted from Python → Rust → Tauri 'python-event')
+  tauriEvent.listen('python-event', (e) => {
+    const data = e.payload;
+    if (data?.event) _dispatch(data.event, data);
+  });
+
+  // Route PTY output events (emitted directly from Rust as 'pty-output')
+  tauriEvent.listen('pty-output', (e) => {
+    _dispatch('pty-output', e.payload);
+  });
+
   window.ghost = {
     send(cmd, payload = {}) {
       return invoke('python_cmd', { cmd, payload });
     },
     on(event, cb) {
-      const handle = { event, cb, unlisten: null };
-      tauriEvent.listen('python-event', (e) => {
-        const data = e.payload;
-        if (event === '*' || data?.event === event) cb(data);
-      }).then(fn => { handle.unlisten = fn; });
-      return handle;
+      const entry = { event, cb };
+      _listeners.push(entry);
+      return entry;
     },
     off(handle) {
-      if (handle?.unlisten) handle.unlisten();
+      const idx = _listeners.indexOf(handle);
+      if (idx !== -1) _listeners.splice(idx, 1);
     },
     onAny(cb) { return window.ghost.on('*', cb); },
   };
