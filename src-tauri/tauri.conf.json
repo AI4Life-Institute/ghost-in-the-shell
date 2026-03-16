@@ -7,7 +7,7 @@
     "frontendDist": "../ui",
     "devUrl": null,
     "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "cd ui && npm install && npm run build"
   },
   "app": {
     "withGlobalTauri": true,

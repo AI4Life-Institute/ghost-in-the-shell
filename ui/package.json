@@ -1,0 +1,20 @@
+{
+  "name": "ghost-ui",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "npx esbuild src/main.ts --bundle --outfile=app.js --platform=browser --target=es2020 --format=iife",
+    "watch": "npx esbuild src/main.ts --bundle --outfile=app.js --platform=browser --target=es2020 --format=iife --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0",
+    "@vitest/coverage-v8": "^1.6.0",
+    "jsdom": "^24.0.0",
+    "@types/jsdom": "^21.1.6"
+  }
+}
