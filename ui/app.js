@@ -1686,7 +1686,8 @@ function ghostSetup() {
   });
 
   window.ghost.on('sessions', (data) => {
-    _dbg('ghostSetup: sessions event received, count=' + (data.sessions || []).length);
+    const _sbBg = (() => { try { const e = document.getElementById('sess-sidebar'); return e ? getComputedStyle(e).backgroundColor : 'NULL'; } catch(ex) { return 'ERR:'+ex; } })();
+    _dbg('ghostSetup: sessions count=' + (data.sessions || []).length + ' sidebar_bg=' + _sbBg);
     allSessions = data.sessions || [];
     if (data.tmux_session) tmuxSession = data.tmux_session;
     renderSessions(allSessions);
@@ -1694,25 +1695,15 @@ function ghostSetup() {
     if (!activeSessId && allSessions.length > 0) {
       activateSession(allSessions[0]);
     }
-    // Dev verification: log computed styles of key elements
-    if (allSessions.length > 0 && !window._devCheckDone) {
+    // Dev verification: log computed styles inline (no setTimeout)
+    if (!window._devCheckDone) {
       window._devCheckDone = true;
-      setTimeout(() => {
-        const sb = document.getElementById('sess-sidebar');
-        const firstItem = document.querySelector('.sess-item');
-        const firstNm = document.querySelector('.sess-nm');
-        if (sb) {
-          const st = getComputedStyle(sb);
-          _dbg('sidebar bg=' + st.backgroundColor + ' color=' + st.color);
-        }
-        if (firstNm) {
-          const st = getComputedStyle(firstNm);
-          _dbg('sess-nm color=' + st.color + ' bg=' + st.backgroundColor);
-        }
-        if (firstItem) {
-          _dbg('first item text: ' + firstItem.textContent.trim().slice(0, 80));
-        }
-      }, 500);
+      const sb = document.getElementById('sess-sidebar');
+      const firstNm = document.querySelector('.sess-nm');
+      _dbg('STYLE CHECK: sidebar exists=' + !!sb +
+        (sb ? ' bg=' + getComputedStyle(sb).backgroundColor : '') +
+        ' sess-nm exists=' + !!firstNm +
+        (firstNm ? ' color=' + getComputedStyle(firstNm).color : ''));
     }
   });
 
