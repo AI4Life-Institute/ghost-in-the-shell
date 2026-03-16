@@ -409,7 +409,8 @@ class Engine:
         select_opts: list[SelectOption] = []
         for abs_i, s in enumerate(page_sessions, start=start):
             age = _format_age(s.mtime)
-            is_import = bool(s.source_cli and s.source_cli != target_type)
+            s_base = self.launcher.resolve_cli(s.source_cli).base_type if s.source_cli else target_type
+            is_import = s_base != target_type
             badge = f"↗[{s.source_cli}] " if is_import else ""
             label = (badge + s.summary)[:100]
             # description: last message (truncated) + msg count + age
@@ -1374,8 +1375,11 @@ class Engine:
         )
 
         # Detect cross-CLI import (e.g. codex session → claude)
+        # Resolve both sides to base_type so aliases like "clpy" (→ claude)
+        # are never mistaken for a different CLI.
         target_type = self.launcher.resolve_cli(pending["cli"]).base_type
-        is_cross_cli = bool(session.source_cli and session.source_cli != target_type)
+        source_type = self.launcher.resolve_cli(session.source_cli).base_type if session.source_cli else target_type
+        is_cross_cli = source_type != target_type
 
         if is_cross_cli:
             await self._handle_cross_cli_import(session, pending, pending_channel, reply_channel)
