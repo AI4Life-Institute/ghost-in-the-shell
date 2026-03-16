@@ -421,11 +421,18 @@ def _is_hook_installed(settings: dict) -> bool:
     return False
 
 
-def _install_hook() -> int:
-    """Install the gits hook into Claude's settings.json. Returns 0 on success."""
+def _install_hook(config_dir: str | None = None) -> int:
+    """Install the gits hook into Claude's settings.json. Returns 0 on success.
+
+    *config_dir* overrides the default ``~/.claude`` directory so the hook
+    can be installed for aliases that use a custom ``CLAUDE_CONFIG_DIR``.
+    """
     from pathlib import Path
 
-    settings_file = Path(_CLAUDE_SETTINGS_FILE)
+    if config_dir:
+        settings_file = Path(config_dir).expanduser() / "settings.json"
+    else:
+        settings_file = Path(_CLAUDE_SETTINGS_FILE)
     settings_file.parent.mkdir(parents=True, exist_ok=True)
 
     settings: dict = {}

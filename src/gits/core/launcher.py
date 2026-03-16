@@ -49,7 +49,8 @@ class ResolvedCLI(NamedTuple):
     base_type: str        # "claude" | "codex" | "copilot" | "opencode"
     cmd: str              # launch command (e.g. "clpy")
     resume_by_id: str     # resume template, e.g. "clpy --resume {id}"
-    session_path: str | None = None  # override session storage dir (e.g. "~/.claude-work/projects")
+    session_path: str | None = None  # override session storage dir (e.g. "~/.claude-personal/projects")
+    config_dir: str | None = None    # override Claude config dir (e.g. "~/.claude-personal")
 
 
 @dataclass
@@ -108,7 +109,8 @@ class CodingCLILauncher:
             default_resume = RESUME_TEMPLATES.get(base, {}).get("by_id", f"{cli} --resume {{id}}")
             resume = alias_cfg.get("resume_by_id", default_resume.replace(base, cmd, 1))
             session_path = alias_cfg.get("session_path") or None
-            return ResolvedCLI(base_type=base, cmd=cmd, resume_by_id=resume, session_path=session_path)
+            config_dir = alias_cfg.get("config_dir") or None
+            return ResolvedCLI(base_type=base, cmd=cmd, resume_by_id=resume, session_path=session_path, config_dir=config_dir)
 
         # Built-in CLI — derive from RESUME_TEMPLATES
         templates = RESUME_TEMPLATES.get(cli, {})

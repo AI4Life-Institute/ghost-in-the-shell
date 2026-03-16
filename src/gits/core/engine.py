@@ -134,19 +134,28 @@ class Engine:
     # Hook auto-install
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _ensure_hooks_installed() -> None:
-        """Auto-install CLI hooks for all supported CLIs."""
+    def _ensure_hooks_installed(self) -> None:
+        """Auto-install CLI hooks for all supported CLIs and aliases."""
         from ..__main__ import _install_hook, _install_opencode_plugin
 
         for name, installer in [
-            ("Claude", _install_hook),
+            ("Claude", lambda: _install_hook()),
             ("OpenCode", _install_opencode_plugin),
         ]:
             try:
                 installer()
             except Exception:
                 logger.warning("Failed to auto-install %s hook", name, exc_info=True)
+
+        # Install hook into each alias config_dir that differs from the default
+        for alias, cfg in self.launcher._aliases.items():
+            config_dir = cfg.get("config_dir")
+            if not config_dir or cfg.get("type", "claude") != "claude":
+                continue
+            try:
+                _install_hook(config_dir=config_dir)
+            except Exception:
+                logger.warning("Failed to auto-install hook for alias %s", alias, exc_info=True)
 
     # ------------------------------------------------------------------
     # Message handler (plain text forwarding)
