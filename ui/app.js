@@ -1456,7 +1456,7 @@ document.addEventListener('click', e => {
 // ── Tauri v2 IPC shim ─────────────────────────────────────────────────────
 // Exposes the same window.ghost API as Electron's preload.js, so ghostSetup()
 // works unchanged in both runtimes. Runs only when window.__TAURI__ is present.
-(function installTauriShim() {
+function installTauriShim() {
   if (window.ghost || !window.__TAURI__) return;
   // Tauri v2: invoke lives at window.__TAURI__.core.invoke
   const invoke = window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke;
@@ -1495,7 +1495,7 @@ document.addEventListener('click', e => {
     },
     onAny(cb) { return window.ghost.on('*', cb); },
   };
-})();
+}
 
 // ── Ghost Bridge (Electron IPC) ────────────────────────────────────────────
 
@@ -1594,15 +1594,12 @@ function initPtyTerminal(channelId) {
 function ghostSetup() {
   if (typeof window === 'undefined' || !window.ghost) return;
 
+  // Register all listeners FIRST, then send requests
   window.ghost.on('ready', () => {
     window.ghost.send('sessions');
     window.ghost.send('agents', {});
     window.ghost.send('skills', {});
   });
-
-  window.ghost.send('sessions');
-  window.ghost.send('agents', {});
-  window.ghost.send('skills', {});
 
   window.ghost.on('sessions', (data) => {
     allSessions = data.sessions || [];
@@ -1686,6 +1683,11 @@ function ghostSetup() {
     lp.appendChild(d);
     lp.scrollTop = lp.scrollHeight;
   });
+
+  // All listeners registered — now request data
+  window.ghost.send('sessions');
+  window.ghost.send('agents', {});
+  window.ghost.send('skills', {});
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
@@ -1715,6 +1717,23 @@ function ghostSetup() {
   updateAgentBadge();
   updateAgentsWarnBadge();
 
-  // Wire IPC bridge (no-op in browser)
-  ghostSetup();
+  // Wire IPC bridge — retry until window.__TAURI__ is ready
+  function _trySetup(attempts) {
+    installTauriShim();
+    if (window.ghost) {
+      ghostSetup();
+      const dbg = document.getElementById('sess-list');
+      if (dbg && dbg.textContent.includes('Loading')) {
+        dbg.innerHTML = '<div style="padding:8px 12px;color:rgba(255,255,255,0.4);font-size:11px">Connected, waiting for sessions…</div>';
+      }
+    } else if (attempts > 0) {
+      const dbg = document.getElementById('sess-list');
+      if (dbg) dbg.innerHTML = `<div style="padding:8px 12px;color:rgba(255,255,255,0.3);font-size:11px">Connecting… (${21-attempts}) __TAURI__=${!!window.__TAURI__}</div>`;
+      setTimeout(() => _trySetup(attempts - 1), 100);
+    } else {
+      const dbg = document.getElementById('sess-list');
+      if (dbg) dbg.innerHTML = '<div style="padding:8px 12px;color:#f87171;font-size:11px">No Tauri bridge — running in browser?</div>';
+    }
+  }
+  _trySetup(20);
 })();

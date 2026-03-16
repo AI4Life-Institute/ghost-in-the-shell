@@ -146,6 +146,42 @@ class CodingCLILauncher:
         # No session_id → start fresh (don't use --continue)
         return resolved.cmd
 
+    def get_session_file(self, work_dir: str, cli: str, session_id: str) -> str | None:
+        """Return the file path for a known session ID, or None if not found.
+
+        For Claude, the path is reconstructed directly (fast).
+        For other CLIs, we scan discover_sessions and match by session_id.
+        """
+        resolved = self.resolve_cli(cli)
+        if resolved.base_type == "claude":
+            claude_projects = (
+                Path(resolved.session_path).expanduser()
+                if resolved.session_path
+                else Path.home() / ".claude" / "projects"
+            )
+            dir_hash = work_dir.replace("/", "-")
+            for candidate in (dir_hash, dir_hash.lstrip("-")):
+                p = claude_projects / candidate / f"{session_id}.jsonl"
+                if p.exists():
+                    return str(p)
+            # Fallback: scan project dirs
+            try:
+                for d in claude_projects.iterdir():
+                    if not d.is_dir():
+                        continue
+                    p = d / f"{session_id}.jsonl"
+                    if p.exists():
+                        return str(p)
+            except OSError:
+                pass
+            return None
+
+        # Generic: scan and match by session_id
+        for s in self.discover_sessions(work_dir, cli):
+            if s.session_id == session_id:
+                return s.file_path
+        return None
+
     def discover_sessions(self, work_dir: str, cli: str = "claude") -> list[CLISession]:
         """Discover existing CLI sessions for a given directory."""
         resolved = self.resolve_cli(cli)

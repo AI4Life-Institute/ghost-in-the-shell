@@ -63,8 +63,8 @@ def main() -> None:
         help="Install the session plugin into OpenCode config",
     )
 
-    # gits status
-    sub.add_parser("status", help="Show current bindings")
+    # gits info
+    sub.add_parser("info", help="Show current bindings")
 
     # gits desktop  (launched by the Electron shell)
     desktop_p = sub.add_parser("desktop", help="Desktop app backend (IPC over stdio)")
@@ -84,7 +84,7 @@ def main() -> None:
         _cmd_start(args)
     elif args.command == "hook":
         _cmd_hook(args)
-    elif args.command == "status":
+    elif args.command == "info":
         _cmd_status(args)
     elif args.command == "desktop":
         _cmd_desktop(args)

@@ -757,7 +757,7 @@ class Engine:
             await self._reply(interaction, "Screenshot failed.")
 
     async def handle_status(self, channel_id: str, interaction: Any) -> None:
-        """Handle /status — show binding info."""
+        """Handle /info — show binding info."""
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound.")
@@ -778,6 +778,19 @@ class Engine:
         if binding.subdir:
             lines.append(f"Subdir: `{binding.subdir}`")
         lines.append(f"Created: `{binding.created_at}`")
+
+        # Session file path (for other agents to reference directly)
+        if binding.cli_session_id:
+            sess_file = self.launcher.get_session_file(
+                binding.work_dir, binding.coding_cli or "claude", binding.cli_session_id
+            )
+            if sess_file:
+                lines.append(f"Session file: `{sess_file}`")
+
+        # Imported context file (from cross-CLI import)
+        import_file = Path(binding.work_dir) / ".gits-import.md"
+        if import_file.exists():
+            lines.append(f"Imported context: `{import_file}`")
 
         # Resume command
         if binding.cli_session_id:
@@ -1344,13 +1357,22 @@ class Engine:
 
         session = sessions[session_index]
         logger.info(
-            "Bind resume: channel=%s session=%s summary=%s",
+            "Bind resume: channel=%s session=%s summary=%s source_cli=%s",
             pending_channel,
             session.session_id,
             session.summary[:40],
+            session.source_cli,
         )
 
-        # Create the window and binding with resume
+        # Detect cross-CLI import (e.g. codex session → claude)
+        target_type = self.launcher.resolve_cli(pending["cli"]).base_type
+        is_cross_cli = bool(session.source_cli and session.source_cli != target_type)
+
+        if is_cross_cli:
+            await self._handle_cross_cli_import(session, pending, pending_channel, reply_channel)
+            return
+
+        # Same-CLI resume — normal path
         await self._create_bind(
             channel_id=pending_channel,
             work_dir=pending["path"],
@@ -1371,6 +1393,84 @@ class Engine:
                         f"Bound **#{pending['window_name']}** \u2192 "
                         f"`{pending['path']}`\n"
                         f"Resumed: **{session.summary}** ({age})"
+                    )
+                ),
+            )
+
+    async def _handle_cross_cli_import(
+        self,
+        session: "CLISession",
+        pending: dict,
+        pending_channel: str,
+        reply_channel: str,
+    ) -> None:
+        """Import a session from a different CLI into a fresh target-CLI session.
+
+        Extracts conversation text, writes it to ``.gits-import.md`` in the
+        work directory, starts a fresh target-CLI session, then injects an
+        initial context message via tmux after the CLI has had time to start.
+        """
+        from pathlib import Path as _Path
+
+        work_dir = pending["path"]
+        source_cli = session.source_cli
+        target_cli = pending["cli"]
+
+        context_text = self.launcher.extract_conversation_text(session)
+
+        # Write conversation to .gits-import.md in the work directory
+        import_file = _Path(work_dir) / ".gits-import.md"
+        header = (
+            f"# Imported from {source_cli} session\n"
+            f"# Summary: {session.summary}\n"
+            f"# Messages: {session.message_count}\n\n"
+        )
+        try:
+            import_file.write_text(header + (context_text or "(no conversation text extracted)"))
+        except OSError as exc:
+            logger.warning("Could not write .gits-import.md: %s", exc)
+
+        # Launch a fresh target-CLI session
+        await self._create_bind(
+            channel_id=pending_channel,
+            work_dir=work_dir,
+            window_name=pending["window_name"],
+            cli=target_cli,
+            interaction=None,
+            session_id=None,
+            mode=pending.get("mode"),
+        )
+
+        # After the CLI initialises, auto-inject context as the first message
+        async def _inject() -> None:
+            await asyncio.sleep(5)
+            binding = self.session_mgr.get_binding(pending_channel)
+            if not binding:
+                return
+            # Use @-file reference (Claude Code syntax); other CLIs will see
+            # the absolute path and can read it themselves.
+            abs_import = str(_Path(work_dir) / ".gits-import.md")
+            if target_cli in ("claude",):
+                context_msg = f"@{abs_import}"
+            else:
+                context_msg = abs_import
+            submit = _submit_keys_for_cli(target_cli)
+            try:
+                await self.tmux.send_text(binding.window_id, context_msg, submit_keys=submit)
+            except Exception:
+                logger.exception("Cross-CLI context injection failed")
+
+        asyncio.create_task(_inject())
+
+        if self._adapter:
+            age = _format_age(session.mtime)
+            await self._adapter.send_message(
+                reply_channel,
+                OutgoingMessage(
+                    text=(
+                        f"Bound **#{pending['window_name']}** \u2192 `{work_dir}`\n"
+                        f"Importing ↗ **{source_cli}** session: **{session.summary}** ({age})\n"
+                        f"Context saved to `.gits-import.md` · Starting fresh **{target_cli}** session…"
                     )
                 ),
             )
@@ -1432,7 +1532,9 @@ class Engine:
             return
 
         sessions = pending["sessions"]
-        msg = self._build_session_picker_message(sessions, pending["path"], pending_channel, page=page)
+        msg = self._build_session_picker_message(
+            sessions, pending["path"], pending_channel, page=page, target_cli=pending.get("cli", "")
+        )
         if self._adapter:
             await self._adapter.send_message(reply_channel, msg)
 
