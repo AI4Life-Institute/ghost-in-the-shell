@@ -40,6 +40,7 @@ Watch your AI write code, review its terminal output, and approve permission pro
 | Works with Pro/Max subscription — no API key needed | ✅ | ⚠️ API key required for stable use | ✅ |
 | Account-safe — no ToS gray area | ✅ | ⚠️ Documented account suspensions | ✅ |
 | Real local terminal (tmux) | ✅ | ❌ | ✅ |
+| Cross-CLI session import (e.g. Codex → Claude) | ✅ | ❌ | ❌ |
 
 ---
 
