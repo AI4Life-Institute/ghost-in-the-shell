@@ -17,12 +17,12 @@
 
 ---
 
-## 1. PTY Terminal (next — unblocks core usability)
+## 1. PTY Terminal ✅
 
-- [ ] 1.1 `activateSession`: call `open_pty` with correct `tmux_session` + `window_id`; show `#main-term`; hide `#term-empty`
-- [ ] 1.2 Wire xterm.js input → `pty_input` (base64 encode); wire `pty-output` event → xterm.js write
-- [ ] 1.3 `ResizeObserver` on `#main-term` → `resize_pty` on size change; FitAddon on open
-- [ ] 1.4 Close PTY on session switch (`close_pty` for old channel_id)
+- [x] 1.1 `activateSession`: call `open_pty` with correct `tmux_session` + `window_id`; show `#main-term`; hide `#term-empty`
+- [x] 1.2 Wire xterm.js input → `pty_input` (base64 encode); wire `pty-output` event → xterm.js write
+- [x] 1.3 `ResizeObserver` on `#main-term` → `resize_pty` on size change; FitAddon on open
+- [x] 1.4 Close PTY on session switch (`close_pty` for old channel_id)
 - [ ] 1.5 End-to-end test: click session → interactive tmux/claude renders in xterm.js
 
 ## 2. Backend wiring (from update-ghost-product-vision §3)

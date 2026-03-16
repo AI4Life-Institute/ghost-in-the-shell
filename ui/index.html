@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ghost</title>
-<!-- VERSION: v42 -->
+<!-- VERSION: v43 -->
   <link rel="stylesheet" href="lib/xterm.css">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -22,12 +22,6 @@
 
   <!-- ── Titlebar ── -->
   <div id="tb">
-    <div class="tls">
-      <div class="tl tlr"></div>
-      <div class="tl tly"></div>
-      <div class="tl tlg"></div>
-    </div>
-
     <!-- Folder path button -->
     <button id="tb-folder-btn" onclick="folderPickerClick()">
       📁 <span id="tb-folder-path">~/myproject</span>
@@ -55,15 +49,15 @@
     <div id="sb">
       <div class="modes">
         <div class="mode on" data-mode="build" onclick="setMode('build')">
-          <span class="mode-ico">🤖</span> Build
+          <span class="mode-ico">💻</span> Code
         </div>
         <div class="mode" data-mode="agents" onclick="setMode('agents')">
-          <span class="mode-ico">⚡</span> Agents
+          <span class="mode-ico">🌐</span> Agent
           <span class="mode-badge" id="agents-badge">[3]</span>
           <span class="mode-badge warn">⚠</span>
         </div>
         <div class="mode" data-mode="skill" onclick="setMode('skill')">
-          <span class="mode-ico">🛠</span> Skills
+          <span class="mode-ico">⚡</span> Skill
         </div>
         <div class="mode" data-mode="data" onclick="setMode('data')">
           <span class="mode-ico">🗄</span> Data
@@ -85,33 +79,25 @@
     <div id="main">
 
       <!-- ══════════════════════════════════════
-           BUILD VIEW
+           BUILD VIEW  (workspace grid)
       ══════════════════════════════════════ -->
       <div id="view-build" class="view on">
 
-        <!-- Session sidebar -->
-        <div id="sess-sidebar">
-          <div id="sess-header">
-            <span>Sessions</span>
-            <button id="new-sess-btn" onclick="newSession()" title="New Session">＋</button>
-          </div>
-          <div id="sess-list">
-            <div style="padding:20px 12px;color:rgba(255,255,255,0.2);font-size:12px">Loading sessions…</div>
+        <!-- Tab bar: one tab per open pane -->
+        <div class="ws-tabbar" id="ws-tabbar">
+          <!-- filled by JS: renderSessionTabs() -->
+          <div class="ws-tab-add" onclick="openSessionPicker(-1)" title="Open session in new pane">＋</div>
+          <div class="ws-tabbar-right">
+            <div class="devmode-btn" id="devmode-btn" onclick="toggleDevMode()">
+              <div class="devmode-dot"></div>
+              <span>>_ Dev</span>
+            </div>
           </div>
         </div>
 
-        <!-- Terminal -->
-        <div id="term-view">
-          <div id="term-topbar">
-            <span id="term-sess-name" style="color:rgba(255,255,255,0.3)">No session selected</span>
-            <span id="term-sess-cli"></span>
-            <span id="term-sess-dir"></span>
-          </div>
-          <div id="main-term" style="display:none"></div>
-          <div id="term-empty">
-            <span style="font-size:28px;opacity:0.3">⌗</span>
-            <span>Select a session from the sidebar</span>
-          </div>
+        <!-- Pane grid: 1 or 2 columns -->
+        <div class="ws-grid" id="ws-grid">
+          <!-- panels injected by JS -->
         </div>
 
       </div><!-- /#view-build -->
@@ -142,22 +128,13 @@
             <div class="profile-agents-row" id="profile-agents-row"><!-- filled by JS --></div>
           </div>
 
-          <!-- Loop Agents -->
+          <!-- Trigger Agents -->
           <div class="fleet-section">
             <div class="fleet-section-hd">
-              <div class="fleet-section-lbl">⟳ Loop</div>
-              <div class="fleet-section-sub">Scheduled · runs on a timer</div>
+              <div class="fleet-section-lbl">⚡ Trigger</div>
+              <div class="fleet-section-sub">Scheduled or event-driven · loop &amp; reactive</div>
             </div>
-            <div class="fleet-grid" id="loop-grid"><!-- filled by JS --></div>
-          </div>
-
-          <!-- Reactive Agents -->
-          <div class="fleet-section">
-            <div class="fleet-section-hd">
-              <div class="fleet-section-lbl">⚡ Reactive</div>
-              <div class="fleet-section-sub">Event-driven · triggered by external events</div>
-            </div>
-            <div class="fleet-grid" id="reactive-grid"><!-- filled by JS --></div>
+            <div class="fleet-grid" id="trigger-grid"><!-- filled by JS --></div>
           </div>
 
           <!-- Runner Agents (from SkillRunner backend) -->
@@ -298,6 +275,22 @@
   <span id="toast-msg"></span>
   <span class="toast-view" id="toast-view-link" style="display:none">View</span>
   <button class="toast-close" onclick="dismissToast()">&#10005;</button>
+</div>
+
+<!-- Session Picker Modal -->
+<div id="sess-picker-modal" class="modal-overlay" onclick="closeSessPickerModal(event)">
+  <div class="modal-box sess-picker-box" id="sess-picker-box">
+    <div class="modal-head">
+      <div class="modal-title">📺 Open Session</div>
+      <button class="modal-close-btn" onclick="closeSessPickerModal()">✕</button>
+    </div>
+    <div class="modal-body sess-picker-body" id="sess-picker-body">
+      <!-- filled by JS: renderSessPickerTree() -->
+    </div>
+    <div class="sess-picker-footer">
+      <button class="sk-new-btn" onclick="newSessionFromPicker()">＋ New Session</button>
+    </div>
+  </div>
 </div>
 
 <!-- New Skill Modal -->

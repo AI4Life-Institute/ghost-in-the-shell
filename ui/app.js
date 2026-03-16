@@ -300,10 +300,18 @@ const DATA_FILES = [
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────
-let activeSessId = null;      // channel_id of the open PTY session
-let sessTerminal = null;      // single xterm.js Terminal instance
+let activeSessId = null;      // channel_id of the focused pane's session
+let sessTerminal = null;      // compat: points to panes[0].terminal
 let allSessions = [];         // all sessions from backend
 let tmuxSession = 'ghost';    // tmux session name from backend
+
+// Workspace pane state
+// panes[i] = { channelId: str|null, terminal: Terminal|null, fitAddon: FitAddon|null, ro: ResizeObserver|null }
+let panes = [ { channelId: null, terminal: null, fitAddon: null, ro: null },
+              { channelId: null, terminal: null, fitAddon: null, ro: null } ];
+let activePaneIdx = 0;        // which pane is focused
+let devMode = false;          // global dev mode toggle
+let sessPickerTargetPane = 0; // which pane the picker is opening for
 let curMode = 'build';
 let curAgentId = 'nash-reporter';
 let curProfileId = 'personal-chrome';
@@ -379,105 +387,473 @@ function closeAgentsPopover() {
   document.getElementById('agents-popover').classList.remove('on');
 }
 
-// ── Build view: session sidebar + terminal ─────────────────────────────────
-function renderSessions(sessions) {
-  const list = document.getElementById('sess-list');
-  if (!list) return;
-  list.innerHTML = '';
-  if (!sessions.length) {
-    list.innerHTML = '<div style="padding:20px 12px;color:rgba(255,255,255,0.3);font-size:12px">No sessions found</div>';
+// ── Build view: workspace grid helpers ────────────────────────────────────
+
+/** Short label for a session */
+function _sessLabel(sess) {
+  if (sess.window_name && sess.window_name !== '1' && !/^\d+$/.test(sess.window_name))
+    return sess.window_name;
+  return sess.work_dir ? sess.work_dir.split('/').pop() : (sess.coding_cli || 'session');
+}
+
+/** Normalize work_dir to a short display string */
+function _shortDir(work_dir) {
+  if (!work_dir) return '~';
+  // Home dir
+  let p = work_dir.replace(/^\/Users\/[^/]+/, '~');
+  // /Volumes/DriveName/... → strip the drive, keep remaining path
+  p = p.replace(/^\/Volumes\/[^/]+/, '');
+  if (!p) p = '/';
+  return p;
+}
+
+/** Project display name: last 2 path segments, e.g. ai4life/ghost-in-the-shell */
+function _projectName(work_dir) {
+  if (!work_dir) return '~';
+  const parts = work_dir.split('/').filter(Boolean);
+  if (parts.length === 0) return '~';
+  return parts.length >= 2 ? parts.slice(-2).join('/') : parts[0];
+}
+
+/** Root dir for grouping: strip subdirs so child threads group with their parent project */
+function _groupDir(work_dir) {
+  if (!work_dir) return '~';
+  const p = _shortDir(work_dir);
+  const parts = p.replace(/^~\/?/, '').split('/').filter(Boolean);
+  // Use up to 3 meaningful segments as the group key
+  const key = parts.slice(0, 3).join('/');
+  return key || p;
+}
+
+/**
+ * Build a tree from flat session list:
+ * returns { byDir: Map<dir, {roots:[], threads:Map<channelId,[]>}> }
+ * where roots = top-level sessions, threads = their children
+ */
+function buildSessionTree(sessions) {
+  // Separate alive vs dead
+  const alive = sessions.filter(s => s.alive !== false);
+  const dead  = sessions.filter(s => s.alive === false);
+
+  // Sort alive: desktop first, then by created_at desc (most recent first)
+  alive.sort((a, b) => {
+    if (a.platform === 'desktop' && b.platform !== 'desktop') return -1;
+    if (b.platform === 'desktop' && a.platform !== 'desktop') return 1;
+    return (b.created_at || '').localeCompare(a.created_at || '');
+  });
+
+  // Group alive by work_dir, keeping parent-child structure
+  const byDir = new Map(); // groupDir → { roots: [], childMap: Map<parentId, []> }
+
+  const channelIds = new Set(alive.map(s => s.channel_id));
+
+  alive.forEach(sess => {
+    const dir = _groupDir(sess.work_dir);
+    if (!byDir.has(dir)) byDir.set(dir, { roots: [], childMap: new Map() });
+    const group = byDir.get(dir);
+
+    if (sess.parent_channel_id && channelIds.has(sess.parent_channel_id)) {
+      // child thread — attach under parent
+      if (!group.childMap.has(sess.parent_channel_id))
+        group.childMap.set(sess.parent_channel_id, []);
+      group.childMap.get(sess.parent_channel_id).push(sess);
+    } else {
+      group.roots.push(sess);
+    }
+  });
+
+  return { byDir, dead };
+}
+
+/**
+ * "Recent" sessions = alive, not already open in a pane, most recent first.
+ * Returns up to 5 candidates.
+ */
+function recentSessions() {
+  const openIds = new Set(panes.map(p => p.channelId).filter(Boolean));
+  return allSessions
+    .filter(s => s.alive !== false && !openIds.has(s.channel_id))
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+    .slice(0, 5);
+}
+
+// ── Tab bar rendering ──────────────────────────────────────────────────────
+function renderSessionTabs() {
+  const bar = document.getElementById('ws-tabbar');
+  if (!bar) return;
+
+  // Keep the + and devmode buttons; remove old tabs and dividers
+  const addBtn = bar.querySelector('.ws-tab-add');
+  const rightEl = bar.querySelector('.ws-tabbar-right');
+  bar.innerHTML = '';
+
+  let lastDir = null;
+  panes.forEach((pane, idx) => {
+    const sess = pane.channelId ? allSessions.find(s => s.channel_id === pane.channelId) : null;
+    const dir = sess ? _groupDir(sess.work_dir) : null;
+
+    // Work_dir divider between different dirs
+    if (dir && lastDir !== null && dir !== lastDir) {
+      const div = document.createElement('div');
+      div.className = 'ws-tab-divider';
+      bar.appendChild(div);
+    }
+    if (dir) lastDir = dir;
+
+    const tab = document.createElement('div');
+    tab.className = 'ws-tab' + (idx === activePaneIdx ? ' on' : '');
+    if (sess) {
+      const status = _paneStatus(pane);
+      const dotCls = status === 'active' ? 'g' : status === 'busy' ? '' : 'd';
+      const deadCls = sess.alive === false ? ' dead' : status === 'busy' ? ' busy' : '';
+      tab.className += deadCls;
+      const platIco = sess.platform === 'desktop' ? '🖥' : '💬';
+      tab.innerHTML =
+        `<div class="ws-tab-dot ${dotCls}"></div>` +
+        `<span>${platIco} ${esc(_sessLabel(sess))}</span>`;
+    } else {
+      tab.innerHTML = `<span style="opacity:.35">Empty pane</span>`;
+    }
+    tab.onclick = () => focusPane(idx);
+    bar.appendChild(tab);
+  });
+
+  // Re-attach + and devmode
+  if (addBtn) bar.appendChild(addBtn);
+  else {
+    const a = document.createElement('div');
+    a.className = 'ws-tab-add';
+    a.title = 'Open session in new pane';
+    a.textContent = '＋';
+    a.onclick = () => openSessionPicker(-1);
+    bar.appendChild(a);
+  }
+  if (rightEl) bar.appendChild(rightEl);
+  else {
+    const r = document.createElement('div');
+    r.className = 'ws-tabbar-right';
+    r.innerHTML = `<div class="devmode-btn${devMode?' on':''}" id="devmode-btn" onclick="toggleDevMode()"><div class="devmode-dot"></div><span>>_ Dev</span></div>`;
+    bar.appendChild(r);
+  }
+}
+
+function _paneStatus(pane) {
+  if (!pane.channelId) return 'empty';
+  // Read live status set by pane_update events
+  const s = allSessions.find(ss => ss.channel_id === pane.channelId);
+  if (!s || s.alive === false) return 'stopped';
+  return s._status || 'idle';
+}
+
+// ── Grid rendering ─────────────────────────────────────────────────────────
+function renderGrid() {
+  const grid = document.getElementById('ws-grid');
+  if (!grid) return;
+
+  // Adjust column count
+  grid.style.gridTemplateColumns = panes.length === 1 ? '1fr' : '1fr 1fr';
+
+  // Create missing panels; remove excess
+  while (grid.children.length < panes.length) {
+    const idx = grid.children.length;
+    grid.appendChild(_makePanelEl(idx));
+  }
+  while (grid.children.length > panes.length) {
+    grid.removeChild(grid.lastChild);
+  }
+
+  // Update each panel header
+  panes.forEach((pane, idx) => {
+    const panelEl = grid.children[idx];
+    if (!panelEl) return;
+    panelEl.classList.toggle('active', idx === activePaneIdx);
+    _updatePanelHeader(panelEl, pane, idx);
+    _ensurePaneTerm(panelEl, pane, idx);
+  });
+
+  renderSessionTabs();
+}
+
+function _makePanelEl(idx) {
+  const el = document.createElement('div');
+  el.className = 'ws-panel' + (idx === activePaneIdx ? ' active' : '');
+  el.dataset.paneIdx = idx;
+  el.innerHTML = _panelHeadHTML(null, idx) + '<div class="wsp-term-wrap"></div>';
+  el.querySelector('.wsp-head').onclick = () => focusPane(idx);
+  return el;
+}
+
+function _panelHeadHTML(pane, idx) {
+  const sess = pane && pane.channelId ? allSessions.find(s => s.channel_id === pane.channelId) : null;
+  if (!sess) {
+    return `<div class="wsp-head" onclick="focusPane(${idx})">` +
+      `<div class="pane-status"><div class="pane-dot stopped"></div><span class="pane-status-stopped">Empty</span></div>` +
+      `<div class="wsp-name" style="opacity:.35">No session</div>` +
+      `<button class="wsp-status-lbl" style="background:none;border:none;cursor:pointer;color:rgba(0,0,0,.38);font-size:11px" onclick="event.stopPropagation();openSessionPicker(${idx})">Open…</button>` +
+      `</div>`;
+  }
+  const status = _paneStatus(pane);
+  const dotCls = status === 'active' ? 'active' : status === 'busy' ? 'idle' : 'stopped';
+  const lblCls = status === 'active' ? 'pane-status-active' : status === 'busy' ? 'pane-status-idle' : 'pane-status-stopped';
+  const lblTxt = status === 'active' ? '▶ Active' : status === 'busy' ? '⏳ Busy' : status === 'stopped' ? '⬜ Stopped' : '⏸ Idle';
+  const cli = (sess.coding_cli || 'claude').toLowerCase();
+  const cliCls = cli === 'codex' ? ' codex' : cli === 'opencode' ? ' opencode' : '';
+  const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '';
+  return `<div class="wsp-head" onclick="focusPane(${idx})">` +
+    `<div class="pane-status"><div class="pane-dot ${dotCls}"></div><span class="${lblCls}">${lblTxt}</span></div>` +
+    `<div class="wsp-name">${esc(_sessLabel(sess))}</div>` +
+    `<div class="wsp-ai">${esc(cli)}${dir ? ' · ' + esc(dir) : ''}</div>` +
+    `<button class="wsp-status-lbl" style="background:none;border:none;cursor:pointer;color:rgba(0,0,0,.38);font-size:11px" onclick="event.stopPropagation();openSessionPicker(${idx})">Change</button>` +
+    `</div>`;
+}
+
+function _updatePanelHeader(panelEl, pane, idx) {
+  const existingHead = panelEl.querySelector('.wsp-head');
+  if (existingHead) {
+    const newHead = document.createElement('div');
+    newHead.innerHTML = _panelHeadHTML(pane, idx);
+    panelEl.replaceChild(newHead.firstChild, existingHead);
+  }
+}
+
+function _ensurePaneTerm(panelEl, pane, idx) {
+  let wrap = panelEl.querySelector('.wsp-term-wrap');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.className = 'wsp-term-wrap';
+    panelEl.appendChild(wrap);
+  }
+
+  if (!pane.channelId) {
+    // Show empty placeholder
+    if (!wrap.querySelector('.wsp-empty')) {
+      wrap.innerHTML = `<div class="wsp-empty" onclick="openSessionPicker(${idx})"><div class="wsp-empty-ico">⌗</div><span>Click to open a session</span></div>`;
+    }
     return;
   }
 
-  // Sort: desktop first, then by window_name
-  const sorted = [...sessions].sort((a, b) => {
-    const ap = (a.platform || '');
-    const bp = (b.platform || '');
-    if (ap === 'desktop' && bp !== 'desktop') return -1;
-    if (bp === 'desktop' && ap !== 'desktop') return 1;
-    return (a.window_name || '').localeCompare(b.window_name || '');
+  // Terminal already open for this channel
+  if (pane.terminal && pane.channelId) return;
+
+  // Init new terminal
+  wrap.innerHTML = '';
+  _initPaneTerm(wrap, pane, idx);
+}
+
+function _initPaneTerm(wrap, pane, idx) {
+  const term = new Terminal({
+    fontFamily: '"SF Mono", "JetBrains Mono", "Menlo", monospace',
+    fontSize: 13,
+    lineHeight: 1.45,
+    theme: {
+      background: 'transparent',
+      foreground: 'rgba(255,255,255,0.85)',
+      cursor: 'rgba(255,255,255,0.75)',
+      selectionBackground: 'rgba(99,102,241,0.35)',
+      black: '#1a1a1a', red: '#ff6b6b', green: '#51cf66',
+      yellow: '#ffd43b', blue: '#74c0fc', magenta: '#cc5de8',
+      cyan: '#3bc9db', white: '#e9ecef',
+      brightBlack: '#868e96', brightRed: '#ff8787',
+      brightGreen: '#8ce99a', brightYellow: '#ffe066',
+      brightBlue: '#91d0ff', brightMagenta: '#da77f2',
+      brightCyan: '#66d9e8', brightWhite: '#f8f9fa',
+    },
+    allowTransparency: true,
+    cursorBlink: true,
+    scrollback: 5000,
   });
 
-  sorted.forEach(sess => {
-    const isActive = sess.channel_id === activeSessId;
-    const cli = (sess.coding_cli || 'claude').toLowerCase();
-    const clsExtra = cli === 'codex' ? ' codex' : cli === 'opencode' ? ' opencode' : cli === 'copilot' ? ' copilot' : '';
-    const platform = sess.platform || 'discord';
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(wrap);
+  fitAddon.fit();
+  term.focus();
 
-    // Platform icon
-    const platIco = platform === 'desktop' ? '🖥' : platform === 'discord' ? '💬' : '🔗';
+  pane.terminal = term;
+  pane.fitAddon = fitAddon;
 
-    // Short working directory: last 2 path segments
-    let dirShort = '~';
-    if (sess.work_dir) {
-      const parts = sess.work_dir.replace(/^\/Users\/[^/]+/, '~').split('/').filter(Boolean);
-      dirShort = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : parts.join('/') || '~';
+  // compat pointer for legacy code
+  if (idx === 0) { sessTerminal = term; activeSessId = pane.channelId; }
+
+  // Keyboard input → PTY
+  term.onData((data) => {
+    const encoded = btoa(unescape(encodeURIComponent(data)));
+    (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('pty_input', {
+      channel_id: pane.channelId, data: encoded,
+    }).catch(() => {});
+  });
+
+  // Open PTY
+  const binding = allSessions.find(s => s.channel_id === pane.channelId);
+  if (binding) {
+    (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('open_pty', {
+      channel_id: pane.channelId,
+      tmux_session: tmuxSession,
+      window_id: binding.window_id,
+      rows: term.rows, cols: term.cols,
+    }).catch(() => {});
+  }
+
+  // Auto-resize
+  const ro = new ResizeObserver(() => {
+    fitAddon.fit();
+    if (term.rows && term.cols) {
+      (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('resize_pty', {
+        channel_id: pane.channelId, rows: term.rows, cols: term.cols,
+      }).catch(() => {});
     }
-
-    // Session label: window name if meaningful, else dir name
-    const name = sess.window_name && sess.window_name !== '1' && !/^\d+$/.test(sess.window_name)
-      ? sess.window_name
-      : (sess.work_dir ? sess.work_dir.split('/').pop() : cli);
-
-    const item = document.createElement('div');
-    item.className = 'sess-item' + (isActive ? ' active' : '');
-    item.dataset.channelId = sess.channel_id;
-    item.innerHTML =
-      `<div class="sess-row1">` +
-        `<span class="sess-dot-sm${isActive ? ' active' : ''}"></span>` +
-        `<span class="sess-nm">${platIco} ${esc(name)}</span>` +
-        `<span class="sess-cli-b${clsExtra}">${esc(cli)}</span>` +
-      `</div>` +
-      `<div class="sess-wd">${esc(dirShort)}</div>`;
-    item.onclick = () => activateSession(sess);
-    list.appendChild(item);
   });
+  ro.observe(wrap);
+  pane.ro = ro;
+}
+
+// ── Pane focus / assignment ────────────────────────────────────────────────
+function focusPane(idx) {
+  activePaneIdx = idx;
+  activeSessId = panes[idx]?.channelId || null;
+  const grid = document.getElementById('ws-grid');
+  if (grid) {
+    Array.from(grid.children).forEach((el, i) => el.classList.toggle('active', i === idx));
+  }
+  renderSessionTabs();
+}
+
+function assignSessionToPane(channelId, paneIdx) {
+  const pane = panes[paneIdx];
+  if (!pane) return;
+
+  // Clean up old terminal + PTY
+  if (pane.channelId && window.__TAURI__) {
+    (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('close_pty', { channel_id: pane.channelId }).catch(() => {});
+  }
+  if (pane.terminal) { pane.terminal.dispose(); pane.terminal = null; }
+  if (pane.ro) { pane.ro.disconnect(); pane.ro = null; }
+  pane.fitAddon = null;
+  pane.channelId = channelId;
+
+  if (paneIdx === 0) { activeSessId = channelId; sessTerminal = null; }
+
+  renderGrid();
+  focusPane(paneIdx);
+}
+
+// ── Session Picker ─────────────────────────────────────────────────────────
+function openSessionPicker(paneIdx) {
+  sessPickerTargetPane = paneIdx >= 0 ? paneIdx : 0;
+  renderSessPickerTree();
+  document.getElementById('sess-picker-modal').classList.add('on');
+}
+
+function closeSessPickerModal(event) {
+  if (event && event.target !== document.getElementById('sess-picker-modal')) return;
+  document.getElementById('sess-picker-modal').classList.remove('on');
+}
+
+function renderSessPickerTree() {
+  const body = document.getElementById('sess-picker-body');
+  if (!body) return;
+  const { byDir, dead } = buildSessionTree(allSessions);
+
+  let html = '';
+
+  byDir.forEach((group, dir) => {
+    // Get a representative work_dir for this group to show a nice project name
+    const repSess = group.roots[0] || [...group.childMap.values()][0]?.[0];
+    const projName = repSess ? _projectName(repSess.work_dir) : dir;
+    html += `<div class="sp-dir-hd">📁 ${esc(projName)}</div>`;
+    group.roots.forEach(sess => {
+      html += _spRowHTML(sess, 0);
+      const children = group.childMap.get(sess.channel_id) || [];
+      children.forEach(child => { html += _spRowHTML(child, 1); });
+    });
+  });
+
+  if (dead.length) {
+    html += `<div class="sp-dead-section">Stopped</div>`;
+    dead.forEach(sess => { html += _spRowHTML(sess, 0, true); });
+  }
+
+  if (!html) {
+    html = `<div style="padding:24px;text-align:center;color:rgba(0,0,0,.3);font-size:13px">No sessions found.<br>Start a new one below.</div>`;
+  }
+
+  body.innerHTML = html;
+}
+
+function _spRowHTML(sess, depth, isDead) {
+  const name = _sessLabel(sess);
+  const cli = (sess.coding_cli || 'claude').toLowerCase();
+  const cliCls = cli === 'codex' ? ' codex' : cli === 'opencode' ? ' opencode' : '';
+  const platIco = sess.platform === 'desktop' ? '🖥' : '💬';
+  const statusCls = isDead ? 'stopped' : (sess._status === 'active' ? 'alive' : 'idle');
+  const statusIco = isDead ? '⬜' : (sess._status === 'active' ? '▶' : '⏸');
+  const deadCls = isDead ? ' sp-dead' : '';
+  const depthCls = depth === 1 ? ' sp-thread' : depth >= 2 ? ' sp-thread2' : '';
+  return `<div class="sp-row${depthCls}${deadCls}" onclick="pickSession('${esc(sess.channel_id)}')">` +
+    `<div class="sp-status ${statusCls}">${statusIco}</div>` +
+    `<div class="sp-name">${platIco} ${esc(name)}</div>` +
+    `<div class="sp-meta">` +
+      `<span class="sp-cli${cliCls}">${esc(cli)}</span>` +
+    `</div>` +
+    `</div>`;
+}
+
+function pickSession(channelId) {
+  document.getElementById('sess-picker-modal').classList.remove('on');
+  assignSessionToPane(channelId, sessPickerTargetPane);
+}
+
+function newSessionFromPicker() {
+  document.getElementById('sess-picker-modal').classList.remove('on');
+  const name = prompt('Session name:', 'ghost');
+  if (!name) return;
+  const refSess = allSessions[0];
+  const work_dir = refSess?.work_dir || '~';
+  if (window.ghost) window.ghost.send('new_session', { name, work_dir, cli: 'claude' }).catch(() => {});
+}
+
+function newSession() { newSessionFromPicker(); } // compat
+
+// ── Top-level session refresh (called on sessions event) ───────────────────
+function renderSessions(sessions) {
+  allSessions = sessions;
+
+  // On first load: auto-assign recent alive sessions to empty panes
+  const aliveSorted = sessions
+    .filter(s => s.alive !== false)
+    .sort((a, b) => {
+      if (a.platform === 'desktop' && b.platform !== 'desktop') return -1;
+      if (b.platform === 'desktop' && a.platform !== 'desktop') return 1;
+      return (b.created_at || '').localeCompare(a.created_at || '');
+    });
+
+  let assigned = 0;
+  panes.forEach((pane, idx) => {
+    if (!pane.channelId && aliveSorted[assigned]) {
+      pane.channelId = aliveSorted[assigned].channel_id;
+      if (idx === 0) { activeSessId = pane.channelId; }
+      assigned++;
+    }
+  });
+
+  renderGrid();
 }
 
 function activateSession(sess) {
-  if (activeSessId === sess.channel_id && sessTerminal) return; // already open
-  activeSessId = sess.channel_id;
-
-  // Highlight sidebar
-  document.querySelectorAll('.sess-item').forEach(el => {
-    const on = el.dataset.channelId === sess.channel_id;
-    el.classList.toggle('active', on);
-    const dot = el.querySelector('.sess-dot-sm');
-    if (dot) { dot.classList.toggle('active', on); dot.classList.remove('busy'); }
-  });
-
-  // Update topbar
-  const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '~';
-  const nameEl = document.getElementById('term-sess-name');
-  const cliEl  = document.getElementById('term-sess-cli');
-  const dirEl  = document.getElementById('term-sess-dir');
-  if (nameEl) { nameEl.textContent = sess.window_name || sess.coding_cli; nameEl.style.color = ''; }
-  if (cliEl)  cliEl.textContent = sess.coding_cli || 'claude';
-  if (dirEl)  dirEl.textContent = dir;
-
-  // Show terminal, hide empty
-  const termEl  = document.getElementById('main-term');
-  const emptyEl = document.getElementById('term-empty');
-  if (termEl)  termEl.style.display = '';
-  if (emptyEl) emptyEl.style.display = 'none';
-
-  // Open PTY terminal
-  initPtyTerminal(sess.channel_id);
+  // compat: open session in active pane
+  assignSessionToPane(sess.channel_id, activePaneIdx);
 }
 
-function newSession() {
-  const name = prompt('Session name:', 'ghost');
-  if (!name) return;
-  // Default work_dir to the active session's dir, or the first session's dir
-  const refSess = allSessions.find(s => s.channel_id === activeSessId) || allSessions[0];
-  const work_dir = refSess?.work_dir || '~';
-  if (window.ghost) {
-    window.ghost.send('new_session', { name, work_dir, cli: 'claude' });
-  }
+// ── Dev Mode toggle ────────────────────────────────────────────────────────
+function toggleDevMode() {
+  devMode = !devMode;
+  const btn = document.getElementById('devmode-btn');
+  if (btn) btn.classList.toggle('on', devMode);
+  const grid = document.getElementById('ws-grid');
+  if (grid) grid.classList.toggle('devmode', devMode);
 }
 
 function selectBuildTab() {} // compat stub
-function toggleDevMode() {}  // compat stub
 function addWindow() {}      // compat stub
 function addPane() {}        // compat stub
 
@@ -579,20 +955,13 @@ function renderFleet() {
   }
   renderProfileAgents(curProfileId);
 
-  // Loop grid
-  const loopGrid = document.getElementById('loop-grid');
-  if (loopGrid) {
-    let html = AGENTS.loop.map(_fleetCardHTML).join('');
-    html += `<div class="fleet-card-add" onclick="showToast('Type /agent in Build to create a Loop Agent')">＋ New Loop Agent</div>`;
-    loopGrid.innerHTML = html;
-  }
-
-  // Reactive grid
-  const reactiveGrid = document.getElementById('reactive-grid');
-  if (reactiveGrid) {
-    let html = AGENTS.reactive.map(_fleetCardHTML).join('');
-    html += `<div class="fleet-card-add" onclick="showToast('Type /agent in Build to create a Reactive Agent')">＋ New Reactive Agent</div>`;
-    reactiveGrid.innerHTML = html;
+  // Trigger grid (loop + reactive combined)
+  const triggerGrid = document.getElementById('trigger-grid');
+  if (triggerGrid) {
+    const all = [...(AGENTS.loop || []), ...(AGENTS.reactive || [])];
+    let html = all.map(_fleetCardHTML).join('');
+    html += `<div class="fleet-card-add" onclick="showToast('Type /agent in Build to create a Trigger Agent')">＋ New Trigger Agent</div>`;
+    triggerGrid.innerHTML = html;
   }
 }
 
@@ -1509,9 +1878,8 @@ document.addEventListener('click', e => {
   }
 });
 
-// ── Tauri v2 IPC shim ─────────────────────────────────────────────────────
-// Exposes the same window.ghost API as Electron's preload.js, so ghostSetup()
-// works unchanged in both runtimes. Runs only when window.__TAURI__ is present.
+// ── Tauri v2 IPC ──────────────────────────────────────────────────────────
+// Sets up window.ghost API from Tauri invoke + events.
 function installTauriShim() {
   if (window.ghost || !window.__TAURI__) return;
   // Tauri v2: invoke lives at window.__TAURI__.core.invoke
@@ -1537,20 +1905,13 @@ function installTauriShim() {
   const listenPromise = tauriEvent.listen('python-event', (e) => {
     const data = e.payload;
     _dbg('python-event received: ' + JSON.stringify(data).slice(0, 120));
-    // Debug: show first event received in sess-list
-    const dbg = document.getElementById('sess-list');
-    if (dbg && !dbg.dataset.gotEvent) {
-      dbg.dataset.gotEvent = '1';
-      dbg.innerHTML = `<div style="padding:8px 12px;color:rgba(255,255,255,0.5);font-size:10px;word-break:break-all">event: ${JSON.stringify(data).slice(0,120)}</div>`;
-    }
     if (data?.event) _dispatch(data.event, data);
   });
   listenPromise.then(() => {
     _dbg('tauriEvent.listen python-event: registered OK');
   }).catch(err => {
     _dbg('tauriEvent.listen python-event ERROR: ' + err);
-    const dbg = document.getElementById('sess-list');
-    if (dbg) dbg.innerHTML = `<div style="padding:8px 12px;color:#f87171;font-size:11px">listen error: ${err}</div>`;
+    showToast('IPC error: ' + err);
   });
 
   // Route PTY output events (emitted directly from Rust as 'pty-output')
@@ -1578,9 +1939,7 @@ function installTauriShim() {
   _dbg('installTauriShim: window.ghost set');
 }
 
-// ── Ghost Bridge (Electron IPC) ────────────────────────────────────────────
-
-function sendPane(idx) {} // compat stub — input now handled by PTY directly
+function sendPane(idx) {} // compat stub
 
 function _addPaneMsg(idx, role, text) {
   const msgs = idx === 0
@@ -1601,75 +1960,9 @@ function _addPaneMsg(idx, role, text) {
 
 function _initTerminalWhenVisible(idx, channelId) {}  // compat stub
 
+// compat: route to new per-pane API
 function initPtyTerminal(channelId) {
-  if (sessTerminal) {
-    sessTerminal.dispose();
-    sessTerminal = null;
-  }
-
-  const termEl = document.getElementById('main-term');
-  if (!termEl) return;
-  termEl.innerHTML = '';
-
-  const term = new Terminal({
-    fontFamily: '"SF Mono", "JetBrains Mono", "Menlo", monospace',
-    fontSize: 13,
-    lineHeight: 1.45,
-    theme: {
-      background: 'transparent',
-      foreground: 'rgba(255,255,255,0.85)',
-      cursor: 'rgba(255,255,255,0.75)',
-      selectionBackground: 'rgba(99,102,241,0.35)',
-      black: '#1a1a1a', red: '#ff6b6b', green: '#51cf66',
-      yellow: '#ffd43b', blue: '#74c0fc', magenta: '#cc5de8',
-      cyan: '#3bc9db', white: '#e9ecef',
-      brightBlack: '#868e96', brightRed: '#ff8787',
-      brightGreen: '#8ce99a', brightYellow: '#ffe066',
-      brightBlue: '#91d0ff', brightMagenta: '#da77f2',
-      brightCyan: '#66d9e8', brightWhite: '#f8f9fa',
-    },
-    allowTransparency: true,
-    cursorBlink: true,
-    scrollback: 5000,
-  });
-
-  const fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(termEl);
-  fitAddon.fit();
-  sessTerminal = term;
-
-  // Keyboard input → PTY
-  term.onData((data) => {
-    if (window.__TAURI__) {
-      const encoded = btoa(unescape(encodeURIComponent(data)));
-      (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('pty_input', { channel_id: channelId, data: encoded });
-    }
-  });
-
-  // Open PTY on backend
-  const binding = allSessions.find(s => s.channel_id === channelId);
-  if (binding && window.__TAURI__) {
-    (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('open_pty', {
-      channel_id: channelId,
-      tmux_session: tmuxSession,
-      window_id: binding.window_id,
-      rows: term.rows,
-      cols: term.cols,
-    }).catch(err => console.error('open_pty failed:', err));
-  }
-
-  // Auto-resize
-  const ro = new ResizeObserver(() => {
-    fitAddon.fit();
-    if (window.__TAURI__ && term.rows && term.cols) {
-      (window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke)('resize_pty', {
-        channel_id: channelId, rows: term.rows, cols: term.cols,
-      }).catch(() => {});
-    }
-  });
-  ro.observe(termEl);
-  term.focus();
+  assignSessionToPane(channelId, activePaneIdx);
 }
 
 function ghostSetup() {
@@ -1686,52 +1979,41 @@ function ghostSetup() {
   });
 
   window.ghost.on('sessions', (data) => {
-    const _sbBg = (() => { try { const e = document.getElementById('sess-sidebar'); return e ? getComputedStyle(e).backgroundColor : 'NULL'; } catch(ex) { return 'ERR:'+ex; } })();
-    _dbg('ghostSetup: sessions count=' + (data.sessions || []).length + ' sidebar_bg=' + _sbBg);
-    allSessions = data.sessions || [];
+    _dbg('ghostSetup: sessions count=' + (data.sessions || []).length);
     if (data.tmux_session) tmuxSession = data.tmux_session;
-    renderSessions(allSessions);
-    // Auto-select first session on first load
-    if (!activeSessId && allSessions.length > 0) {
-      activateSession(allSessions[0]);
-    }
-    // Dev verification: log computed styles inline (no setTimeout)
-    if (!window._devCheckDone) {
-      window._devCheckDone = true;
-      const sb = document.getElementById('sess-sidebar');
-      const firstNm = document.querySelector('.sess-nm');
-      _dbg('STYLE CHECK: sidebar exists=' + !!sb +
-        (sb ? ' bg=' + getComputedStyle(sb).backgroundColor : '') +
-        ' sess-nm exists=' + !!firstNm +
-        (firstNm ? ' color=' + getComputedStyle(firstNm).color : ''));
-    }
+    renderSessions(data.sessions || []);
   });
 
   window.ghost.on('pane_update', (data) => {
-    // Update status dot in sidebar
-    const item = document.querySelector(`.sess-item[data-channel-id="${data.channel_id}"]`);
-    if (!item) return;
-    const dot = item.querySelector('.sess-dot-sm');
-    if (!dot) return;
-    if (data.channel_id === activeSessId) {
-      dot.className = 'sess-dot-sm active';
-    } else if (data.status === 'busy') {
-      dot.className = 'sess-dot-sm busy';
-    } else {
-      dot.className = 'sess-dot-sm';
+    // Update live status on the session object
+    const sess = allSessions.find(s => s.channel_id === data.channel_id);
+    if (sess) {
+      sess._status = data.status === 'busy' ? 'busy' : 'idle';
+    }
+
+    // Refresh pane headers + tabs (lightweight)
+    renderSessionTabs();
+    const grid = document.getElementById('ws-grid');
+    if (grid) {
+      panes.forEach((pane, idx) => {
+        if (pane.channelId !== data.channel_id) return;
+        const panelEl = grid.children[idx];
+        if (panelEl) _updatePanelHeader(panelEl, pane, idx);
+      });
     }
   });
 
-  // PTY output → xterm.js
+  // PTY output → route to the correct pane terminal
   window.ghost.on('pty-output', (data) => {
-    if (data.channel_id !== activeSessId || !sessTerminal) return;
-    if (data.closed) { sessTerminal.write('\r\n[terminal closed]\r\n'); return; }
+    const pane = panes.find(p => p.channelId === data.channel_id);
+    if (!pane || !pane.terminal) return;
+    if (data.closed) { pane.terminal.write('\r\n[terminal closed]\r\n'); return; }
     if (data.data) {
       try {
         const bytes = Uint8Array.from(atob(data.data), c => c.charCodeAt(0));
-        sessTerminal.write(bytes);
+        pane.terminal.write(bytes);
       } catch (e) {
-        sessTerminal.write(data.data);
+        pane.terminal.write(data.data);
       }
     }
   });
@@ -1788,8 +2070,7 @@ function ghostSetup() {
       .then(() => { _dbg('ghostSetup: sessions send OK (invoke returned)'); })
       .catch(err => {
         _dbg('ghostSetup: sessions send ERROR: ' + err);
-        const list = document.getElementById('sess-list');
-        if (list) list.innerHTML = `<div style="padding:8px 12px;color:#f87171;font-size:11px">IPC error: ${err}</div>`;
+        showToast('Sessions IPC error: ' + err);
       });
   }
   _requestSessions();
@@ -1805,6 +2086,9 @@ function ghostSetup() {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 (function init() {
+  // Render workspace grid (empty panes on load)
+  renderGrid();
+
   // fleet grid
   renderFleet();
 
@@ -1835,17 +2119,11 @@ function ghostSetup() {
     installTauriShim();
     if (window.ghost) {
       ghostSetup();
-      const dbg = document.getElementById('sess-list');
-      if (dbg && dbg.textContent.includes('Loading')) {
-        dbg.innerHTML = '<div style="padding:8px 12px;color:rgba(255,255,255,0.4);font-size:11px">Connected, waiting for sessions…</div>';
-      }
     } else if (attempts > 0) {
-      const dbg = document.getElementById('sess-list');
-      if (dbg) dbg.innerHTML = `<div style="padding:8px 12px;color:rgba(255,255,255,0.3);font-size:11px">Connecting… (${21-attempts}) __TAURI__=${!!window.__TAURI__}</div>`;
       setTimeout(() => _trySetup(attempts - 1), 100);
     } else {
-      const dbg = document.getElementById('sess-list');
-      if (dbg) dbg.innerHTML = '<div style="padding:8px 12px;color:#f87171;font-size:11px">No Tauri bridge — running in browser?</div>';
+      showToast('No bridge — running in browser mode');
+      renderGrid(); // show empty panes
     }
   }
   _trySetup(20);

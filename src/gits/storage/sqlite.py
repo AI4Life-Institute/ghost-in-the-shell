@@ -180,7 +180,7 @@ class TaskRepo:
 
     async def list_recent(self, limit: int = 50) -> list[dict]:
         cursor = await self._conn.execute(
-            "SELECT * FROM tasks ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
+            "SELECT * FROM tasks ORDER BY rowid DESC LIMIT ?", (limit,)
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]

@@ -985,7 +985,20 @@ async def _pane_watcher(engine: Any, emit_fn: Any, logger: Any) -> None:
 
 def _emit_sessions(engine: Any, emit_fn: Any) -> None:
     """Emit the current session list to the Electron/Tauri frontend."""
+    import subprocess as _sp
     bindings = engine.session_mgr.list_bindings()
+
+    # Determine which tmux windows are still alive
+    try:
+        result = _sp.run(
+            ["tmux", "list-windows", "-t", engine.tmux.session_name, "-F", "#{window_id}"],
+            capture_output=True, text=True,
+        )
+        alive_ids = {line.strip() for line in result.stdout.splitlines() if line.strip()} \
+            if result.returncode == 0 else {b.window_id for b in bindings}
+    except Exception:
+        alive_ids = {b.window_id for b in bindings}
+
     emit_fn({"event": "sessions",
              "tmux_session": engine.tmux.session_name,
              "sessions": [
@@ -996,6 +1009,9 @@ def _emit_sessions(engine: Any, emit_fn: Any) -> None:
             "work_dir": b.work_dir,
             "coding_cli": b.coding_cli,
             "platform": b.platform,
+            "parent_channel_id": b.parent_channel_id,
+            "created_at": b.created_at,
+            "alive": b.window_id in alive_ids,
         }
         for b in bindings
     ]})
