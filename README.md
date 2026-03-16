@@ -27,6 +27,7 @@ Watch your AI write code, review its terminal output, and approve permission pro
 - **Multi-CLI support** — works with Claude Code, Codex CLI, and OpenCode; switch between them per channel
 - **Threads & isolated worktrees** — `/fork` spins up a sub-task thread backed by a fresh git worktree, keeping parallel work cleanly separated
 - **Session resume** — reconnecting to a directory shows a session picker so you can continue where you left off
+- **Cross-CLI session import** — when resuming, sessions from other CLIs appear in the picker (marked `↗[codex]`); selecting one extracts the full conversation to `.gits-import.md` and injects it into a fresh session of your target CLI, so you can pick up a Codex conversation in Claude Code (or vice versa) without losing context
 - **tmux-backed sessions** — each project runs in a real tmux window; developers get full terminal access locally while Ghost handles the Discord bridge
 - **Subscription-safe** — Ghost drives the official CLI tools (Claude Code, Codex) exactly as a human would; no API key required, no terms-of-service gray area — your existing Pro/Max subscription just works
 
@@ -114,7 +115,7 @@ ghost start --dev
 |---|---|
 | `/bind <path> [mode] [cli]` | Bind channel to a project, launch CLI. `mode`: `default` (confirm) or `bypassPermissions` (YOLO) |
 | `/unbind` | Unbind and close the window |
-| `/status` | Show binding status and session info |
+| `/info` | Show binding info, session file path, and imported context file |
 | `/screenshot` | Send a terminal screenshot |
 | `/esc` | Send Escape key (interrupt current operation) |
 | `/kill` | Close window and archive thread |
