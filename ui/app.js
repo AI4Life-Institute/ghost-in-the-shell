@@ -1685,9 +1685,24 @@ function ghostSetup() {
   });
 
   // All listeners registered — now request data
-  window.ghost.send('sessions');
-  window.ghost.send('agents', {});
-  window.ghost.send('skills', {});
+  // Catch errors so we can see what's failing
+  function _requestSessions() {
+    window.ghost.send('sessions')
+      .then(() => {})
+      .catch(err => {
+        const list = document.getElementById('sess-list');
+        if (list) list.innerHTML = `<div style="padding:8px 12px;color:#f87171;font-size:11px">IPC error: ${err}</div>`;
+      });
+  }
+  _requestSessions();
+  window.ghost.send('agents', {}).catch(() => {});
+  window.ghost.send('skills', {}).catch(() => {});
+
+  // Retry sessions every 3s until they arrive
+  const _sessRetry = setInterval(() => {
+    if (allSessions.length > 0) { clearInterval(_sessRetry); return; }
+    _requestSessions();
+  }, 3000);
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
