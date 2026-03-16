@@ -1,173 +1,171 @@
 # skills-desktop-ui Specification
 
 ## Purpose
-The Ghost desktop app manages a **workspace** — one or more project folders open simultaneously (VS Code-style multi-root). Each folder owns its skills, logs, and run database under a hidden `.ghost/` subdirectory. Global tools (installed once) are available in all folders. The UI surfaces skills and agents from all open folders, grouped by project.
+The Ghost desktop app surfaces agents, skills, tools, and data from all open project folders. User assets (`agents/`, `skills/`, `tools/`, `data/`) are visible. Ghost internals (`.ghost/`) are hidden.
 
-## Storage Convention
-
-User assets (skills, data) are **visible** in the project folder. Ghost's internal runtime files are **hidden** in `.ghost/`.
+## Project Layout Convention
 
 ```
+<project>/
+  agents/<name>.md              USER ASSET — Agent definitions
+  skills/<name>/skill.md        USER ASSET — Skill definitions (+ optional support files)
+  tools/<name>/tool.md          USER ASSET — Tool definitions (+ optional impl code)
+  data/ghost.db                 USER ASSET — Run metadata
+  data/<name>.db|csv|...        USER ASSET — Agent output data
+
+  .ghost/                       Ghost-internal — hidden
+    config.yaml                 Per-project config overrides (optional)
+    logs/<agent>/<run-id>.log   Execution logs
+    logs/<agent>/current.log    Symlink → latest run
+
 ~/.config/ghost/
-  config.yaml                          ← Ghost global config
-  tools/<name>.md                      ← globally installed tools
+  config.yaml                   Global Ghost config
+  tools/<name>/tool.md          Globally shared tools (fallback for all projects)
 
-~/.gits/workspace.json                 ← persisted list of open folder paths
-
-<folder>/
-  skills/                              ← USER ASSET — visible; skill definitions the user owns
-    <name>.md
-  data/                                ← USER ASSET — visible; databases + output files
-    ghost.db
-
-  .ghost/                              ← Ghost-internal — hidden; not user-facing
-    config.yaml                        ← per-project config overrides (optional)
-    logs/<skill>/<run-id>.log          ← execution logs
-    logs/<skill>/current.log           ← symlink → latest run log
+~/.gits/workspace.json          Persisted list of open project folder paths
 ```
 
 **Global `~/.config/ghost/config.yaml` fields:**
 
 | Field | Default | Description |
 |---|---|---|
-| `guard.ops_session` | `ghost-ops` | tmux session used as Guard for all projects |
-| `guard.timeout_minutes` | `60` | max wait time for Guard decision |
-| `logs.max_files` | `30` | max log files kept per skill |
-| `logs.max_age_days` | `7` | delete logs older than N days |
-| `runner.default_shell` | `zsh` | shell used to inherit environment |
-| `runner.default_on_failure` | `stop` | fallback if skill has no `on_failure` set |
-
-**Per-project `.ghost/config.yaml`** overrides the same fields for that folder only.
+| `guard.ops_session` | `ghost-ops` | tmux session used as Guard |
+| `guard.timeout_minutes` | `60` | Max wait for Guard decision |
+| `logs.max_files` | `30` | Max log files per agent |
+| `logs.max_age_days` | `7` | Delete logs older than N days |
+| `runner.default_shell` | `zsh` | Shell for environment inheritance |
+| `runner.default_on_failure` | `stop` | Fallback if agent has no `on_failure` |
 
 ## ADDED Requirements
 
-### Requirement: Workspace is a collection of folders
+### Requirement: Workspace is a collection of project folders
 The app SHALL maintain a workspace — a set of one or more project folders — persisted across restarts.
 
 #### Scenario: Add folder to workspace
 - **WHEN** the user selects a directory via the 📁 folder picker
-- **THEN** the frontend SHALL send `workspace_add {work_dir}` IPC command
-- **AND** the backend SHALL start a `SkillRunner` + `GitsDB` instance for that folder
-- **AND** the backend SHALL persist the folder list to `~/.gits/workspace.json`
-- **AND** the backend SHALL emit `workspace_changed`, then `skills_list` and `agents_list` aggregated across all open folders
+- **THEN** the frontend SHALL send `workspace_add {work_dir}`
+- **AND** the backend SHALL start an `AgentRunner` and `GitsDB` for that folder
+- **AND** emit `workspace_changed`, `agents_list`, `skills_list`, `tools_list`
 
 #### Scenario: Workspace restored on restart
 - **WHEN** the desktop app starts
-- **THEN** the backend SHALL read `~/.gits/workspace.json` and resume each saved folder's SkillRunner
+- **THEN** the backend SHALL read `~/.gits/workspace.json` and resume each saved folder
 - **AND** emit `workspace_changed` with the restored folder list
 
 #### Scenario: Remove folder from workspace
-- **WHEN** the user clicks ✕ on a folder chip in the UI
+- **WHEN** the user clicks ✕ on a folder chip
 - **THEN** the frontend SHALL send `workspace_remove {work_dir}`
-- **AND** the backend SHALL stop that folder's SkillRunner and remove it from persistence
-- **AND** the Skills panel and Agents panel SHALL remove all entries for that folder
+- **AND** all UI entries for that folder SHALL be removed within 1 second
 
-### Requirement: Skills are scoped to their project folder
-Each folder's skills SHALL be defined in `<folder>/.ghost/skills/` and managed independently.
+---
 
-#### Scenario: Skills panel grouped by folder
+### Requirement: Agents panel driven by real agent definitions
+The Agents panel SHALL display real `agents/*.md` data, not hardcoded mock data.
+
+#### Scenario: Agent cards rendered from agents_list
+- **WHEN** `agents_list` is received
+- **THEN** each agent SHALL appear as a card showing: name, trigger schedule (human-readable), next run time, last run status, project folder badge
+- **AND** no hardcoded mock agents SHALL appear
+
+#### Scenario: Agent card schedule line — Loop
+- **WHEN** an agent has `trigger.type: loop` with a cron schedule
+- **THEN** the card SHALL show the human-readable form (e.g. "Hourly · next 14:00") from `next_run_at`
+
+#### Scenario: Agent card — Reactive
+- **WHEN** an agent has `trigger.type: reactive` with `always_on: true`
+- **THEN** the card SHALL show "● Always on"
+
+#### Scenario: Agent drawer shows execution trace
+- **WHEN** a user clicks an agent card
+- **THEN** the drawer SHALL show: the skill list, each skill's steps with resolved tool name + command, and live log from `.ghost/logs/<agent>/current.log`
+
+---
+
+### Requirement: Skills panel driven by real skill definitions
+The Skills panel left list SHALL show `skills/<name>/skill.md` data per project folder.
+
+#### Scenario: Skills grouped by project
 - **WHEN** `skills_list` is received with skills from multiple folders
-- **THEN** the Skills panel left list SHALL render a section header per folder (directory basename)
-- **AND** each skill SHALL appear under its folder's section
+- **THEN** the left list SHALL show a folder section header per project
+- **AND** each skill appears under its folder section with name and step count
 
-#### Scenario: Empty folder
-- **WHEN** a folder has no `.ghost/skills/` directory or no `.md` files there
-- **THEN** its section SHALL show "No skills in .ghost/skills/ yet."
+#### Scenario: Skill detail shows steps with tool info
+- **WHEN** a skill is selected and `tools_list` is available
+- **THEN** each step row SHALL show the tool name, its command, and its working directory
+- **WHEN** a step's tool is not found
+- **THEN** the step SHALL show the name with "(not found)" — no crash
 
-### Requirement: Skill detail shows trigger, steps, and run history
-Clicking a skill SHALL open a detail panel sourced entirely from live backend data.
-
-#### Scenario: Loop skill human-readable schedule
-- **WHEN** a Loop skill with a cron schedule is selected
-- **THEN** the trigger section SHALL show a human-readable form (e.g. "Weekdays 4:00 AM") plus next run ("next Mon 04:00") from `next_run_at`
-
-#### Scenario: Reactive always-on skill
-- **WHEN** a Reactive `always_on: true` skill is selected
-- **THEN** the trigger section SHALL show "● Always on · restarts on exit"
-
-#### Scenario: Step with known tool
-- **WHEN** a skill step names a tool present in `toolDefs`
-- **THEN** the step row SHALL display: tool name, command string, working directory
-
-#### Scenario: Inline or unknown step
-- **WHEN** a skill step has no matching tool in `toolDefs`
-- **THEN** the step SHALL display the raw step string; unknown tool names SHALL show "(not found)" suffix
-
-#### Scenario: Run history
-- **WHEN** a skill has prior runs in `<folder>/.ghost/ghost.db`
+#### Scenario: Skill detail shows run history
+- **WHEN** a skill's agents have prior runs in `data/ghost.db`
 - **THEN** the detail panel SHALL show the last 10 runs: status dot, start time, duration, "View Log" link
-- **WHEN** "View Log" is clicked
-- **THEN** the fleet drawer SHALL open and stream `<folder>/.ghost/logs/<skill>/current.log`
 
-### Requirement: Runner cards show folder, schedule, and next-run time
-Each Runner Agent card SHALL identify its project folder and display scheduling information.
+---
 
-#### Scenario: Card folder badge
-- **WHEN** a runner card is rendered for a skill in folder `/path/to/aifinance`
-- **THEN** the card SHALL show a folder badge with the directory basename ("aifinance")
+### Requirement: Tools list available to UI
+The frontend SHALL maintain a `toolDefs` map from `tools_list` for use in step displays.
 
-#### Scenario: Loop card schedule line
-- **WHEN** a Loop skill is active and not paused
-- **THEN** the sub-line SHALL include the human-readable schedule and "next <day> <HH:MM>"
+#### Scenario: Global tools visible in any project
+- **WHEN** `tools_list` is received
+- **THEN** it SHALL include tools from `~/.config/ghost/tools/` with `scope: global`
+- **AND** project-local tools with `scope: local` and their `work_dir`
 
-#### Scenario: Paused card
-- **WHEN** `next_run_at` is null because the skill is paused
-- **THEN** the sub-line SHALL show "⏸ Paused"
+#### Scenario: Local tool overrides global
+- **WHEN** a project has `tools/discord-notify/tool.md` and a global tool with the same name exists
+- **THEN** `tools_list` SHALL include only the local version for that project
 
-#### Scenario: Reactive card
-- **WHEN** a Reactive always_on runner card is rendered
-- **THEN** the card SHALL show "● Always on" in place of a schedule
+---
 
-### Requirement: New Skill modal writes a real file
-The "＋ New Skill" modal SHALL write `<folder>/.ghost/skills/<slug>.md` and trigger live reload.
+### Requirement: New Agent modal creates a real agent file
+The "＋ New Agent" modal SHALL write `<project>/agents/<slug>.md` via `agent_create` IPC.
 
 #### Scenario: Successful creation
-- **WHEN** the user fills Name, Trigger, Schedule (if Loop), Steps, and selects a target folder, then clicks Save
-- **THEN** the backend SHALL write `<work_dir>/.ghost/skills/<slug>.md` in canonical Markdown format
-- **AND** the folder's SkillRunner SHALL reload and schedule the new skill
-- **AND** the Skills panel SHALL show the new skill in the correct folder section
+- **WHEN** the user fills Name, Trigger, Schedule (if Loop), Skills/Steps, and selects a folder
+- **THEN** the backend SHALL write the agent file in canonical frontmatter + markdown format
+- **AND** AgentRunner SHALL reload and schedule the new agent
+- **AND** the agent SHALL appear in the Agents panel within 2 seconds
 
-#### Scenario: Duplicate slug
-- **WHEN** `<work_dir>/.ghost/skills/<slug>.md` already exists
-- **THEN** the backend SHALL emit `{event:"error", msg:"Skill '<name>' already exists"}`
-- **AND** the modal SHALL display the error inline without closing
+#### Scenario: Duplicate agent name
+- **WHEN** `<project>/agents/<slug>.md` already exists
+- **THEN** the backend SHALL emit `{event: "error", msg: "Agent '<name>' already exists"}`
+- **AND** the modal SHALL show the error inline without closing
 
-### Requirement: Tools list merges global and local sources
-The `tools_list` IPC event SHALL include globally installed tools merged with any project-local overrides.
+---
 
-#### Scenario: Global tools visible everywhere
-- **WHEN** the `tools` IPC command is handled
-- **THEN** `tools_list` SHALL include all tools from `~/.config/ghost/tools/` with `scope:"global"`
+### Requirement: Runner cards show folder badge and schedule
+Each Agent card SHALL identify its project and display scheduling information.
 
-#### Scenario: Local tool override
-- **WHEN** `<folder>/.ghost/tools/<name>.md` exists with the same name as a global tool
-- **THEN** the local version SHALL take precedence with `scope:"local"`
+#### Scenario: Folder badge
+- **WHEN** an agent card is rendered for project `/path/to/news-briefing`
+- **THEN** the card SHALL show a folder badge with the directory basename ("news-briefing")
+
+#### Scenario: Paused agent
+- **WHEN** an agent is paused
+- **THEN** the card sub-line SHALL show "⏸ Paused" and `next_run_at` SHALL be null
 
 ## MODIFIED Requirements
 
-### Requirement: Skill logs written inside project folder
-Skill run logs SHALL be written to `<folder>/.ghost/logs/` — NOT to `~/.gits/agents/`.
+### Requirement: Agent logs written inside project folder
+Agent run logs SHALL be written to `<project>/.ghost/logs/` — NOT to `~/.gits/agents/`.
 
-#### Scenario: Log file created on run start
-- **WHEN** a skill run starts in folder `/path/to/project`
-- **THEN** the log SHALL be created at `/path/to/project/.ghost/logs/<skill>/<run-id>.log`
-- **AND** `/path/to/project/.ghost/logs/<skill>/current.log` SHALL be updated
+#### Scenario: Log path on run start
+- **WHEN** agent `news-collector` starts in project `/path/to/news-briefing`
+- **THEN** the log SHALL be at `/path/to/news-briefing/.ghost/logs/news-collector/<run-id>.log`
 
-#### Scenario: Run metadata in folder DB
-- **WHEN** a skill run completes
-- **THEN** run metadata SHALL be stored in `<folder>/.ghost/ghost.db`, not in `~/.gits/gits.db`
+#### Scenario: Run metadata in project DB
+- **WHEN** a run completes
+- **THEN** metadata SHALL be stored in `<project>/data/ghost.db`, not in `~/.gits/gits.db`
 
-### Requirement: skills IPC response includes work_dir and next_run_at
-Each skill object in `skills_list` SHALL carry its source folder and next scheduled run.
+### Requirement: agents_list includes work_dir and next_run_at
+Each agent object in `agents_list` SHALL carry its source folder and next scheduled run.
 
-#### Scenario: Skills from multiple folders
-- **WHEN** two folders are open and both have skills
-- **THEN** `skills_list` SHALL include all skills with a `work_dir` field identifying their folder
+#### Scenario: Multi-folder workspace
+- **WHEN** two folders are open and both have agents
+- **THEN** `agents_list` SHALL include all agents each with a `work_dir` field
 
-#### Scenario: next_run_at for active Loop skill
-- **WHEN** a Loop skill is scheduled and not paused
+#### Scenario: next_run_at for active Loop agent
+- **WHEN** a Loop agent is scheduled and not paused
 - **THEN** `next_run_at` SHALL be an ISO 8601 string of the next trigger time
 
 #### Scenario: next_run_at absent
-- **WHEN** a skill is paused or is Reactive type
+- **WHEN** an agent is paused or is Reactive type
 - **THEN** `next_run_at` SHALL be `null`

@@ -5,164 +5,285 @@
 Two problems need fixing:
 
 ### Problem 1 — Wrong storage layout
-The current implementation stores skill and tool **definitions** in `~/.gits/skills/*.md` and `~/.gits/tools/*.md`, and writes execution **logs** to `~/.gits/agents/<skill>/`.
+The current implementation stores skill and tool definitions in `~/.gits/skills/` and `~/.gits/tools/`, and writes execution logs to `~/.gits/agents/`. This is wrong:
 
-This is wrong on both counts:
+- **Agents, skills, tools, and data belong to the project they serve.** They should live inside the project directory, visible to the user.
+- **`~/.gits/` should only hold global Ghost config** — not per-project definitions, logs, or databases.
 
-- **Skills belong to their project.** A skill runs a command inside a specific working directory. The skill definition and all its runtime artifacts should live *inside that project's directory* under `.ghost/`.
-- **`~/.gits/` should only hold global Ghost config** — not per-project definitions, logs, or DB files.
+### Problem 2 — UI shows mock data, not real agents
+The desktop UI does not surface real data:
 
-### Problem 2 — UI shows mock data, not real skills
-The desktop UI does not surface real skill data:
-
-1. **Skills panel left list** shows five hardcoded mock skills — the user's real skills only appear in a small secondary panel
-2. **Skill detail view** shows run history from an in-memory mock, not from real data
+1. **Agents panel** (Runner section) shows only runs — there is no Agent concept with a definition, goal, or identity
+2. **Skills panel** shows five hardcoded mock skills; the user's real skills are in a small secondary panel
 3. **"＋ New Skill" modal** writes to memory only — nothing is saved to disk
-4. **Runner cards** show last-run time but no schedule or next-run time
+4. **Runner cards** show no schedule or next-run time
 5. **Tool definitions** are never surfaced in the UI
 
-## Storage Layout (new)
+---
 
-The app manages a **workspace** — one or more project folders open simultaneously (VS Code-style multi-root). Within each folder, **user assets are visible**; Ghost's internal runtime files are hidden.
+## Project Layout (new)
+
+The app manages a **workspace** — one or more project folders open simultaneously (VS Code-style multi-root). Within each folder:
+
+- `agents/`, `skills/`, `tools/`, `data/` are **user assets** — visible in Finder and in Ghost UI
+- `.ghost/` is **Ghost-internal** — hidden, contains logs and config
 
 ```
 ~/.config/ghost/
   config.yaml                         ← Ghost global config
-  tools/<name>.md                     ← globally shared tools (available to all projects)
-  skills/<name>.md                    ← globally shared skills (available to all projects)
+  tools/<name>/                       ← globally shared tools (available to all projects)
+    tool.md
+    <impl files>
 
 ~/.gits/
   workspace.json                      ← persisted workspace: list of open folder paths
 
-<folder>/
-  agents/                             ← USER ASSET — Agent definitions
-    <name>.md                            trigger + goal + skills/tools refs + guard policy
-                                         multiple agents share the skills/ and tools/ below
+<project>/
+  agents/
+    <name>.md                         ← Agent definition: trigger, skills, guard policy
 
-  skills/                             ← USER ASSET — reusable step sequences (project-local)
-    <name>.md                            referenced by name from agents
+  skills/
+    <name>/
+      skill.md                        ← Skill definition: ordered steps, on_error policy
+      <supporting files>              ← templates, prompts, reference docs (optional)
 
-  tools/                              ← USER ASSET — atomic commands (project-local)
-    <name>.md                            command + working directory + environment
+  tools/
+    <name>/
+      tool.md                         ← Tool definition: command, environment
+      <impl files>                    ← Python/TS/shell code the command runs (optional)
 
-  data/                               ← USER ASSET — databases and output files
-    ghost.db
-    <name>.csv  ...
+  data/
+    ghost.db                          ← run metadata (agent name, status, timestamps)
+    <name>.db / <name>.csv ...        ← output produced by agents
 
   .ghost/                             ← Ghost-internal — hidden
     config.yaml                       ← per-project config overrides (optional)
-    logs/<agent>/<run-id>.log
-    logs/<agent>/current.log
+    logs/
+      <agent>/
+        <run-id>.log
+        current.log                   ← symlink → latest run
 ```
 
-**Resolution order when an Agent references a tool or skill by name:**
-1. `<project>/tools/<name>.md` — project-local (wins)
-2. `~/.config/ghost/tools/<name>.md` — global shared (fallback)
+### File formats
 
-This means the Nash AI project and Discord project can each define their own local tools, but both can also share a common `discord-notify` or `send-email` tool installed globally — without duplicating the definition in every project.
-
-**Three-tier hierarchy within a project:**
-```
-Agent  →  Skills  →  Tools
-                  →  data/
-Multiple Agents in one project share the same skills/ and tools/
-```
-
-**Global `~/.config/ghost/config.yaml`:**
-```yaml
+**`agents/<name>.md`** — YAML frontmatter + markdown description:
+```markdown
+---
+name: news-collector
+description: Collect AI and tech news from the web every hour
+trigger:
+  type: loop
+  schedule: "0 * * * *"
+skills:
+  - collect-news
+on_failure: retry:3
 guard:
-  ops_session: ghost-ops        # tmux session used as Guard for all projects
-  timeout_minutes: 60           # max wait for Guard decision
+  session: ghost-ops
+---
 
-logs:
-  max_files: 30                 # max log files kept per skill
-  max_age_days: 7               # delete logs older than this
-
-runner:
-  default_shell: zsh            # shell used to inherit environment (zsh | bash)
-  default_on_failure: stop      # fallback if skill has no on_failure set
+Monitors RSS feeds and web sources hourly. Saves deduplicated
+articles to data/news.db for downstream processing.
 ```
 
-**Per-project `<folder>/.ghost/config.yaml`** (all fields optional — override global):
-```yaml
-guard:
-  ops_session: my-project-ops   # override Guard session for this project only
+**`skills/<name>/skill.md`** — YAML frontmatter + markdown description:
+```markdown
+---
+name: collect-news
+description: Fetch articles from configured sources and save to data/news.db
+steps:
+  - fetch-news
+  - save-articles
+on_error: continue
+---
 
-logs:
-  max_files: 50
-  max_age_days: 14
+Fetches from RSS feeds. Deduplicates by URL before saving.
 ```
 
-**Asset ownership principle:**
-- `skills/` and `data/` are **the user's work** — they created them, they own them, visible in Finder and in the Ghost UI
-- `.ghost/` is **Ghost's housekeeping** — logs, internal config overrides — hidden by default, not user-facing
-- Global tools and config (`~/.config/ghost/`) are installed once and shared across all projects
+**`tools/<name>/tool.md`** — YAML frontmatter + markdown description:
+```markdown
+---
+name: fetch-news
+description: Scrape news articles from RSS feeds, output JSON to stdout
+command: python fetch.py
+environment:
+  NEWS_SOURCES: "https://feeds.reuters.com/reuters/technologyNews"
+  MAX_ARTICLES: "50"
+---
 
-**Workspace model (VS Code-style):**
-- 📁 folder picker **adds** a folder to the workspace (does not replace existing ones)
-- Each folder has its own `SkillRunner` instance, `GitsDB` (in `data/`), and `.ghost/` directory
-- The UI shows skills and data from **all open folders**, grouped by folder
-- Workspace persisted in `~/.gits/workspace.json` — survives app restarts
+Fetches articles from NEWS_SOURCES. Outputs JSON array to stdout.
+```
+
+### Name resolution order
+When an Agent or Skill references a name, Ghost resolves it:
+1. `<project>/tools/<name>/tool.md` — project-local (wins)
+2. `~/.config/ghost/tools/<name>/tool.md` — global shared (fallback)
+
+Same rule applies to skills referenced by agents.
+
+---
+
+## How Ghost Runs an Agent
+
+### Execution flow
+
+```
+Trigger fires (cron / reactive event)
+    │
+    ▼
+1. Read agents/<name>.md
+   → get skills list
+
+    │  for each skill:
+    ▼
+2. Read skills/<skill>/skill.md
+   → get steps list
+
+    │  for each step:
+    ▼
+3. Resolve tool
+   → project tools/<name>/tool.md  (local first)
+   → ~/.config/ghost/tools/<name>/tool.md  (global fallback)
+   → extract command + environment
+
+    │
+    ▼
+4. Open tmux session  ghost-<agent-name>
+   (reuse if already exists)
+
+    │  for each step (sequential):
+    ▼
+5. Execute tool command in tmux pane
+   cwd       = <project>/tools/<name>/   (tool's own directory)
+   env       = shell_env + tool.environment + GHOST_* vars
+   pipe-pane → .ghost/logs/<agent>/<run-id>.log
+
+    │
+    ▼
+6. Detect completion
+   → poll tmux pane for idle shell prompt
+   → on non-zero exit: apply skill on_error policy
+     (continue | stop | retry:N)
+
+    │
+    ▼
+7. Record run in data/ghost.db
+   (agent_name, status, started_at, finished_at, duration, log_path)
+
+    │  if any step failed:
+    ▼
+8. Guard (if configured)
+   → inject error context into ops tmux session
+   → wait for GUARD_ACTION: retry | skip | abort | fixed
+```
+
+### Environment variables injected into every tool execution
+
+| Variable | Value |
+|---|---|
+| `GHOST_PROJECT_ROOT` | Absolute path to the project folder |
+| `GHOST_DATA_DIR` | `<project>/data/` |
+| `GHOST_AGENT_NAME` | Name of the running agent |
+| `GHOST_RUN_ID` | Unique run identifier |
+| `GHOST_LOG_FILE` | Path to the current run log |
+
+Tool implementation code uses `GHOST_PROJECT_ROOT` and `GHOST_DATA_DIR` to locate databases and output files without hardcoding paths.
+
+### tmux session naming
+- One tmux session per agent: `ghost-<project-basename>-<agent-name>`
+- e.g. `ghost-news-briefing-news-collector`
+- Session is created fresh each run; closed on completion
+
+### Demo project trace (news-briefing)
+
+```
+08:00:00  briefing-generator trigger fires (cron 0 8 * * *)
+08:00:00  resolve skill: generate-briefing
+08:00:00  resolve steps: [run-notebooklm, send-briefing]
+08:00:01  open tmux: ghost-news-briefing-briefing-generator
+08:00:01  step 1: run-notebooklm
+            cwd: tools/run-notebooklm/
+            env: GHOST_PROJECT_ROOT=/path/to/news-briefing
+                 GHOST_DATA_DIR=/path/to/news-briefing/data/
+                 NOTEBOOKLM_API_KEY=***
+            cmd: python run.py
+            → queries data/news.db, calls notebooklm CLI
+            → writes data/briefing.md
+            → exit 0
+08:01:32  step 2: send-briefing
+            cwd: tools/send-briefing/
+            cmd: python send.py
+            → reads data/briefing.md
+            → POST /api/briefings  HTTP 200
+            → exit 0
+08:01:47  run complete  duration=104s  status=success
+08:01:47  record in data/ghost.db
+08:01:47  log at .ghost/logs/briefing-generator/run_005.log
+```
+
+---
 
 ## What Changes
 
 ### Storage paths
-- `~/.gits/skills/*.md` → `<folder>/skills/` (user-visible asset)
-- `~/.gits/tools/*.md` → `~/.config/ghost/tools/` (global tools registry)
-- `~/.gits/agents/<skill>/` → `<folder>/.ghost/logs/<skill>/` (Ghost-internal, hidden)
-- `~/.gits/gits.db` → `<folder>/data/ghost.db` (user-visible asset)
-- `~/.gits/config.md` → `~/.config/ghost/config.yaml` (global Ghost config, YAML format)
+| Old | New |
+|---|---|
+| `~/.gits/skills/*.md` | `<project>/skills/<name>/skill.md` |
+| `~/.gits/tools/*.md` | `<project>/tools/<name>/tool.md` (or global) |
+| `~/.gits/agents/<skill>/` | `<project>/.ghost/logs/<agent>/` |
+| `~/.gits/gits.db` | `<project>/data/ghost.db` |
+| `~/.gits/config.md` | `~/.config/ghost/config.yaml` |
+| (none) | `<project>/agents/<name>.md` ← **new first-class concept** |
 
-### Backend — workspace manager (new)
-- `WorkspaceManager` class: holds `dict[str, tuple[SkillRunner, GitsDB]]` keyed by folder path
-- On `workspace_add`: create `SkillRunner(cwd=folder)` + `GitsDB(path=folder/.ghost/ghost.db)`, load + start; persist to `workspace.json`
-- On `workspace_remove`: stop SkillRunner for that folder; remove from `workspace.json`
-- On startup: restore folders from `workspace.json`
+### Backend — AgentLoader (replaces SkillLoader for agents)
+- Scan `<project>/agents/*.md` → `Agent` dataclasses (trigger, skills list, guard)
+- Scan `<project>/skills/<name>/skill.md` → `Skill` dataclasses (steps, on_error)
+- Scan `<project>/tools/<name>/tool.md` + `~/.config/ghost/tools/<name>/tool.md` → `Tool` dataclasses
+- Inject `GHOST_*` env vars into every tool execution
 
-### Backend — SkillRunner / GitsDB / SkillLoader per-folder
-- `SkillRunner.__init__(cwd: Path)` — all paths derived from `cwd`
-- `SkillLoader` reads skills from `<cwd>/.ghost/skills/*.md`; tools from `~/.config/ghost/tools/` + optional `<cwd>/.ghost/tools/` overrides
-- `GitsDB.__init__(path: Path)` — opens `<cwd>/.ghost/ghost.db`
-- `_prepare_log_path()` writes to `<cwd>/.ghost/logs/<skill>/<run-id>.log`
-- `SkillRunner.next_run_at(skill_name) → str | None` for Loop skills (croniter)
-- `SkillRunner.reload(skills, tools, shell_env)` — cancel + reschedule
+### Backend — AgentRunner (replaces SkillRunner)
+- `AgentRunner(project_root: Path)` — all paths derived from project root
+- Schedules agents (not skills) as the top-level unit
+- tmux session name: `ghost-<project-basename>-<agent-name>`
+- Logs to `<project>/.ghost/logs/<agent>/<run-id>.log`
+- DB at `<project>/data/ghost.db`
+- `next_run_at(agent_name) → str | None`
+- `reload(agents, skills, tools, shell_env)`
 
-### Backend — New / modified IPC commands
-- `workspace_add {work_dir}` → add folder → start its runner → emit `workspace_changed` + `skills_list` + `agents_list`
-- `workspace_remove {work_dir}` → stop folder's runner → emit `workspace_changed`
-- `tools {}` → scan global + local tools → emit `tools_list` (includes `scope:"global"|"local"`, `work_dir` for local)
-- `skill_create {work_dir, name, trigger_type, schedule, steps}` → write `<work_dir>/.ghost/skills/<slug>.md` → hot-reload → emit `skill_created` + `skills_list`
-- `skills {}` extended → each skill includes `work_dir` + `next_run_at`
-- `agents {}` extended → each run includes `work_dir`
+### Backend — WorkspaceManager
+- Holds one `AgentRunner` + `GitsDB` per open project folder
+- IPC: `workspace_add`, `workspace_remove`; persists to `~/.gits/workspace.json`
+- Restores workspace on startup
 
-### UI — Workspace folder management
-- 📁 button sends `workspace_add`; open folders displayed as removable chips below the folder button
-- On `workspace_changed`: refresh Skills panel and Agents Runner section
-- On startup: `workspace_changed` fires once with all restored folders
+### Backend — IPC changes
+- `workspace_add / workspace_remove` — add/remove project folder
+- `agents {}` — emit `agents_list`: agent definitions with `work_dir`, `next_run_at`, last run status
+- `skills {}` — emit `skills_list`: skill definitions per folder
+- `tools {}` — emit `tools_list`: tool definitions (local + global)
+- `agent_create` — write `<project>/agents/<slug>.md`; hot-reload
+- `agents {}` extended: includes `work_dir` + `next_run_at` per agent
 
-### UI — Skills Panel (complete redesign)
-- Remove all hardcoded mock skills from `index.html` and `SKILLS` dict from `app.js`
-- Left list populated from `skills_list`, **grouped by folder** (folder name as section header)
-- Skill detail: folder badge, trigger (human-readable schedule + next run), steps with tool command/cwd, last 10 runs
-- "＋ New Skill" modal has folder selector (dropdown of open workspace folders)
+### UI — Agents panel (redesign)
+- Remove mock `AGENTS` constant; driven entirely by `agents_list` IPC
+- Each Agent card: name, trigger schedule, next-run, last run status, project badge
+- Drawer: steps trace (which skill → which tools), live log
 
-### UI — Runner Cards
-- Each card shows a **folder badge** (project directory name)
-- Add schedule line: Loop → "Weekdays 4:00 AM · next Mon 04:00"; Reactive → "● Always on"; paused → "⏸ Paused"
+### UI — Skills & Tools panels
+- Skills panel: driven by `skills_list`, grouped by project folder
+- Tool info shown inline in skill step rows (command, working dir)
+- "＋ New Agent" modal: writes real `agents/<slug>.md` via `agent_create` IPC
+
+### UI — Workspace folder chips
+- 📁 picker → `workspace_add`; folders shown as removable chips
+- On `workspace_changed`: all panels refresh
 
 ## Impact
 
-- New specs: `skills-desktop-ui`
-- Modified specs: `terminal-ui-bridge` (new IPC commands), `skill-runner` (paths, multi-instance)
-- Modified code:
-  - `src/gits/core/skill_runner.py` — `cwd` param, log paths → `.ghost/logs/`, `next_run_at()`, `reload()`
-  - `src/gits/core/skill_loader.py` — read from `<cwd>/.ghost/skills/` + `~/.config/ghost/tools/`
-  - `src/gits/storage/db.py` — `path` param → `<cwd>/.ghost/ghost.db`
-  - `src/gits/__main__.py` — `WorkspaceManager`; `workspace_add/remove`, `tools`, `skill_create` handlers
-  - `ui/app.js` — workspace chips; Skills panel with folder grouping; Runner cards with folder badge
-  - `ui/index.html` — remove hardcoded mock skill `<div>` entries
+- New specs: `skills-desktop-ui` (this spec), `agent-execution` (new)
+- Modified specs: `terminal-ui-bridge` (IPC), `skill-runner` (renamed AgentRunner, new paths)
+- New code: `src/gits/core/agent_loader.py`, `src/gits/core/agent_runner.py`, `src/gits/core/workspace.py`
+- Modified: `src/gits/__main__.py`, `src/gits/storage/db.py`, `ui/app.js`, `ui/index.html`
 
 ## Out of Scope
-- AI-generated skill content (modal uses a structured template, not LLM)
-- Skill editing in UI (edit `.md` file directly)
+- Skill/tool editing in UI (edit `.md` files directly in editor)
 - Tool creation in UI
+- AI-generated agent/skill content
