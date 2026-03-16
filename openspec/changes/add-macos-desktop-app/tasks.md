@@ -7,12 +7,12 @@
   credentials (§5), and distribution (§9-10) remain relevant.
 -->
 
-## 1. Foundation — Tauri + pytauri scaffold
-- [ ] 1.1 Initialize Tauri v2 project in `src-tauri/` with macOS arm64 target
-- [ ] 1.2 Integrate pytauri for Python↔Rust bridge (PyO3)
-- [ ] 1.3 Configure Tauri window with transparent background (for pure CSS glass effects)
-- [ ] 1.4 Verify existing `gits.core.engine` loads via pytauri bridge
-- [ ] 1.5 Set up Tauri build pipeline (`tauri build` → `.app` + `.dmg`)
+## 1. Foundation — Tauri + Python bridge
+- [x] 1.1 Initialize Tauri v2 project in `src-tauri/` with macOS arm64 target
+- [x] 1.2 Python↔Rust bridge via stdio JSON IPC (Rust spawns `uv run python -m gits desktop`, reads stdout as JSON events, writes stdin as JSON commands) — pytauri/PyO3 not used, stdio IPC is simpler and sufficient
+- [x] 1.3 Configure Tauri window with transparent background + macOS windowEffects
+- [x] 1.4 `gits.core.engine` fully accessible via IPC: `sessions`, `agents`, `skills`, `new_session`, `skill_run`, etc.
+- [ ] 1.5 Set up Tauri build pipeline (`tauri build` → `.app` + `.dmg`) — currently using dev binary
 
 ## 2. Bundle dependencies (arm64)
 - [ ] 2.1 Write `scripts/build-tmux.sh` to statically compile tmux + libevent + ncurses (arm64)
@@ -22,12 +22,12 @@
 - [ ] 2.5 Test bundled components launch correctly from within .app
 
 ## 3. Frosted glass UI (pure CSS)
-- [ ] 3.1 Set up frontend project in `ui/` (vanilla JS or lightweight framework)
-- [ ] 3.2 Build CSS design system: glass panels (`backdrop-filter: blur()`, `rgba` backgrounds), edge highlights, elevation shadows, gradient backgrounds
-- [ ] 3.3 Build Light/Dark mode CSS variables with auto-switching via `prefers-color-scheme`
-- [ ] 3.4 Build activity dashboard: workspaces list, AI assistant status, Discord connection indicator
-- [ ] 3.5 Build settings page with organized sections: Discord, AI Account, Projects, Advanced
-- [ ] 3.6 Add menu bar tray icon with quick-status dropdown
+- [x] 3.1 Frontend in `ui/` — vanilla JS + xterm.js, no framework
+- [x] 3.2 CSS design system: aurora blob background, glass sidebar (`backdrop-filter: blur`), light/dark contrast tested
+- [ ] 3.3 Light/Dark mode CSS variables with auto-switching
+- [x] 3.4 Session sidebar: lists all tmux sessions with platform icon, CLI badge, work_dir; auto-selects first on load
+- [ ] 3.5 Settings page
+- [ ] 3.6 Menu bar tray icon
 
 ## 4. Welcome wizard
 - [ ] 4.1 Build wizard flow: welcome → Discord setup (optional) → AI account → project folder → verification → done
@@ -54,15 +54,15 @@
 - [ ] 6.7 Ensure built-in chat and Discord can control the same workspace simultaneously
 - [ ] 6.8 Add smooth animations and transitions for message appearance
 
-## 7. Advanced mode (terminal view for power users)
-- [ ] 7.1 Add "Show Terminal" toggle in Settings → Advanced (hidden by default)
-- [ ] 7.2 Embed xterm.js terminal connected to active workspace's tmux session
-- [ ] 7.3 Hide all terminal UI when advanced mode is off
+## 7. Terminal view
+- [x] 7.1 Terminal is the primary Build view (no toggle needed — supersedes original design)
+- [x] 7.2 xterm.js embedded; PTY infrastructure done (Rust `open_pty`/`pty_input`/`resize_pty`/`close_pty` via `portable-pty`; tmux attach-session); click-to-open wired in JS
+- [ ] 7.3 End-to-end PTY: click session → PTY opens → interactive tmux session renders in xterm.js
 
 ## 8. Config migration & dual-mode support
 - [ ] 8.1 Detect existing `~/.gits/` config on first launch and offer to import
-- [ ] 8.2 Ensure `gits start` CLI still works independently of desktop app
-- [ ] 8.3 Add `--desktop` flag or auto-detect `.app` bundle context in `__main__.py`
+- [x] 8.2 `gits start` CLI works independently of desktop app
+- [x] 8.3 `desktop` subcommand in `__main__.py`; Python bridge auto-starts with engine + SkillRunner
 
 ## 9. Distribution
 - [ ] 9.1 Set up code signing with Developer ID certificate
