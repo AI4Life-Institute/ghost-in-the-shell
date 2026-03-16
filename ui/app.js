@@ -12,21 +12,22 @@ const AGENTS = {
         label: 'Personal Chrome',
         agents: [
           {
-            id: 'nash-reporter',
-            name: 'Nash-AI Reporter',
+            id: 'earnings-scraper',
+            name: 'Earnings Scraper',
             status: 'running',
-            sub: 'step 8 of ~12 · 43s',
+            sub: 'step 4 of ~8 · 22s',
             type: 'Browser Agent',
             profile: 'Personal Chrome',
             detail: {
               running: true,
-              steps: 8,
-              totalSteps: 12,
-              elapsed: '43s',
+              steps: 4,
+              totalSteps: 8,
+              elapsed: '22s',
               log: [
-                {ico:'🧭', action:'Navigate', desc:'nash-ai.cn/login', out:'✓ Already logged in (session active)', ts:'2:43:00', done:true},
-                {ico:'📸', action:'Snapshot', desc:'found 47 reports', out:'', ts:'2:43:01', done:true},
-                {ico:'⬇', action:'Download', desc:'gs_q2_2024.pdf · 2.4MB…', out:'', ts:'2:43:10', done:false, pending:true},
+                {ico:'🧭', action:'Navigate', desc:'stockanalysis.com/stocks/aapl/financials', out:'✓ Loaded', ts:'2:43:00', done:true},
+                {ico:'📸', action:'Snapshot', desc:'found earnings table · 8 quarters', out:'', ts:'2:43:02', done:true},
+                {ico:'⚡', action:'Extract', desc:'parsing EPS and revenue rows', out:'→ 8 rows', ts:'2:43:08', done:true},
+                {ico:'💾', action:'Save to DB', desc:'INSERT earnings_aapl…', out:'', ts:'2:43:20', done:false, pending:true},
               ],
               hitl: null,
             }
@@ -56,7 +57,50 @@ const AGENTS = {
       {
         id: 'work-chrome',
         label: 'Work Chrome',
-        agents: []
+        agents: [
+          {
+            id: 'sec-filing-monitor',
+            name: 'SEC Filing Monitor',
+            status: 'running',
+            sub: 'step 3 of ~6 · 9s',
+            type: 'Browser Agent',
+            profile: 'Work Chrome',
+            detail: {
+              running: true,
+              steps: 3, totalSteps: 6, elapsed: '9s',
+              log: [
+                {ico:'🧭', action:'Navigate', desc:'sec.gov/cgi-bin/browse-edgar', out:'✓ Loaded', ts:'23:01:00', done:true},
+                {ico:'📸', action:'Snapshot', desc:'found 12 new 10-K filings', out:'', ts:'23:01:02', done:true},
+                {ico:'⬇', action:'Download', desc:'AAPL_10K_2024.pdf · 4.1MB…', out:'', ts:'23:01:08', done:false, pending:true},
+              ],
+              hitl: null,
+            }
+          },
+        ]
+      },
+      {
+        id: 'research-chrome',
+        label: 'Research',
+        agents: [
+          {
+            id: 'market-crawler',
+            name: 'Market Crawler',
+            status: 'done',
+            sub: 'ran 30m ago · 6 sources',
+            type: 'Browser Agent',
+            profile: 'Research',
+            detail: {
+              running: false,
+              steps: 9, totalSteps: 9, elapsed: '34s',
+              log: [
+                {ico:'🧭', action:'Navigate', desc:'bloomberg.com/markets', out:'', ts:'22:30:00', done:true},
+                {ico:'⚡', action:'Extract', desc:'pulled 14 market headlines', out:'→ saved', ts:'22:30:08', done:true},
+                {ico:'💾', action:'Save to DB', desc:'INSERT 14 rows → market_news', out:'→ ok', ts:'22:30:10', done:true},
+              ],
+              hitl: null,
+            }
+          },
+        ]
       },
     ]
   },
@@ -67,6 +111,7 @@ const AGENTS = {
       status: 'running',
       sub: 'Every 60 min · next 4m',
       type: 'Loop Agent',
+      trigger: 'loop',
       detail: {
         running: true,
         steps: 3, totalSteps: 3, elapsed: '2s',
@@ -83,6 +128,7 @@ const AGENTS = {
       status: 'done',
       sub: 'Daily 9am · ran 2h ago',
       type: 'Loop Agent',
+      trigger: 'loop',
       detail: {
         running: false,
         steps: 6, totalSteps: 6, elapsed: '18s',
@@ -100,6 +146,7 @@ const AGENTS = {
       autoRepaired: true,
       sub: 'Every 4h · next 2h',
       type: 'Loop Agent',
+      trigger: 'loop',
       detail: {
         running: true,
         steps: 2, totalSteps: 4, elapsed: '1s',
@@ -109,7 +156,25 @@ const AGENTS = {
         ],
         hitl: null,
       }
-    }
+    },
+    {
+      id: 'discord-digest',
+      name: 'Discord Digest',
+      status: 'done',
+      sub: 'Every 6h · ran 1h ago',
+      type: 'Loop Agent',
+      trigger: 'loop',
+      detail: {
+        running: false,
+        steps: 4, totalSteps: 4, elapsed: '8s',
+        log: [
+          {ico:'📡', action:'Fetch', desc:'read #dev last 200 messages', out:'→ 47 msgs', ts:'22:00:00', done:true},
+          {ico:'🤖', action:'Summarize', desc:'Claude summarized channel activity', out:'→ 3 action items', ts:'22:00:05', done:true},
+          {ico:'💾', action:'Save', desc:'INSERT discord_digest', out:'→ ok', ts:'22:00:08', done:true},
+        ],
+        hitl: null,
+      }
+    },
   ],
   reactive: [
     {
@@ -118,6 +183,7 @@ const AGENTS = {
       status: 'listening',
       sub: 'Trigger: Discord · #dev · ● Connected',
       type: 'Reactive Agent',
+      trigger: 'reactive',
       detail: {
         running: false,
         steps: 0, totalSteps: 0, elapsed: '—',
@@ -131,6 +197,7 @@ const AGENTS = {
       status: 'waiting',
       sub: 'Trigger: Notion webhook · ⚠ Needs approval',
       type: 'Reactive Agent',
+      trigger: 'reactive',
       detail: {
         running: false,
         steps: 1, totalSteps: 3, elapsed: '4s',
@@ -139,7 +206,21 @@ const AGENTS = {
         ],
         hitl: {msg: 'Export "Week 12" page as PDF and save to Data?', pending:true},
       }
-    }
+    },
+    {
+      id: 'github-pr-watcher',
+      name: 'GitHub PR Watcher',
+      status: 'listening',
+      sub: 'Trigger: GitHub webhook · ghost-in-the-shell · ● Active',
+      type: 'Reactive Agent',
+      trigger: 'reactive',
+      detail: {
+        running: false,
+        steps: 0, totalSteps: 0, elapsed: '—',
+        log: [],
+        hitl: null,
+      }
+    },
   ]
 };
 
@@ -147,6 +228,7 @@ const SKILLS = {
   market: {
     name: 'Market Scanner',
     desc: 'Fetches latest price data for a list of ticker symbols and saves results to the database.',
+    trigger: 'loop',
     params: [
       {key:'symbols', label:'Symbols', placeholder:'BTC,ETH,AAPL,TSLA'},
       {key:'interval', label:'Interval (min)', placeholder:'60'},
@@ -162,17 +244,19 @@ const SKILLS = {
   screenshot: {
     name: 'Screenshot Monitor',
     desc: 'Captures a page screenshot at a given interval and saves diffs as artifacts.',
+    trigger: 'loop',
     params: [
       {key:'url', label:'URL', placeholder:'https://example.com'},
       {key:'interval_s', label:'Interval (sec)', placeholder:'300'},
     ],
     runs: [
-      {status:'run', ts:'Now', params:'url=https://nash-ai.cn interval_s=300', error:null},
+      {status:'run', ts:'Now', params:'url=https://finance.yahoo.com interval_s=300', error:null},
     ]
   },
   csvproc: {
     name: 'CSV Processor',
     desc: 'Loads a CSV file, applies a transform script, and outputs a cleaned version.',
+    trigger: 'reactive',
     params: [
       {key:'input', label:'Input path', placeholder:'~/Downloads/data.csv'},
       {key:'script', label:'Transform', placeholder:'drop_duplicates, fill_nulls'},
@@ -182,6 +266,7 @@ const SKILLS = {
   report: {
     name: 'Report Generator',
     desc: 'Queries the local database and renders a formatted PDF report.',
+    trigger: 'loop',
     params: [
       {key:'query', label:'SQL query', placeholder:"SELECT * FROM tasks WHERE status='done'"},
       {key:'title', label:'Report title', placeholder:'Weekly Summary'},
@@ -193,6 +278,7 @@ const SKILLS = {
   discord: {
     name: 'Discord Notifier',
     desc: 'Posts a formatted embed message to a specified Discord channel.',
+    trigger: 'reactive',
     params: [
       {key:'channel', label:'Channel ID', placeholder:'1234567890'},
       {key:'message', label:'Message', placeholder:'Task completed successfully!'},
@@ -203,13 +289,39 @@ const SKILLS = {
                ai:"The bot token doesn't have the 'Send Messages' permission in that channel. Grant the permission in Discord server settings under Roles, or use a channel where the bot already has access."}},
     ]
   },
+  github_pr: {
+    name: 'GitHub PR Reviewer',
+    desc: 'When a PR is opened, runs Claude to review diffs and posts a summary comment.',
+    trigger: 'reactive',
+    params: [
+      {key:'repo', label:'Repo', placeholder:'owner/repo'},
+      {key:'min_lines', label:'Min lines changed', placeholder:'10'},
+    ],
+    runs: [
+      {status:'done', ts:'Today 09:12', params:'repo=ai4life/ghost-in-the-shell min_lines=10', error:null},
+      {status:'done', ts:'Yesterday 16:44', params:'repo=ai4life/ghost-in-the-shell min_lines=10', error:null},
+    ]
+  },
+  digest: {
+    name: 'Discord Digest',
+    desc: 'Reads recent channel messages, summarizes with Claude, and saves to DB.',
+    trigger: 'loop',
+    params: [
+      {key:'channel', label:'Channel ID', placeholder:'1234567890'},
+      {key:'lookback_hours', label:'Lookback (hours)', placeholder:'6'},
+    ],
+    runs: [
+      {status:'done', ts:'Today 22:00', params:'lookback_hours=6', error:null},
+      {status:'done', ts:'Today 16:00', params:'lookback_hours=6', error:null},
+    ]
+  },
 };
 
 const DB_COLLECTIONS = {
   fromAgents: [
     {id:'btc_prices',    name:'btc_prices',    rows:128, updated:'2m ago', icon:'📊', table:'btc_prices',   sourceAgent:'btc-monitor'},
     {id:'hn_links',      name:'hn_links',       rows:340, updated:'2h ago', icon:'🔗', table:'hn_links',     sourceAgent:'hn-digest-loop'},
-    {id:'nash_reports',  name:'nash_reports',   rows:47,  updated:'10m ago',icon:'📄', table:'nash_reports', sourceAgent:'nash-reporter'},
+    {id:'earnings',      name:'earnings',        rows:47,  updated:'10m ago',icon:'📊', table:'earnings',     sourceAgent:'earnings-scraper'},
   ],
   fromSkills: [
     {id:'market_scans',  name:'market_scans',   rows:86,  updated:'14m ago',icon:'📈', table:'market_scans', sourceSkill:'market'},
@@ -234,7 +346,7 @@ const DB = {
     cols: ['id','goal','status','profile','created_at','summary'],
     rows: [
       {id:'tsk_01hw8m',goal:'Find the current BTC price on CoinGecko and save it',status:'done',profile:'Personal',created_at:'2026-03-14 14:41:02',summary:'BTC price $67,432.18 extracted and saved'},
-      {id:'tsk_01hw9k',goal:'Download Goldman Sachs Q2 report from Nash-AI',status:'running',profile:'nash-ai',created_at:'2026-03-14 14:43:00',summary:null},
+      {id:'tsk_01hw9k',goal:'Scrape AAPL earnings history from StockAnalysis and save to DB',status:'running',profile:'Work',created_at:'2026-03-14 14:43:00',summary:null},
       {id:'tsk_01hwaq',goal:'Log in to Notion and export "Week 12" page as PDF',status:'needs_review',profile:'Work',created_at:'2026-03-14 14:45:00',summary:null},
       {id:'tsk_01hwbr',goal:'Search HackerNews for "AI agents" and save top 10 links',status:'queued',profile:'Personal',created_at:'2026-03-14 14:47:00',summary:null},
     ]
@@ -251,10 +363,12 @@ const DB = {
       {id:3,title:'Browser automation with real Chrome',url:'https://news.ycombinator.com/item?id=3',score:201},
     ]
   },
-  nash_reports: {
-    cols: ['id','filename','size_kb','downloaded_at'],
+  earnings: {
+    cols: ['id','symbol','quarter','eps','revenue_b','ts'],
     rows: [
-      {id:'rpt_1',filename:'gs_q2_2024.pdf',size_kb:2345,downloaded_at:'2026-03-15 14:43:10'},
+      {id:1,symbol:'AAPL',quarter:'Q2 2024',eps:'$1.53',revenue_b:'$90.8B',ts:'2026-03-15 14:43:10'},
+      {id:2,symbol:'AAPL',quarter:'Q1 2024',eps:'$2.18',revenue_b:'$119.6B',ts:'2026-03-15 14:43:11'},
+      {id:3,symbol:'AAPL',quarter:'Q4 2023',eps:'$2.18',revenue_b:'$119.6B',ts:'2026-03-15 14:43:12'},
     ]
   },
   market_scans: {
@@ -265,7 +379,7 @@ const DB = {
     ]
   },
   screenshots: {cols:['id','url','ts'],rows:[]},
-  notes: {cols:['id','text','created_at'],rows:[{id:1,text:'Check Nash-AI reports weekly',created_at:'2026-03-12'}]},
+  notes: {cols:['id','text','created_at'],rows:[{id:1,text:'Monitor AAPL earnings every quarter',created_at:'2026-03-12'}]},
 };
 
 // ── Data file tree ─────────────────────────────────────────────────────────
@@ -281,7 +395,7 @@ const DATA_FILES = [
         type:'sqlite', id:'db-hn', name:'hn_digest.db', open:true,
         tables:[
           {id:'hn_links', name:'hn_links', rows:340},
-          {id:'nash_reports', name:'nash_reports', rows:47}
+          {id:'earnings', name:'earnings', rows:47}
         ]
       }
     ]
@@ -313,7 +427,7 @@ let activePaneIdx = 0;        // which pane is focused
 let devMode = false;          // global dev mode toggle
 let sessPickerTargetPane = 0; // which pane the picker is opening for
 let curMode = 'build';
-let curAgentId = 'nash-reporter';
+let curAgentId = 'earnings-scraper';
 let curProfileId = 'personal-chrome';
 let curSkill = 'market';
 let curTableId = 'btc_prices';
@@ -955,14 +1069,7 @@ function renderFleet() {
   }
   renderProfileAgents(curProfileId);
 
-  // Trigger grid (loop + reactive combined)
-  const triggerGrid = document.getElementById('trigger-grid');
-  if (triggerGrid) {
-    const all = [...(AGENTS.loop || []), ...(AGENTS.reactive || [])];
-    let html = all.map(_fleetCardHTML).join('');
-    html += `<div class="fleet-card-add" onclick="showToast('Type /agent in Build to create a Trigger Agent')">＋ New Trigger Agent</div>`;
-    triggerGrid.innerHTML = html;
-  }
+  renderTriggerGrid();
 }
 
 function renderProfileAgents(profileId) {
@@ -1069,7 +1176,7 @@ function _renderFleetDrawer(agentId) {
 function _mockBrowserScreen(a) {
   // pick mock content based on agent
   const isRunning = a.detail.running;
-  const currentUrl = isRunning ? 'nash-ai.cn/reports/list' : 'nash-ai.cn/reports';
+  const currentUrl = isRunning ? 'stockanalysis.com/stocks/aapl/financials' : 'stockanalysis.com/stocks';
   const liveLbl = isRunning
     ? `<span class="live-dot"></span> Live · 2s ago`
     : `<span style="color:rgba(0,0,0,.35)">Last frame · 18s ago</span>`;
@@ -1077,26 +1184,25 @@ function _mockBrowserScreen(a) {
   // fake page content
   const pageContent = isRunning ? `
     <div class="mock-site-header">
-      <div class="mock-site-logo">Nash<span>AI</span></div>
-      <div class="mock-site-nav">Reports &nbsp;·&nbsp; Portfolio &nbsp;·&nbsp; Settings</div>
+      <div class="mock-site-logo">Stock<span>Analysis</span></div>
+      <div class="mock-site-nav">Financials &nbsp;·&nbsp; Earnings &nbsp;·&nbsp; Forecast</div>
     </div>
     <div class="mock-site-body">
-      <div class="mock-site-title">Research Reports</div>
+      <div class="mock-site-title">AAPL · Earnings History</div>
       <div class="mock-site-row sel">
-        <div class="mock-site-row-ico">📄</div>
-        <div class="mock-site-row-name">Goldman Sachs Q2 2024 Analysis</div>
-        <div class="mock-site-row-meta">2.4 MB · PDF</div>
+        <div class="mock-site-row-ico">📊</div>
+        <div class="mock-site-row-name">Q2 2024 · EPS $1.53 · Rev $90.8B</div>
         <div class="mock-download-bar"><div class="mock-download-fill"></div></div>
       </div>
-      <div class="mock-site-row dim"><div class="mock-site-row-ico">📄</div><div class="mock-site-row-name">Morgan Stanley Q2 2024</div><div class="mock-site-row-meta">1.8 MB</div></div>
-      <div class="mock-site-row dim"><div class="mock-site-row-ico">📄</div><div class="mock-site-row-name">JP Morgan Macro Outlook</div><div class="mock-site-row-meta">3.1 MB</div></div>
+      <div class="mock-site-row dim"><div class="mock-site-row-ico">📊</div><div class="mock-site-row-name">Q1 2024 · EPS $2.18 · Rev $119.6B</div><div class="mock-site-row-meta">✓</div></div>
+      <div class="mock-site-row dim"><div class="mock-site-row-ico">📊</div><div class="mock-site-row-name">Q4 2023 · EPS $2.18 · Rev $119.6B</div><div class="mock-site-row-meta">✓</div></div>
     </div>` : `
     <div class="mock-site-header">
-      <div class="mock-site-logo">Nash<span>AI</span></div>
+      <div class="mock-site-logo">Stock<span>Analysis</span></div>
     </div>
     <div class="mock-site-body" style="opacity:.7">
-      <div class="mock-site-title">Research Reports · 47 items</div>
-      <div class="mock-site-row dim"><div class="mock-site-row-ico">📄</div><div class="mock-site-row-name">Goldman Sachs Q2 2024 Analysis</div><div class="mock-site-row-meta">✓ Downloaded</div></div>
+      <div class="mock-site-title">Earnings History · 8 quarters</div>
+      <div class="mock-site-row dim"><div class="mock-site-row-ico">📊</div><div class="mock-site-row-name">AAPL Q2 2024 · EPS $1.53</div><div class="mock-site-row-meta">✓ Saved</div></div>
     </div>`;
 
   return `<div class="live-browser">
@@ -1203,6 +1309,109 @@ function renderRunnerGrid() {
     return;
   }
   grid.innerHTML = runs.map(renderRunnerCard).join('');
+}
+
+/** Render Trigger grid — real skillDefs if available, else mock AGENTS.loop+reactive */
+function renderTriggerGrid() {
+  const grid = document.getElementById('trigger-grid');
+  if (!grid) return;
+  const addBtn = `<div class="fleet-card-add" onclick="showToast('Type /agent in Build to create a Trigger Agent')">＋ New Trigger Agent</div>`;
+  if (Object.keys(skillDefs).length > 0) {
+    const skills = Object.values(skillDefs);
+    grid.innerHTML = skills.map(sk => {
+      const run = runnerAgents[sk.name] || { skill_name: sk.name, status: sk.paused ? 'idle' : '—' };
+      return renderRunnerCard(run);
+    }).join('') + addBtn;
+  } else {
+    const all = [...(AGENTS.loop || []), ...(AGENTS.reactive || [])];
+    grid.innerHTML = all.map(_fleetCardHTML).join('') + addBtn;
+  }
+}
+
+/** Render Skills view left list — real skillDefs if available, else keep hardcoded HTML */
+function renderSkillsList() {
+  const scroll = document.getElementById('sk-scroll');
+  if (!scroll || Object.keys(skillDefs).length === 0) return;
+  const skills = Object.values(skillDefs);
+  scroll.innerHTML = skills.map((sk, i) => {
+    const ttype = (sk.trigger?.type || sk.trigger || '').toLowerCase();
+    const isOn = curSkill === sk.name;
+    return `<div class="ski${isOn ? ' on' : ''}" onclick="selSkillByName(this,'${esc(sk.name)}')">
+      <div class="ski-name">${esc(sk.name)}</div>
+      <div class="ski-desc">${esc(sk.description || sk.desc || sk.name)}</div>
+      <span class="ski-tag">${esc(ttype)}</span>
+    </div>`;
+  }).join('');
+  if (!skillDefs[curSkill] && skills[0]) curSkill = skills[0].name;
+  if (skillDefs[curSkill]) renderSkillDetailReal(curSkill);
+}
+
+/** Select skill by name (for real-data skills list) */
+function selSkillByName(el, name) {
+  document.querySelectorAll('.ski').forEach(s => s.classList.remove('on'));
+  if (el) el.classList.add('on');
+  curSkill = name;
+  renderSkillDetailReal(name);
+}
+
+/** Render skill detail from real skillDefs + runnerAgents data */
+function renderSkillDetailReal(name) {
+  const sk = skillDefs[name];
+  if (!sk) return;
+  const run = runnerAgents[name];
+  const ttype = (sk.trigger?.type || sk.trigger || '').toLowerCase();
+  const trigLabel = ttype === 'loop' ? 'Loop' : ttype === 'reactive' ? 'Reactive' : ttype || '—';
+
+  const stepsHtml = Array.isArray(sk.steps) && sk.steps.length
+    ? sk.steps.map((s, i) => `<div style="font-size:12px;padding:3px 0;border-bottom:1px solid rgba(0,0,0,.05)">
+        <span style="color:rgba(0,0,0,.3);margin-right:6px">${i+1}.</span>${esc(s.tool || s.name || s.cmd || JSON.stringify(s))}
+      </div>`).join('')
+    : '<div style="font-size:12px;color:rgba(0,0,0,.3);font-style:italic">No steps defined</div>';
+
+  let lastRunHtml = '<div style="font-size:12px;color:rgba(0,0,0,.3);font-style:italic;padding:6px 0">No runs yet</div>';
+  if (run) {
+    const ts = run.started_at ? new Date(run.started_at).toLocaleString() : '—';
+    const dur = (run.started_at && run.finished_at)
+      ? Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000) + 's' : '—';
+    const sc = {success:'done', done:'done', failed:'fail', fail:'fail', running:'run'}[run.status] || 'run';
+    lastRunHtml = `<div class="sk-run-item">
+      <div class="sk-run-status sk-run-${sc}"></div>
+      <div class="sk-run-info">
+        <div style="font-size:11.5px;font-weight:600">${esc(run.status || '—')}</div>
+        <div class="sk-run-ts">${esc(ts)} · ${esc(dur)}</div>
+      </div>
+    </div>`;
+  }
+
+  const metaChips = [
+    sk.on_failure ? `On fail: ${esc(String(sk.on_failure))}` : null,
+    sk.guard?.enabled ? '🛡 Guard on' : null,
+    sk.paused ? '⏸ Paused' : null,
+  ].filter(Boolean).map(t => `<span class="runner-meta-chip">${t}</span>`).join('');
+
+  document.getElementById('sk-detail').innerHTML = `
+    <div class="sk-detail-head">
+      <div class="sk-name">${esc(name)}</div>
+      <div class="sk-dsc" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <span class="runner-trigger-badge runner-trigger-${ttype}">${trigLabel}</span>
+        ${metaChips}
+      </div>
+    </div>
+    <div class="sk-body">
+      <div>
+        <div class="sk-section-lbl">Steps</div>
+        <div style="padding:4px 0">${stepsHtml}</div>
+      </div>
+      <div>
+        <div class="sk-section-lbl">Last Run</div>
+        <div class="sk-runs">${lastRunHtml}</div>
+      </div>
+      <div class="sk-actions">
+        <button class="sk-run-btn" onclick="runnerRunNow('${esc(name)}')">▶ Run Now</button>
+        <button class="sk-run-btn" style="background:rgba(0,0,0,.08);color:rgba(0,0,0,.6)"
+          onclick="runnerTogglePauseById('${esc(name)}')">${run?._paused ? '▶ Resume' : '⏸ Pause'}</button>
+      </div>
+    </div>`;
 }
 
 /** Open the fleet drawer for a runner agent — shows log panel */
@@ -2032,6 +2241,7 @@ function ghostSetup() {
       if (newTs > existingTs) runnerAgents[key] = run;
     });
     renderRunnerGrid();
+    renderTriggerGrid();
     updateAgentBadge();
   });
 
@@ -2041,6 +2251,8 @@ function ghostSetup() {
     skillDefs = {};
     skills.forEach(sk => { if (sk.name) skillDefs[sk.name] = sk; });
     renderRunnerGrid();
+    renderTriggerGrid();
+    renderSkillsList();
     renderSkillPanel(skills);
   });
 
