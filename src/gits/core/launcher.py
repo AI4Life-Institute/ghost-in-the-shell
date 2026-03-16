@@ -197,7 +197,7 @@ class CodingCLILauncher:
         if discoverer:
             sessions = discoverer(work_dir, session_path=resolved.session_path)
             for s in sessions:
-                s.source_cli = cli  # keep the alias name, not the base_type
+                s.source_cli = resolved.base_type
             return sessions
         return []
 
