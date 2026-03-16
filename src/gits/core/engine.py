@@ -61,6 +61,7 @@ class Engine:
         self.jsonl_monitor = JsonlMonitor(
             session_mgr=self.session_mgr,
             poll_interval=settings.jsonl_poll_interval,
+            launcher=self.launcher,
         )
 
         # Guard handler (initialized in start())

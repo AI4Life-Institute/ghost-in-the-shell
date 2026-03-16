@@ -211,10 +211,12 @@ class JsonlMonitor:
         session_mgr: Any,
         poll_interval: float = 2.0,
         projects_path: Path | None = None,
+        launcher: Any = None,
     ):
         self._session_mgr = session_mgr
         self._poll_interval = poll_interval
         self._projects_path = projects_path or Path.home() / ".claude" / "projects"
+        self._launcher = launcher  # optional; used to resolve alias session paths
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -415,16 +417,23 @@ class JsonlMonitor:
         """Find the JSONL/session file for a binding's CLI session.
 
         Dispatches to CLI-specific finders based on binding.coding_cli.
+        If a launcher is available, delegates to it so alias session_path
+        overrides are respected.
         """
         if not binding.cli_session_id or not binding.work_dir:
             return None
+
+        if self._launcher is not None:
+            result = self._launcher.get_session_file(
+                binding.work_dir, binding.coding_cli or "claude", binding.cli_session_id
+            )
+            return Path(result) if result else None
 
         cli = getattr(binding, "coding_cli", "claude")
         if cli == "codex":
             return self._find_codex_jsonl(binding)
         if cli == "copilot":
             return self._find_copilot_jsonl(binding)
-        # Default: claude (opencode uses JSON not JSONL, skip for now)
         return self._find_claude_jsonl(binding)
 
     def _find_claude_jsonl(self, binding: Any) -> Path | None:
