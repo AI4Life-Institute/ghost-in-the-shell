@@ -787,13 +787,16 @@ class DiscordAdapter(PlatformAdapter):
                 value = value[:100]
             choices.append(app_commands.Choice(name=label[:100], value=value))
 
-        # Resolve the current input to an absolute path
+        # Resolve the current input to an absolute path.
+        # Relative paths should always be anchored to bind_root, not the
+        # bot process cwd. Otherwise autocomplete behavior differs across
+        # hosts depending on where the service was started from.
         if not current or current == ".":
             target = self.bind_root
         else:
             p = Path(current).expanduser()
             if not p.is_absolute():
-                p = Path.cwd() / p
+                p = self.bind_root / p
             target = p.resolve() if p.exists() else p
 
         if target.is_dir():
