@@ -1385,12 +1385,14 @@ class Engine:
             await self._handle_cross_cli_import(session, pending, pending_channel, reply_channel)
             return
 
-        # Same-CLI resume — normal path
+        # Same-CLI resume — use session.source_cli so aliases like "clpy"
+        # resume with "clpy --resume {id}", not "claude --resume {id}".
+        resume_cli = session.source_cli or pending["cli"]
         await self._create_bind(
             channel_id=pending_channel,
             work_dir=pending["path"],
             window_name=pending["window_name"],
-            cli=pending["cli"],
+            cli=resume_cli,
             interaction=None,
             session_id=session.session_id,
             mode=pending.get("mode"),
