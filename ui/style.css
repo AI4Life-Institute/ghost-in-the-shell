@@ -631,26 +631,27 @@ table.dbt tbody td.status{font-weight:500}
 
 /* ── Build view: session sidebar + terminal ──────────────────────────────── */
 #view-build{display:flex;flex-direction:row;height:100%;overflow:hidden}
-#sess-sidebar{width:220px;min-width:160px;background:rgba(255,255,255,0.05);border-right:1px solid rgba(255,255,255,0.08);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}
-#sess-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.08);font-size:11px;font-weight:600;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.07em;flex-shrink:0}
-#new-sess-btn{background:rgba(255,255,255,0.1);border:none;color:rgba(255,255,255,0.7);width:22px;height:22px;border-radius:5px;cursor:pointer;font-size:15px;line-height:1;display:flex;align-items:center;justify-content:center;transition:background 0.15s;padding:0}
-#new-sess-btn:hover{background:rgba(255,255,255,0.22)}
+#sess-sidebar{width:240px;min-width:180px;background:#0e0e1a;border-right:1px solid rgba(255,255,255,0.10);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}
+#sess-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.08);font-size:11px;font-weight:600;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.07em;flex-shrink:0}
+#new-sess-btn{background:rgba(255,255,255,0.12);border:none;color:rgba(255,255,255,0.8);width:22px;height:22px;border-radius:5px;cursor:pointer;font-size:15px;line-height:1;display:flex;align-items:center;justify-content:center;transition:background 0.15s;padding:0}
+#new-sess-btn:hover{background:rgba(255,255,255,0.25)}
 #sess-list{flex:1;overflow-y:auto;padding:4px 0}
 #sess-list::-webkit-scrollbar{width:3px}
-#sess-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:3px}
-.sess-item{display:flex;flex-direction:column;padding:8px 12px;cursor:pointer;transition:background 0.12s;border-left:2px solid transparent;gap:2px}
-.sess-item:hover{background:rgba(255,255,255,0.06)}
-.sess-item.active{background:rgba(255,255,255,0.10);border-left-color:#7c6af5}
+#sess-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.18);border-radius:3px}
+.sess-item{display:flex;flex-direction:column;padding:9px 12px;cursor:pointer;transition:background 0.12s;border-left:2px solid transparent;gap:3px}
+.sess-item:hover{background:rgba(255,255,255,0.07)}
+.sess-item.active{background:rgba(124,106,245,0.18);border-left-color:#7c6af5}
 .sess-row1{display:flex;align-items:center;gap:6px}
-.sess-dot-sm{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,0.2);flex-shrink:0}
+.sess-dot-sm{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,0.25);flex-shrink:0}
 .sess-dot-sm.active{background:#22c55e;box-shadow:0 0 5px rgba(34,197,94,0.5)}
 .sess-dot-sm.busy{background:#f59e0b;box-shadow:0 0 5px rgba(245,158,11,0.5)}
-.sess-nm{font-size:12.5px;font-weight:500;color:rgba(255,255,255,0.82);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-.sess-cli-b{font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(124,106,245,0.25);color:#a89df5;flex-shrink:0;font-weight:500}
-.sess-cli-b.codex{background:rgba(59,130,246,0.25);color:#93c5fd}
-.sess-cli-b.opencode{background:rgba(34,197,94,0.25);color:#86efac}
-.sess-cli-b.copilot{background:rgba(245,158,11,0.20);color:#fcd34d}
-.sess-wd{font-size:10.5px;color:rgba(255,255,255,0.3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:13px}
+.sess-nm{font-size:13px;font-weight:600;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.sess-cli-b{font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(124,106,245,0.35);color:#c4b8ff;flex-shrink:0;font-weight:600}
+.sess-cli-b.codex{background:rgba(59,130,246,0.35);color:#bfdbfe}
+.sess-cli-b.opencode{background:rgba(34,197,94,0.30);color:#bbf7d0}
+.sess-cli-b.copilot{background:rgba(245,158,11,0.25);color:#fde68a}
+.sess-wd{font-size:10.5px;color:rgba(255,255,255,0.45);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:13px}
+.sess-plat{font-size:10px;color:rgba(255,255,255,0.28);padding-left:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #term-view{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;background:#0d0d14}
 #term-topbar{display:flex;align-items:center;gap:10px;padding:7px 14px;background:rgba(0,0,0,0.25);border-bottom:1px solid rgba(255,255,255,0.07);flex-shrink:0;min-height:36px}
 #term-sess-name{font-size:13px;font-weight:600;color:rgba(255,255,255,0.85)}

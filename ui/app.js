@@ -385,24 +385,50 @@ function renderSessions(sessions) {
   if (!list) return;
   list.innerHTML = '';
   if (!sessions.length) {
-    list.innerHTML = '<div style="padding:20px 12px;color:rgba(255,255,255,0.2);font-size:12px">No sessions found</div>';
+    list.innerHTML = '<div style="padding:20px 12px;color:rgba(255,255,255,0.3);font-size:12px">No sessions found</div>';
     return;
   }
-  sessions.forEach(sess => {
-    const dir = sess.work_dir ? sess.work_dir.split('/').pop() : '~';
+
+  // Sort: desktop first, then by window_name
+  const sorted = [...sessions].sort((a, b) => {
+    const ap = (a.platform || '');
+    const bp = (b.platform || '');
+    if (ap === 'desktop' && bp !== 'desktop') return -1;
+    if (bp === 'desktop' && ap !== 'desktop') return 1;
+    return (a.window_name || '').localeCompare(b.window_name || '');
+  });
+
+  sorted.forEach(sess => {
     const isActive = sess.channel_id === activeSessId;
     const cli = (sess.coding_cli || 'claude').toLowerCase();
     const clsExtra = cli === 'codex' ? ' codex' : cli === 'opencode' ? ' opencode' : cli === 'copilot' ? ' copilot' : '';
+    const platform = sess.platform || 'discord';
+
+    // Platform icon
+    const platIco = platform === 'desktop' ? '🖥' : platform === 'discord' ? '💬' : '🔗';
+
+    // Short working directory: last 2 path segments
+    let dirShort = '~';
+    if (sess.work_dir) {
+      const parts = sess.work_dir.replace(/^\/Users\/[^/]+/, '~').split('/').filter(Boolean);
+      dirShort = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : parts.join('/') || '~';
+    }
+
+    // Session label: window name if meaningful, else dir name
+    const name = sess.window_name && sess.window_name !== '1' && !/^\d+$/.test(sess.window_name)
+      ? sess.window_name
+      : (sess.work_dir ? sess.work_dir.split('/').pop() : cli);
+
     const item = document.createElement('div');
     item.className = 'sess-item' + (isActive ? ' active' : '');
     item.dataset.channelId = sess.channel_id;
     item.innerHTML =
       `<div class="sess-row1">` +
         `<span class="sess-dot-sm${isActive ? ' active' : ''}"></span>` +
-        `<span class="sess-nm">${esc(sess.window_name || cli)}</span>` +
+        `<span class="sess-nm">${platIco} ${esc(name)}</span>` +
         `<span class="sess-cli-b${clsExtra}">${esc(cli)}</span>` +
       `</div>` +
-      `<div class="sess-wd">${esc(dir)}</div>`;
+      `<div class="sess-wd">${esc(dirShort)}</div>`;
     item.onclick = () => activateSession(sess);
     list.appendChild(item);
   });
@@ -1404,6 +1430,36 @@ function dismissToast() {
 // ── Slash menu (global dismiss) ────────────────────────────────────────────
 // Screenshot function (button + Cmd+Shift+S)
 // Uses html2canvas to capture DOM → base64 PNG → saved by Rust (no screen recording TCC needed)
+// Auto-screenshot for dev verification — saves to /tmp/ghost-auto.png
+async function _autoScreenshot() {
+  if (!window.__TAURI__) return;
+  const invoke = window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke;
+  const dbg = (m) => invoke('debug_log', { msg: '[auto-ss] ' + m }).catch(() => {});
+  await dbg('start');
+  try {
+    if (!window.html2canvas) {
+      await dbg('loading html2canvas...');
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'lib/html2canvas.min.js';  // local copy
+        s.onload = () => { dbg('html2canvas loaded OK'); resolve(); };
+        s.onerror = (e) => { dbg('html2canvas load ERROR: ' + e); reject(e); };
+        document.head.appendChild(s);
+      });
+    }
+    await dbg('calling html2canvas...');
+    const canvas = await window.html2canvas(document.body, {
+      backgroundColor: null, scale: 1, logging: false, useCORS: true,
+    });
+    await dbg('canvas done, saving...');
+    const dataUrl = canvas.toDataURL('image/png');
+    await invoke('take_screenshot', { data: dataUrl, path: '/tmp/ghost-auto.png' });
+    await dbg('saved to /tmp/ghost-auto.png');
+  } catch(e) {
+    await dbg('ERROR: ' + e);
+  }
+}
+
 async function takeScreenshot() {
   if (!window.__TAURI__) { showToast('Screenshot only available in the desktop app'); return; }
   const invoke = window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke;
@@ -1462,6 +1518,14 @@ function installTauriShim() {
   const invoke = window.__TAURI__.core?.invoke ?? window.__TAURI__.invoke;
   const tauriEvent = window.__TAURI__.event;
 
+  // Helper: write to /tmp/ghost-js.log via Rust debug_log command
+  function _dbg(msg) {
+    const ts = new Date().toISOString().slice(11, 23);
+    try { invoke('debug_log', { msg: `[${ts}] ${msg}` }).catch(() => {}); } catch(e) {}
+  }
+
+  _dbg('installTauriShim: start, tauriEvent=' + typeof tauriEvent);
+
   // Internal event bus so multiple .on() calls for same event all fire
   const _listeners = [];  // { event, cb }
 
@@ -1470,18 +1534,33 @@ function installTauriShim() {
   }
 
   // Route Python IPC events (emitted from Python → Rust → Tauri 'python-event')
-  tauriEvent.listen('python-event', (e) => {
+  const listenPromise = tauriEvent.listen('python-event', (e) => {
     const data = e.payload;
+    _dbg('python-event received: ' + JSON.stringify(data).slice(0, 120));
+    // Debug: show first event received in sess-list
+    const dbg = document.getElementById('sess-list');
+    if (dbg && !dbg.dataset.gotEvent) {
+      dbg.dataset.gotEvent = '1';
+      dbg.innerHTML = `<div style="padding:8px 12px;color:rgba(255,255,255,0.5);font-size:10px;word-break:break-all">event: ${JSON.stringify(data).slice(0,120)}</div>`;
+    }
     if (data?.event) _dispatch(data.event, data);
+  });
+  listenPromise.then(() => {
+    _dbg('tauriEvent.listen python-event: registered OK');
+  }).catch(err => {
+    _dbg('tauriEvent.listen python-event ERROR: ' + err);
+    const dbg = document.getElementById('sess-list');
+    if (dbg) dbg.innerHTML = `<div style="padding:8px 12px;color:#f87171;font-size:11px">listen error: ${err}</div>`;
   });
 
   // Route PTY output events (emitted directly from Rust as 'pty-output')
   tauriEvent.listen('pty-output', (e) => {
     _dispatch('pty-output', e.payload);
-  });
+  }).catch(err => { _dbg('tauriEvent.listen pty-output ERROR: ' + err); });
 
   window.ghost = {
     send(cmd, payload = {}) {
+      _dbg('ghost.send: cmd=' + cmd);
       return invoke('python_cmd', { cmd, payload });
     },
     on(event, cb) {
@@ -1494,7 +1573,9 @@ function installTauriShim() {
       if (idx !== -1) _listeners.splice(idx, 1);
     },
     onAny(cb) { return window.ghost.on('*', cb); },
+    _dbg,
   };
+  _dbg('installTauriShim: window.ghost set');
 }
 
 // ── Ghost Bridge (Electron IPC) ────────────────────────────────────────────
@@ -1593,21 +1674,45 @@ function initPtyTerminal(channelId) {
 
 function ghostSetup() {
   if (typeof window === 'undefined' || !window.ghost) return;
+  const _dbg = window.ghost._dbg || (() => {});
+  _dbg('ghostSetup: start');
 
   // Register all listeners FIRST, then send requests
   window.ghost.on('ready', () => {
+    _dbg('ghostSetup: ready event received');
     window.ghost.send('sessions');
     window.ghost.send('agents', {});
     window.ghost.send('skills', {});
   });
 
   window.ghost.on('sessions', (data) => {
+    _dbg('ghostSetup: sessions event received, count=' + (data.sessions || []).length);
     allSessions = data.sessions || [];
     if (data.tmux_session) tmuxSession = data.tmux_session;
     renderSessions(allSessions);
     // Auto-select first session on first load
     if (!activeSessId && allSessions.length > 0) {
       activateSession(allSessions[0]);
+    }
+    // Dev verification: log computed styles of key elements
+    if (allSessions.length > 0 && !window._devCheckDone) {
+      window._devCheckDone = true;
+      setTimeout(() => {
+        const sb = document.getElementById('sess-sidebar');
+        const firstItem = document.querySelector('.sess-item');
+        const firstNm = document.querySelector('.sess-nm');
+        if (sb) {
+          const st = getComputedStyle(sb);
+          _dbg('sidebar bg=' + st.backgroundColor + ' color=' + st.color);
+        }
+        if (firstNm) {
+          const st = getComputedStyle(firstNm);
+          _dbg('sess-nm color=' + st.color + ' bg=' + st.backgroundColor);
+        }
+        if (firstItem) {
+          _dbg('first item text: ' + firstItem.textContent.trim().slice(0, 80));
+        }
+      }, 500);
     }
   });
 
@@ -1687,9 +1792,11 @@ function ghostSetup() {
   // All listeners registered — now request data
   // Catch errors so we can see what's failing
   function _requestSessions() {
+    _dbg('ghostSetup: sending sessions command');
     window.ghost.send('sessions')
-      .then(() => {})
+      .then(() => { _dbg('ghostSetup: sessions send OK (invoke returned)'); })
       .catch(err => {
+        _dbg('ghostSetup: sessions send ERROR: ' + err);
         const list = document.getElementById('sess-list');
         if (list) list.innerHTML = `<div style="padding:8px 12px;color:#f87171;font-size:11px">IPC error: ${err}</div>`;
       });

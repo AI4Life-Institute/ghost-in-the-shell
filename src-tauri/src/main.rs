@@ -227,7 +227,14 @@ fn spawn_python(app: AppHandle, stdin_arc: Arc<Mutex<Option<ChildStdin>>>) {
                     let trimmed = text.trim().to_string();
                     if trimmed.is_empty() { continue; }
                     match serde_json::from_str::<serde_json::Value>(&trimmed) {
-                        Ok(json) => { let _ = app_clone.emit("python-event", json); }
+                        Ok(json) => {
+                            // Debug: append to log file so we can verify events without screenshots
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ghost-ipc.log") {
+                                use std::io::Write as _;
+                                let _ = writeln!(f, "EMIT python-event: {}", &trimmed[..trimmed.len().min(200)]);
+                            }
+                            let _ = app_clone.emit("python-event", json);
+                        }
                         Err(_) => { eprintln!("[python stdout] {}", trimmed); }
                     }
                 }
@@ -245,6 +252,16 @@ fn spawn_python(app: AppHandle, stdin_arc: Arc<Mutex<Option<ChildStdin>>>) {
             eprintln!("[python] {}", line);
         }
     });
+}
+
+// ── Debug log — JS can write diagnostics to /tmp/ghost-js.log ────────────
+
+#[tauri::command]
+fn debug_log(msg: String) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ghost-js.log") {
+        use std::io::Write as _;
+        let _ = writeln!(f, "{}", msg);
+    }
 }
 
 // ── Screenshot — save base64 PNG from html2canvas in the WebView ──────────
@@ -289,6 +306,7 @@ fn main() {
             resize_pty,
             close_pty,
             take_screenshot,
+            debug_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
