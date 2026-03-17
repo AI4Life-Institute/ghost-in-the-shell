@@ -221,9 +221,18 @@ class JsonlMonitor:
         self._running = False
         self._task: asyncio.Task | None = None
 
-        # Per-file tracking (JSONL-based CLIs)
-        self._offsets: dict[str, int] = {}   # file_path -> byte offset
-        self._mtimes: dict[str, float] = {}  # file_path -> last mtime
+        # Per-channel tracking (JSONL-based CLIs)
+        # Key: (channel_id, file_path) — each channel tracks its own position
+        # independently even if two channels share the same session file.
+        self._offsets: dict[tuple[str, str], int] = {}
+        self._mtimes: dict[tuple[str, str], float] = {}
+
+        # Offset persistence
+        self._offsets_file = Path.home() / ".gits" / "jsonl_offsets.json"
+        self._offsets_dirty = False
+        self._offsets_last_save = 0.0
+        self._SAVE_DEBOUNCE = 10.0  # seconds between disk writes
+        self._load_offsets()
 
         # OpenCode tracking (SQLite timestamp-based)
         self._oc_timestamps: dict[str, int] = {}  # session_id -> last part timestamp
@@ -255,6 +264,7 @@ class JsonlMonitor:
         if self._task:
             self._task.cancel()
             self._task = None
+        self._save_offsets(force=True)
         logger.info("JsonlMonitor stopped")
 
     # -- Internal -----------------------------------------------------------
@@ -268,6 +278,7 @@ class JsonlMonitor:
                 break
             except Exception:
                 logger.exception("JsonlMonitor poll error")
+            self._save_offsets()
             await asyncio.sleep(self._poll_interval)
 
     async def _poll_once(self) -> None:
@@ -347,6 +358,8 @@ class JsonlMonitor:
             cli = getattr(binding, "coding_cli", "claude")
             if not binding.cli_session_id:
                 continue
+            if getattr(binding, "suspended", False):
+                continue
             try:
                 if cli == "opencode":
                     await self._check_opencode_binding(binding)
@@ -359,6 +372,44 @@ class JsonlMonitor:
                 )
 
     _SESSION_ACTIVE_THRESHOLD_SECS = 5 * 60  # 5 minutes
+
+    # -- Offset persistence -------------------------------------------------
+
+    def _load_offsets(self) -> None:
+        """Load persisted offsets from disk on startup."""
+        if not self._offsets_file.exists():
+            return
+        try:
+            raw = json.loads(self._offsets_file.read_text())
+            for key_str, val in raw.items():
+                # Stored as "channel_id\x00file_path"
+                parts = key_str.split("\x00", 1)
+                if len(parts) == 2:
+                    self._offsets[tuple(parts)] = val["offset"]  # type: ignore[index]
+                    self._mtimes[tuple(parts)] = val["mtime"]    # type: ignore[index]
+            logger.info("Loaded %d persisted JSONL offsets", len(self._offsets))
+        except Exception:
+            logger.warning("Failed to load jsonl_offsets.json — starting fresh", exc_info=True)
+
+    def _save_offsets(self, force: bool = False) -> None:
+        """Persist offsets to disk (debounced; force=True skips debounce)."""
+        if not self._offsets_dirty:
+            return
+        now = time.time()
+        if not force and (now - self._offsets_last_save) < self._SAVE_DEBOUNCE:
+            return
+        try:
+            raw = {
+                f"{ch_id}\x00{fp}": {"offset": off, "mtime": self._mtimes.get((ch_id, fp), 0.0)}
+                for (ch_id, fp), off in self._offsets.items()
+            }
+            tmp = self._offsets_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(raw))
+            tmp.replace(self._offsets_file)
+            self._offsets_dirty = False
+            self._offsets_last_save = now
+        except Exception:
+            logger.warning("Failed to save jsonl_offsets.json", exc_info=True)
 
     def _current_session_is_active(self, binding: Any) -> bool:
         """Return True if the binding's current session file was modified recently.
@@ -402,7 +453,7 @@ class JsonlMonitor:
             )
             return
 
-        file_key = str(jsonl_path)
+        file_key = (binding.channel_id, str(jsonl_path))
 
         # Check mtime — skip if unchanged
         try:
@@ -420,6 +471,7 @@ class JsonlMonitor:
         if file_key not in self._offsets:
             self._offsets[file_key] = stat.st_size
             self._mtimes[file_key] = stat.st_mtime
+            self._offsets_dirty = True
             logger.info(
                 "JSONL first-seen for ch=%s: %s (size=%d)",
                 binding.channel_id, jsonl_path.name, stat.st_size,
@@ -447,6 +499,7 @@ class JsonlMonitor:
             new_size = last_offset
         self._offsets[file_key] = new_size
         self._mtimes[file_key] = stat.st_mtime
+        self._offsets_dirty = True
 
         # Fire callbacks
         if new_texts and self._on_message:

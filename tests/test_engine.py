@@ -1219,3 +1219,145 @@ class TestE2EForkWorktree:
             assert not Path(wt_path).exists()
 
         asyncio.run(_test())
+
+
+# ------------------------------------------------------------------
+# _ensure_window_alive tests
+# ------------------------------------------------------------------
+
+
+class TestEnsureWindowAlive:
+    def test_window_alive_no_op(self, engine, tmp_path):
+        """Window exists → returns False, no create_window call."""
+        async def _test():
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-1",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+            )
+            engine.tmux.window_exists = AsyncMock(return_value=True)
+            create_before = engine.tmux.create_window.call_count
+
+            binding = engine.session_mgr.get_binding("ch-1")
+            result = await engine._ensure_window_alive(binding)
+
+            assert result is False
+            assert engine.tmux.create_window.call_count == create_before
+
+        asyncio.run(_test())
+
+    def test_window_dead_recreates_window(self, engine, tmp_path):
+        """Window missing → creates new window and updates binding."""
+        async def _test():
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-1",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+            )
+            new_win = WindowInfo(window_id="@99", name="test-window", cwd=str(tmp_path))
+            engine.tmux.window_exists = AsyncMock(return_value=False)
+            engine.tmux.create_window = AsyncMock(return_value=new_win)
+
+            binding = engine.session_mgr.get_binding("ch-1")
+            result = await engine._ensure_window_alive(binding)
+
+            assert result is True
+            assert binding.window_id == "@99"
+            engine.tmux.create_window.assert_called_once()
+            assert engine.session_mgr.get_binding("ch-1").window_id == "@99"
+
+        asyncio.run(_test())
+
+    def test_window_dead_create_fails_returns_false(self, engine, tmp_path):
+        """create_window raises → returns False without crashing."""
+        async def _test():
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-1",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+            )
+            engine.tmux.window_exists = AsyncMock(return_value=False)
+            engine.tmux.create_window = AsyncMock(side_effect=RuntimeError("tmux gone"))
+
+            binding = engine.session_mgr.get_binding("ch-1")
+            result = await engine._ensure_window_alive(binding)
+
+            assert result is False
+
+        asyncio.run(_test())
+
+    def test_handle_message_triggers_ensure_window(self, engine, tmp_path):
+        """handle_message calls _ensure_window_alive before forwarding."""
+        async def _test():
+            from gits.adapters.base import IncomingMessage
+
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-1",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+            )
+            engine.tmux.window_exists = AsyncMock(return_value=True)
+            engine.tmux.pane_current_command = AsyncMock(return_value="claude")
+
+            msg = IncomingMessage(
+                platform="discord", channel_id="ch-1", user_id="u1", text="hello"
+            )
+            await engine.handle_message(msg)
+
+            engine.tmux.window_exists.assert_called()
+
+        asyncio.run(_test())
+
+
+# ------------------------------------------------------------------
+# /info session summary alignment tests
+# ------------------------------------------------------------------
+
+
+class TestHandleStatusSessionSummary:
+    def test_summary_shown_when_session_found(self, engine, tmp_path):
+        """Session summary from discover_sessions appears in /info output."""
+        async def _test():
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-1",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+                cli_session_id="sess-abc-123",
+            )
+            fake_session = CLISession(
+                session_id="sess-abc-123",
+                summary="Add dark mode toggle",
+                last_message="make it dark",
+                message_count=5,
+                file_path="/tmp/fake.jsonl",
+                mtime=time.time(),
+            )
+            engine.launcher.discover_all_sessions = MagicMock(return_value=[fake_session])
+
+            interaction = FakeInteraction()
+            await engine.handle_status("ch-1", interaction)
+
+            reply = interaction.followup.send.call_args[0][0]
+            assert "Add dark mode toggle" in reply
+            assert "Session summary" in reply
+
+        asyncio.run(_test())
+
+    def test_summary_absent_when_no_session_match(self, engine, tmp_path):
+        """No session match → Session summary line is omitted."""
+        async def _test():
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-1",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+                cli_session_id="sess-unknown-xyz",
+            )
+            engine.launcher.discover_all_sessions = MagicMock(return_value=[])
+
+            interaction = FakeInteraction()
+            await engine.handle_status("ch-1", interaction)
+
+            reply = interaction.followup.send.call_args[0][0]
+            assert "Session summary" not in reply
+
+        asyncio.run(_test())

@@ -175,6 +175,9 @@ class Engine:
             return
 
         if msg.text:
+            # Ensure the tmux window still exists; recreate it if killed externally
+            await self._ensure_window_alive(binding)
+
             # Auto-resume if explicitly suspended OR if the CLI has exited
             # (pane is now running a shell like zsh/bash instead of the CLI)
             if binding.suspended:
@@ -812,6 +815,23 @@ class Engine:
         # Session file path + live stats
         if binding.cli_session_id:
             lines.append(f"Session ID: `{binding.cli_session_id}`")
+            # Show the human-readable summary so it matches the /bind dropdown label
+            try:
+                cli = binding.coding_cli or "claude"
+                target_type = self.launcher.resolve_cli(cli).base_type
+                matched = next(
+                    (
+                        s for s in self.launcher.discover_all_sessions(binding.work_dir, target_cli=cli)
+                        if s.session_id == binding.cli_session_id
+                    ),
+                    None,
+                )
+                if matched:
+                    s_base = self.launcher.resolve_cli(matched.source_cli).base_type if matched.source_cli else target_type
+                    badge = f"↗[{matched.source_cli}] " if s_base != target_type else ""
+                    lines.append(f"Session summary: \"{badge}{matched.summary}\"")
+            except Exception:
+                pass
             sess_file = self.launcher.get_session_file(
                 binding.work_dir, binding.coding_cli or "claude", binding.cli_session_id
             )
@@ -1022,9 +1042,44 @@ class Engine:
             logger.debug("Could not send exit to window %s", binding.window_id)
         await self.session_mgr.mark_suspended(channel_id)
 
+    async def _ensure_window_alive(self, binding: Any) -> bool:
+        """Ensure the tmux window in *binding* exists; recreate it if dead.
+
+        Returns True if the window was recreated, False if it was already alive.
+        The tmux session is created automatically by TmuxController when missing.
+        """
+        if await self.tmux.window_exists(binding.window_id):
+            return False
+
+        logger.warning(
+            "tmux window %s is dead for channel %s — recreating",
+            binding.window_id,
+            binding.channel_id,
+        )
+        try:
+            win = await self.tmux.create_window(
+                name=binding.window_name,
+                cwd=binding.work_dir,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to recreate tmux window for channel %s", binding.channel_id
+            )
+            return False
+
+        await self.session_mgr.update_window_id(binding.channel_id, win.window_id)
+        binding.window_id = win.window_id  # update local reference immediately
+        logger.info(
+            "Recreated tmux window %s for channel %s",
+            win.window_id,
+            binding.channel_id,
+        )
+        return True
+
     async def _resume_suspended(self, binding: Any) -> None:
         """Resume a suspended binding by relaunching the CLI."""
         logger.info("Auto-resuming suspended binding %s", binding.channel_id)
+        await self._ensure_window_alive(binding)
         cmd = self.launcher.build_launch_command(
             cli=binding.coding_cli,
             session_id=binding.cli_session_id,
