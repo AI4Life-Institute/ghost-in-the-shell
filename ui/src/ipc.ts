@@ -6,6 +6,11 @@ import { renderRunnerGrid, renderRunnerCard } from './views/runner';
 import { renderSkillPanel, renderSkillsList } from './views/skills';
 import { renderTriggerGrid } from './views/agents';
 import { updateAgentBadge } from './views/mode';
+import {
+  appendConvMessage, appendTailLine,
+  refreshDashboardChart, appendComputeChunk,
+  prependDashboardFile, handleFileThumbnailResult,
+} from './views/dashboard';
 
 declare global {
   interface Window {
@@ -171,20 +176,57 @@ export function ghostSetup(): void {
   });
 
   window.ghost.on('agent_log', (data: any) => {
-    const skillName = data.skill_name;
-    if (!skillName) return;
-    const logPanelId = 'runner-log-panel-' + skillName.replace(/[^a-z0-9]/gi, '_');
-    const lp = document.getElementById(logPanelId);
-    if (!lp) return;
     const line = data.line || data.text || '';
-    if (!line) return;
-    if (lp.querySelector('div[style]')) lp.innerHTML = '';
-    const d = document.createElement('div');
-    d.className = 'ag-log-row';
-    d.style.cssText = 'font-size:11.5px;font-family:monospace;color:rgba(0,0,0,.7);padding:2px 0;border-bottom:1px solid rgba(0,0,0,.04)';
-    d.textContent = line;
-    lp.appendChild(d);
-    lp.scrollTop = lp.scrollHeight;
+    // Runner panel (existing behaviour)
+    const skillName = data.skill_name;
+    if (skillName) {
+      const logPanelId = 'runner-log-panel-' + skillName.replace(/[^a-z0-9]/gi, '_');
+      const lp = document.getElementById(logPanelId);
+      if (lp && line) {
+        if (lp.querySelector('div[style]')) lp.innerHTML = '';
+        const d = document.createElement('div');
+        d.className = 'ag-log-row';
+        d.style.cssText = 'font-size:11.5px;font-family:monospace;color:rgba(0,0,0,.7);padding:2px 0;border-bottom:1px solid rgba(0,0,0,.04)';
+        d.textContent = line;
+        lp.appendChild(d);
+        lp.scrollTop = lp.scrollHeight;
+      }
+    }
+    // Dashboard tail view (7.5)
+    if (line && data.widget_id) {
+      appendTailLine(data.widget_id, line);
+    }
+  });
+
+  // 7.4: conversation message from agent
+  window.ghost.on('conversation_message', (data: any) => {
+    if (!data.widget_id || !data.text) return;
+    const role = data.role === 'hitl' ? 'hitl' : (data.role === 'user' ? 'user' : 'agent');
+    appendConvMessage(data.widget_id, role, data.text);
+  });
+
+  // 8.5: DB table updated — refresh bound chart
+  window.ghost.on('db_write', (data: any) => {
+    if (data.table) refreshDashboardChart(data.table);
+  });
+
+  // 9.2: streaming compute chunk
+  window.ghost.on('compute_chunk', (data: any) => {
+    if (!data.widget_id) return;
+    appendComputeChunk(data.widget_id, data.text ?? '', data.done === true);
+  });
+
+  // 10.7: new file created by agent
+  window.ghost.on('file_created', (data: any) => {
+    if (!data.widget_id || !data.file) return;
+    prependDashboardFile(data.widget_id, data.file);
+  });
+
+  // 10.5: PDF thumbnail result
+  window.ghost.on('file_thumbnail_result', (data: any) => {
+    if (data.file_id && data.data_url) {
+      handleFileThumbnailResult(data.file_id, data.data_url);
+    }
   });
 
   function _requestSessions(): void {

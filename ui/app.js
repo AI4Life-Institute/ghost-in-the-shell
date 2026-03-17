@@ -230,16 +230,6 @@
     ]
   };
 
-  // src/utils.ts
-  function esc(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-  function fmt(t) {
-    t = t.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, l, c) => `<pre><code>${esc(c.trim())}</code><button class="ccbtn" onclick="cpc(this)">Copy</button></pre>`);
-    t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
-    return t.split("\n").map((l) => `<p>${l || "&nbsp;"}</p>`).join("");
-  }
-
   // src/state.ts
   var state = {
     activeSessId: null,
@@ -265,8 +255,21 @@
     toastTimer: null,
     skillRunExpanded: {},
     runnerAgents: {},
-    skillDefs: {}
+    skillDefs: {},
+    curDashboardAgentId: "",
+    agentDashboards: {},
+    curLibraryTab: "skills"
   };
+
+  // src/utils.ts
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function fmt(t) {
+    t = t.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, l, c) => `<pre><code>${esc(c.trim())}</code><button class="ccbtn" onclick="cpc(this)">Copy</button></pre>`);
+    t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
+    return t.split("\n").map((l) => `<p>${l || "&nbsp;"}</p>`).join("");
+  }
 
   // src/views/mode.ts
   function setMode(mode) {
@@ -784,36 +787,6 @@
     ${repairBadge}
   </div>`;
   }
-  function renderFleet() {
-    const totalAgents = AGENTS.browser.profiles.reduce((n, p) => n + p.agents.length, 0) + AGENTS.loop.length + AGENTS.reactive.length;
-    const emptyEl = document.getElementById("agents-empty");
-    const scrollEl = document.getElementById("fleet-scroll");
-    if (emptyEl)
-      emptyEl.style.display = totalAgents === 0 ? "flex" : "none";
-    if (scrollEl)
-      scrollEl.style.display = totalAgents === 0 ? "none" : "";
-    const profileRow = document.getElementById("profile-row");
-    if (profileRow) {
-      let html = "";
-      AGENTS.browser.profiles.forEach((p) => {
-        const running = p.agents.filter((a) => a.status === "running").length;
-        const count = p.agents.length;
-        const isOn = p.id === state.curProfileId;
-        const statusCls = running > 0 ? "running" : "idle";
-        const statusTxt = running > 0 ? `\u25B6 ${running} running` : count > 0 ? "\u23F8 Idle" : "\u25CF No agents";
-        html += `<div class="profile-card${isOn ? " on" : ""}" onclick="selProfile(this,'${p.id}')">
-        <div class="profile-card-ico">\u{1F310}</div>
-        <div class="profile-card-name">${esc(p.label)}</div>
-        <div class="profile-card-count">${count} agent${count !== 1 ? "s" : ""}</div>
-        <div class="profile-card-status ${statusCls}">${statusTxt}</div>
-      </div>`;
-      });
-      html += `<div class="profile-card add" onclick="showToast('Add Chrome profile \u2014 coming soon')">\uFF0B<br>Add Profile</div>`;
-      profileRow.innerHTML = html;
-    }
-    renderProfileAgents(state.curProfileId);
-    renderTriggerGrid();
-  }
   function renderProfileAgents(profileId) {
     const profile = AGENTS.browser.profiles.find((p) => p.id === profileId);
     const row = document.getElementById("profile-agents-row");
@@ -883,7 +856,7 @@
         <button class="ag-btn">\u23F8 Pause</button>
         <button class="ag-btn">\u25B6 Run Now</button>
         <button class="ag-btn" style="color:#dc2626;border-color:rgba(220,38,38,.25)" onclick="showToast('Agent deleted (simulated)')">\u{1F5D1} Delete</button>
-        <button class="ag-btn link" onclick="setMode('data')">View in Data \u2192</button>
+        <button class="ag-btn link" onclick="linkToLibrary('data')">View in Data \u2192</button>
       </div>
     </div>`;
     const colRight = `
@@ -1016,6 +989,1067 @@
       </button>
     </div>
   </div>`;
+  }
+
+  // src/data/db.ts
+  var DB_COLLECTIONS = {
+    fromAgents: [
+      { id: "btc_prices", name: "btc_prices", rows: 128, updated: "2m ago", icon: "\u{1F4CA}", table: "btc_prices", sourceAgent: "btc-monitor" },
+      { id: "hn_links", name: "hn_links", rows: 340, updated: "2h ago", icon: "\u{1F517}", table: "hn_links", sourceAgent: "hn-digest-loop" },
+      { id: "nash_reports", name: "nash_reports", rows: 47, updated: "10m ago", icon: "\u{1F4C4}", table: "nash_reports", sourceAgent: "nash-reporter" }
+    ],
+    fromSkills: [
+      { id: "market_scans", name: "market_scans", rows: 86, updated: "14m ago", icon: "\u{1F4C8}", table: "market_scans", sourceSkill: "market" },
+      { id: "screenshots", name: "screenshots", rows: 12, updated: "1h ago", icon: "\u{1F5BC}", table: "screenshots", sourceSkill: "screenshot" }
+    ],
+    manual: [
+      { id: "notes", name: "notes", rows: 8, updated: "3d ago", icon: "\u{1F4DD}", table: "notes" }
+    ]
+  };
+  var TABLE_SOURCE_MAP = {};
+  DB_COLLECTIONS.fromAgents.forEach((c) => {
+    TABLE_SOURCE_MAP[c.table] = { type: "agent", id: c.sourceAgent };
+  });
+  DB_COLLECTIONS.fromSkills.forEach((c) => {
+    TABLE_SOURCE_MAP[c.table] = { type: "skill", id: c.sourceSkill };
+  });
+  var DB = {
+    tasks: {
+      cols: ["id", "goal", "status", "profile", "created_at", "summary"],
+      rows: [
+        { id: "tsk_01hw8m", goal: "Find the current BTC price on CoinGecko and save it", status: "done", profile: "Personal", created_at: "2026-03-14 14:41:02", summary: "BTC price $67,432.18 extracted and saved" },
+        { id: "tsk_01hw9k", goal: "Download Goldman Sachs Q2 report from Nash-AI", status: "running", profile: "nash-ai", created_at: "2026-03-14 14:43:00", summary: null },
+        { id: "tsk_01hwaq", goal: 'Log in to Notion and export "Week 12" page as PDF', status: "needs_review", profile: "Work", created_at: "2026-03-14 14:45:00", summary: null },
+        { id: "tsk_01hwbr", goal: 'Search HackerNews for "AI agents" and save top 10 links', status: "queued", profile: "Personal", created_at: "2026-03-14 14:47:00", summary: null }
+      ]
+    },
+    btc_prices: {
+      cols: ["id", "price", "ts"],
+      rows: Array.from({ length: 10 }, (_, i) => ({ id: "btc_" + i, price: "$" + (67e3 + i * 10) + ".00", ts: `2026-03-15 ${String(14 - i).padStart(2, "0")}:00:00` }))
+    },
+    hn_links: {
+      cols: ["id", "title", "url", "score"],
+      rows: [
+        { id: 1, title: "Show HN: Ghost agent fleet", url: "https://news.ycombinator.com/item?id=1", score: 342 },
+        { id: 2, title: "LLM agents in production", url: "https://news.ycombinator.com/item?id=2", score: 287 },
+        { id: 3, title: "Browser automation with real Chrome", url: "https://news.ycombinator.com/item?id=3", score: 201 }
+      ]
+    },
+    nash_reports: {
+      cols: ["id", "filename", "size_kb", "downloaded_at"],
+      rows: [
+        { id: "rpt_1", filename: "gs_q2_2024.pdf", size_kb: 2345, downloaded_at: "2026-03-15 14:43:10" }
+      ]
+    },
+    market_scans: {
+      cols: ["id", "symbol", "price", "ts"],
+      rows: [
+        { id: 1, symbol: "BTC", price: "$67,432.18", ts: "2026-03-15 14:41:00" },
+        { id: 2, symbol: "ETH", price: "$3,210.55", ts: "2026-03-15 14:41:00" }
+      ]
+    },
+    screenshots: { cols: ["id", "url", "ts"], rows: [] },
+    notes: { cols: ["id", "text", "created_at"], rows: [{ id: 1, text: "Check Nash-AI reports weekly", created_at: "2026-03-12" }] }
+  };
+  var DATA_FILES = [
+    {
+      type: "folder",
+      id: "f-agents",
+      name: "agents",
+      open: true,
+      children: [
+        {
+          type: "sqlite",
+          id: "db-btc",
+          name: "btc_monitor.db",
+          open: false,
+          tables: [{ id: "btc_prices", name: "btc_prices", rows: 128 }]
+        },
+        {
+          type: "sqlite",
+          id: "db-hn",
+          name: "hn_digest.db",
+          open: true,
+          tables: [
+            { id: "hn_links", name: "hn_links", rows: 340 },
+            { id: "nash_reports", name: "nash_reports", rows: 47 }
+          ]
+        }
+      ]
+    },
+    {
+      type: "folder",
+      id: "f-skills",
+      name: "skills",
+      open: false,
+      children: [
+        {
+          type: "sqlite",
+          id: "db-market",
+          name: "market.db",
+          open: false,
+          tables: [{ id: "market_scans", name: "market_scans", rows: 86 }]
+        },
+        { type: "folder", id: "f-screenshots", name: "screenshots", open: false, children: [] }
+      ]
+    },
+    { type: "csv", id: "csv-notes", name: "notes.csv", tableId: "notes", rows: 8 }
+  ];
+
+  // src/dashboard-store.ts
+  var STORAGE_PREFIX = "ghost_dashboard_";
+  function loadDashboard(agentId) {
+    try {
+      const raw = localStorage.getItem(STORAGE_PREFIX + agentId);
+      if (!raw)
+        return null;
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  function saveDashboard(agentId, dashboard) {
+    try {
+      const toSave = {
+        agentId: dashboard.agentId,
+        widgets: dashboard.widgets.map((w) => ({
+          id: w.id,
+          type: w.type,
+          size: w.size,
+          agentId: w.agentId,
+          state: "idle",
+          // reset runtime state on save
+          title: w.title,
+          config: w.config
+        })),
+        pipeline: dashboard.pipeline
+      };
+      localStorage.setItem(STORAGE_PREFIX + agentId, JSON.stringify(toSave));
+    } catch {
+    }
+  }
+
+  // src/views/dashboard.ts
+  function _widgetCard(w, body) {
+    const card = document.createElement("div");
+    card.className = `dash-widget dash-widget-${w.size} dash-widget-state-${w.state}`;
+    card.dataset.widgetId = w.id;
+    const hdr = document.createElement("div");
+    hdr.className = "dw-hdr";
+    hdr.innerHTML = `
+    <span class="dw-title">${esc(w.title || w.type)}</span>
+    <span class="dw-state-badge dw-state-${w.state}">${_stateBadge(w.state)}</span>`;
+    card.appendChild(hdr);
+    card.appendChild(body);
+    return card;
+  }
+  function _stateBadge(st) {
+    const m = { running: "\u25B6", review: "\u26A0 Review", done: "\u2713", idle: "" };
+    return m[st] ?? st;
+  }
+  var conversationRenderer = {
+    defaultSize: "2x1",
+    render(w) {
+      const cfg = w.config;
+      const el = document.createElement("div");
+      el.className = "dw-conversation";
+      if (cfg.mode === "tail") {
+        el.innerHTML = `
+        <div class="dw-tail-wrap">
+          <pre class="dw-tail-pre" id="dw-tail-${w.id}"><span class="dw-tail-cursor">\u258C</span></pre>
+        </div>
+        <div class="dw-conv-toolbar">
+          <button class="dw-conv-mode-btn" onclick="dashboardWidgetToggleTail('${w.id}')">\u{1F4AC} Chat</button>
+        </div>`;
+      } else {
+        const agent = _allAgents().find((a) => a.id === w.agentId);
+        const hitlHtml = agent?.detail?.hitl?.pending ? `<div class="dw-conv-msg agent hitl">
+            <span class="dw-msg-ico">\u26A0\uFE0F</span>
+            <div class="dw-msg-body dw-hitl-body">
+              <div class="dw-hitl-msg">${esc(agent.detail.hitl.msg)}</div>
+              <div class="dw-hitl-btns">
+                <button class="dw-hitl-btn confirm"
+                  onclick="dashboardHitlRespond('${w.id}','confirm')">\u2713 Confirm</button>
+                <button class="dw-hitl-btn skip"
+                  onclick="dashboardHitlRespond('${w.id}','skip')">\u2715 Skip</button>
+              </div>
+            </div>
+          </div>` : "";
+        el.innerHTML = `
+        <div class="dw-conv-msgs" id="dw-conv-msgs-${w.id}">
+          <div class="dw-conv-msg agent">
+            <span class="dw-msg-ico">\u{1F916}</span>
+            <div class="dw-msg-body">Ready. What would you like to know?</div>
+          </div>
+          ${hitlHtml}
+        </div>
+        <div class="dw-conv-input-row">
+          <input class="dw-conv-input" id="dw-conv-input-${w.id}"
+            placeholder="Message agent\u2026"
+            onkeydown="dashboardConvSend(event,'${w.id}')">
+          <button class="dw-conv-send" onclick="dashboardConvSendBtn('${w.id}')">\u2191</button>
+          <button class="dw-conv-mode-btn" onclick="dashboardWidgetToggleTail('${w.id}')">\u2261 Log</button>
+        </div>`;
+      }
+      return el;
+    }
+  };
+  var chartRenderer = {
+    defaultSize: "2x1",
+    render(w) {
+      const cfg = w.config;
+      const view = cfg.view ?? "table";
+      const range = cfg.range ?? "24h";
+      const el = document.createElement("div");
+      el.className = "dw-chart";
+      const rangeTabs = ["1h", "24h", "7d", "all"].map(
+        (r) => `<div class="dw-chart-rtab${range === r ? " on" : ""}"
+            onclick="dashboardChartRange('${w.id}','${r}')">${r}</div>`
+      ).join("");
+      el.innerHTML = `
+      <div class="dw-chart-toolbar">
+        <div class="dw-chart-view-tabs">
+          <div class="dw-chart-vtab${view === "table" ? " on" : ""}"
+               onclick="dashboardChartView('${w.id}','table')">Table</div>
+          <div class="dw-chart-vtab${view === "chart" ? " on" : ""}"
+               onclick="dashboardChartView('${w.id}','chart')">Chart</div>
+        </div>
+        <div class="dw-chart-range-tabs">${rangeTabs}</div>
+        <button class="dw-chart-cfg-btn" onclick="dashboardChartConfig('${w.id}')">\xB7\xB7\xB7</button>
+      </div>
+      <div class="dw-chart-body" id="dw-chart-body-${w.id}">
+        ${view === "chart" ? _chartSvg() : _chartTablePreview(cfg)}
+      </div>`;
+      return el;
+    }
+  };
+  function _chartTablePreview(cfg) {
+    const tableId = cfg.table;
+    return `<div class="dw-chart-table-ph">
+    <div class="dw-chart-tname">\u{1F4CA} ${esc(tableId)}</div>
+    <div class="dw-chart-trows">Loading\u2026</div>
+    <a class="dw-chart-viewall" onclick="linkToLibrary('data','${esc(tableId)}')">View all \u2192</a>
+  </div>`;
+  }
+  function _chartSvg() {
+    const pts = "10,80 40,55 70,65 100,30 130,45 160,25 190,40 220,15 250,30 280,20";
+    return `<svg class="dw-chart-svg" viewBox="0 0 300 100" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="rgba(99,102,241,.8)" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round"/>
+    <polyline points="${pts} 280,100 10,100" fill="rgba(99,102,241,.08)" stroke="none"/>
+  </svg>`;
+  }
+  var computeRenderer = {
+    defaultSize: "2x1",
+    render(w) {
+      const cfg = w.config;
+      const el = document.createElement("div");
+      el.className = "dw-compute";
+      const cursor = cfg.streaming ? '<span class="dw-compute-cursor">\u258C</span>' : "";
+      const actions = w.state === "review" && cfg.reviewActions?.length ? `<div class="dw-compute-actions">${cfg.reviewActions.map(
+        (a) => `<button class="dw-compute-act-btn"
+             onclick="dashboardComputeAction('${w.id}','${esc(a.event)}')">${esc(a.label)}</button>`
+      ).join("")}</div>` : "";
+      el.innerHTML = `
+      <div class="dw-compute-body" id="dw-compute-body-${w.id}">
+        ${_renderMarkdown(cfg.content || "")}${cursor}
+      </div>
+      ${actions}`;
+      return el;
+    }
+  };
+  function _renderMarkdown(md) {
+    return md.replace(/^### (.+)$/gm, "<h3>$1</h3>").replace(/^## (.+)$/gm, "<h2>$1</h2>").replace(/^# (.+)$/gm, "<h1>$1</h1>").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\*(.+?)\*/g, "<em>$1</em>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/^- (.+)$/gm, "<li>$1</li>").replace(/(<li>[^]*?<\/li>)/g, "<ul>$1</ul>").replace(/\n\n+/g, "</p><p>").replace(/^(?!<[hucl])(.+)/gm, "<p>$1</p>");
+  }
+  var filesRenderer = {
+    defaultSize: "2x2",
+    render(w) {
+      const cfg = w.config;
+      const files = cfg.files ?? [];
+      const isGallery = cfg.viewMode === "gallery" || cfg.viewMode == null && files.some((f) => f.mimeType.startsWith("image/"));
+      const el = document.createElement("div");
+      el.className = "dw-files";
+      const selCount = cfg.selectable && cfg.selected?.length ? `<div class="dw-files-sel-count">${cfg.selected.length} selected</div>` : "";
+      const toolbar = `
+      <div class="dw-files-toolbar">
+        <div class="dw-files-vtabs">
+          <div class="dw-files-vtab${isGallery ? " on" : ""}"
+               onclick="dashboardFilesView('${w.id}','gallery')">\u229E Gallery</div>
+          <div class="dw-files-vtab${!isGallery ? " on" : ""}"
+               onclick="dashboardFilesView('${w.id}','list')">\u2261 List</div>
+        </div>
+        ${selCount}
+      </div>`;
+      const bodyItems = isGallery ? files.map((f) => _galleryItem(f, w, cfg)).join("") : files.map((f) => _listItem(f, w, cfg)).join("");
+      const bodyWrap = isGallery ? `<div class="dw-files-gallery" id="dw-files-body-${w.id}">${bodyItems}</div>` : `<div class="dw-files-list"   id="dw-files-body-${w.id}">${bodyItems}</div>`;
+      const batchBar = cfg.selectable && cfg.selected?.length && cfg.batchActions?.length ? `<div class="dw-files-batch">${cfg.batchActions.map(
+        (a) => `<button class="dw-files-batch-btn"
+             onclick="dashboardFilesAction('${w.id}','${esc(a.event)}')">${esc(a.label)}</button>`
+      ).join("")}</div>` : "";
+      el.innerHTML = toolbar + bodyWrap + batchBar;
+      return el;
+    }
+  };
+  function _galleryItem(f, w, cfg) {
+    const isNew = f.isNew ? '<span class="dw-file-new">NEW</span>' : "";
+    const sel = cfg.selected?.includes(f.id) ? " selected" : "";
+    const selAttr = cfg.selectable ? `onclick="dashboardFileSelect('${w.id}','${f.id}')"` : "";
+    const acts = (cfg.actions ?? []).map(
+      (a) => `<button class="dw-file-act"
+       onclick="dashboardFilesItemAction('${w.id}','${f.id}','${esc(a.event)}')">${esc(a.label)}</button>`
+    ).join("");
+    return `<div class="dw-file-thumb${sel}" ${selAttr}>
+    ${isNew}
+    <div class="dw-file-thumb-img">${_mimeIcon(f.mimeType)}</div>
+    <div class="dw-file-thumb-name">${esc(f.name)}</div>
+    ${acts ? `<div class="dw-file-actions">${acts}</div>` : ""}
+  </div>`;
+  }
+  function _listItem(f, w, cfg) {
+    const isNew = f.isNew ? '<span class="dw-file-new">NEW</span>' : "";
+    const sel = cfg.selected?.includes(f.id) ? " selected" : "";
+    const selAttr = cfg.selectable ? `onclick="dashboardFileSelect('${w.id}','${f.id}')"` : "";
+    const acts = (cfg.actions ?? []).map(
+      (a) => `<button class="dw-file-act"
+       onclick="dashboardFilesItemAction('${w.id}','${f.id}','${esc(a.event)}')">${esc(a.label)}</button>`
+    ).join("");
+    const isAudio = f.mimeType.startsWith("audio/");
+    const isPdf = f.mimeType === "application/pdf";
+    const audioEl = isAudio ? `<audio controls src="${esc(f.path)}" style="height:28px;width:100%;margin-top:4px"></audio>` : "";
+    const pdfPreviewEl = isPdf ? `<div class="dw-file-pdf-preview" id="dw-pdf-${w.id}-${f.id}"></div>` : "";
+    const pdfBtn = isPdf ? `<button class="dw-file-act"
+         onclick="dashboardFilePdfPreview('${w.id}','${f.id}','${esc(f.path)}')">Preview</button>` : "";
+    return `<div class="dw-file-row${sel}" ${selAttr}>
+    <span class="dw-file-row-ico">${_mimeIcon(f.mimeType)}</span>
+    <div class="dw-file-row-info">
+      <div class="dw-file-row-name">${esc(f.name)} ${isNew}</div>
+      <div class="dw-file-row-meta">${_fmtBytes(f.size)} \xB7 ${esc(f.createdAt)}</div>
+      ${audioEl}${pdfPreviewEl}
+    </div>
+    ${acts || pdfBtn ? `<div class="dw-file-actions">${pdfBtn}${acts}</div>` : ""}
+  </div>`;
+  }
+  function _mimeIcon(mime) {
+    if (mime.startsWith("image/"))
+      return "\u{1F5BC}";
+    if (mime.startsWith("audio/"))
+      return "\u{1F3B5}";
+    if (mime === "application/pdf")
+      return "\u{1F4C4}";
+    if (mime.startsWith("video/"))
+      return "\u{1F3AC}";
+    return "\u{1F4C1}";
+  }
+  function _fmtBytes(n) {
+    if (n < 1024)
+      return `${n} B`;
+    if (n < 1048576)
+      return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1048576).toFixed(1)} MB`;
+  }
+  var REGISTRY = {
+    conversation: conversationRenderer,
+    chart: chartRenderer,
+    compute: computeRenderer,
+    files: filesRenderer
+  };
+  function renderAgentList() {
+    const rowsEl = document.getElementById("dash-agent-rows");
+    if (!rowsEl)
+      return;
+    const all = _allAgents();
+    const subEl = document.getElementById("dash-overview-sub");
+    if (subEl)
+      subEl.textContent = `${all.length} agents`;
+    rowsEl.innerHTML = all.map((a) => {
+      const dotCls = { running: "run", listening: "live", waiting: "warn" }[a.status] ?? "idle";
+      const on = a.id === state.curDashboardAgentId ? " on" : "";
+      return `<div class="dash-al-row${on}" onclick="selectDashboardAgent('${a.id}')">
+      <span class="dash-al-dot dash-al-dot-${dotCls}"></span>
+      <div>
+        <div class="dal-name">${esc(a.name)}</div>
+        <div class="dal-sub">${esc(a.type)}</div>
+      </div>
+    </div>`;
+    }).join("");
+  }
+  function selectDashboardAgent(agentId) {
+    state.curDashboardAgentId = agentId;
+    document.querySelectorAll(".dash-al-row, .dash-al-overview").forEach((el) => el.classList.remove("on"));
+    if (agentId === "__overview__") {
+      document.getElementById("dash-overview-btn")?.classList.add("on");
+      renderOverview();
+    } else {
+      document.querySelectorAll(".dash-al-row").forEach((el) => {
+        if (el.getAttribute("onclick") === `selectDashboardAgent('${agentId}')`)
+          el.classList.add("on");
+      });
+      renderDashboard(agentId);
+    }
+  }
+  function renderOverview() {
+    const hdr = document.getElementById("dash-hdr");
+    const pipe = document.getElementById("dash-pipe");
+    if (hdr)
+      hdr.style.display = "none";
+    if (pipe)
+      pipe.style.display = "none";
+    const grid = document.getElementById("dash-grid");
+    if (!grid)
+      return;
+    grid.innerHTML = _allAgents().map((a) => {
+      const dotCls = { running: "run", listening: "live", waiting: "warn" }[a.status] ?? "idle";
+      const d = a.detail;
+      const progress = d.running ? `<div class="dash-ov-prog"><div class="dash-ov-prog-fill"
+           style="width:${Math.round(d.steps / Math.max(d.totalSteps, 1) * 100)}%"></div></div>` : "";
+      return `<div class="dash-ov-card" onclick="selectDashboardAgent('${a.id}')">
+      <div class="dash-ov-hdr">
+        <span class="dash-al-dot dash-al-dot-${dotCls}"></span>
+        <span class="dash-ov-name">${esc(a.name)}</span>
+        <span class="dash-ov-type">${esc(a.type)}</span>
+      </div>
+      <div class="dash-ov-sub">${esc(a.sub)}</div>
+      ${progress}
+    </div>`;
+    }).join("");
+  }
+  function renderDashboard(agentId) {
+    const agent = _findAgent(agentId);
+    if (!agent)
+      return;
+    const hdr = document.getElementById("dash-hdr");
+    if (hdr) {
+      hdr.style.display = "flex";
+      const dot = document.getElementById("dash-hdr-dot");
+      if (dot)
+        dot.className = `dash-hdr-dot dash-hdr-dot-${agent.status}`;
+      const nm = document.getElementById("dash-hdr-name");
+      if (nm)
+        nm.textContent = agent.name;
+      const sub = document.getElementById("dash-hdr-sub");
+      if (sub)
+        sub.textContent = `${agent.type} \xB7 ${agent.sub}`;
+      const st = document.getElementById("dash-hdr-status");
+      if (st)
+        st.textContent = _statusLabel(agent.status);
+      const pause = document.getElementById("dash-hdr-pause");
+      const stop = document.getElementById("dash-hdr-stop");
+      const show = agent.detail.running;
+      if (pause)
+        pause.style.display = show ? "" : "none";
+      if (stop)
+        stop.style.display = show ? "" : "none";
+    }
+    let db = state.agentDashboards[agentId] ?? loadDashboard(agentId);
+    if (!db) {
+      db = inferDefaultDashboard(agentId, agent);
+      state.agentDashboards[agentId] = db;
+      saveDashboard(agentId, db);
+    }
+    const pipe = document.getElementById("dash-pipe");
+    if (pipe) {
+      if (db.pipeline?.length) {
+        pipe.style.display = "flex";
+        pipe.innerHTML = db.pipeline.map((s, i) => {
+          const ico = { done: "\u2713", running: "\u25B6", review: "\u26A0", idle: "\u25CB" }[s.state] ?? "\u25CB";
+          return `${i > 0 ? '<span class="dash-pipe-arrow">\u203A</span>' : ""}
+          <div class="dash-pipe-stage dash-pipe-stage-${s.state}"
+               onclick="dashboardPipeNav('${s.id}')">
+            <span class="dash-pipe-ico">${ico}</span>
+            <span class="dash-pipe-lbl">${esc(s.label)}</span>
+          </div>`;
+        }).join("");
+      } else {
+        pipe.style.display = "none";
+      }
+    }
+    const grid = document.getElementById("dash-grid");
+    if (!grid)
+      return;
+    grid.innerHTML = "";
+    db.widgets.forEach((w) => {
+      const renderer = REGISTRY[w.type];
+      if (!renderer)
+        return;
+      const body = renderer.render(w);
+      grid.appendChild(_widgetCard(w, body));
+    });
+  }
+  function inferDefaultDashboard(agentId, agent) {
+    const widgets = [];
+    let n = 0;
+    widgets.push({
+      id: `${agentId}-w${++n}`,
+      type: "conversation",
+      size: "2x1",
+      agentId,
+      state: agent.detail?.running ? "running" : "idle",
+      title: "Conversation",
+      config: { mode: "chat" }
+    });
+    const tableName = agentId.replace(/-/g, "_") + "_data";
+    const tableData = DB[tableName];
+    const hasTimestamp = tableData?.cols?.some(
+      (c) => /^(ts|time|timestamp|date|created_at|updated_at)$/i.test(c)
+    ) ?? false;
+    widgets.push({
+      id: `${agentId}-w${++n}`,
+      type: "chart",
+      size: "2x1",
+      agentId,
+      state: "idle",
+      title: "Data",
+      config: {
+        table: tableName,
+        view: hasTimestamp ? "chart" : "table",
+        range: "24h"
+      }
+    });
+    return { agentId, widgets };
+  }
+  function dashboardWidgetToggleTail(widgetId) {
+    const db = state.agentDashboards[state.curDashboardAgentId];
+    const w = db?.widgets.find((x) => x.id === widgetId);
+    if (!w)
+      return;
+    const cfg = w.config;
+    cfg.mode = cfg.mode === "tail" ? "chat" : "tail";
+    renderDashboard(state.curDashboardAgentId);
+  }
+  function dashboardConvSend(e, widgetId) {
+    if (e.key === "Enter")
+      dashboardConvSendBtn(widgetId);
+  }
+  function dashboardConvSendBtn(widgetId) {
+    const input = document.getElementById(`dw-conv-input-${widgetId}`);
+    if (!input?.value.trim())
+      return;
+    const msgs = document.getElementById(`dw-conv-msgs-${widgetId}`);
+    if (msgs) {
+      const d = document.createElement("div");
+      d.className = "dw-conv-msg user";
+      d.innerHTML = `<div class="dw-msg-body">${esc(input.value)}</div>`;
+      msgs.appendChild(d);
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+    window.ghost?.send?.("agent_message", { widgetId, text: input.value });
+    input.value = "";
+  }
+  function dashboardChartView(widgetId, view) {
+    const w = _curWidget(widgetId);
+    if (w) {
+      w.config.view = view;
+      renderDashboard(state.curDashboardAgentId);
+    }
+  }
+  function dashboardChartRange(widgetId, range) {
+    const w = _curWidget(widgetId);
+    if (w) {
+      w.config.range = range;
+      renderDashboard(state.curDashboardAgentId);
+    }
+  }
+  function dashboardChartConfig(widgetId) {
+    const existingMenu = document.getElementById(`dw-chart-menu-${widgetId}`);
+    if (existingMenu) {
+      existingMenu.remove();
+      return;
+    }
+    const w = _curWidget(widgetId);
+    if (!w)
+      return;
+    const cfg = w.config;
+    const tableData = DB[cfg.table];
+    const cols = tableData?.cols ?? [];
+    const xOpts = cols.map(
+      (c) => `<option value="${esc(c)}"${cfg.xField === c ? " selected" : ""}>${esc(c)}</option>`
+    ).join("");
+    const yOpts = cols.map(
+      (c) => `<option value="${esc(c)}"${cfg.yField === c ? " selected" : ""}>${esc(c)}</option>`
+    ).join("");
+    const menu = document.createElement("div");
+    menu.id = `dw-chart-menu-${widgetId}`;
+    menu.className = "dw-chart-menu";
+    menu.innerHTML = `
+    <div class="dw-chart-menu-row">
+      <label class="dw-chart-menu-lbl">X axis</label>
+      <select class="dw-chart-menu-sel" onchange="dashboardChartSetField('${widgetId}','x',this.value)">
+        <option value="">\u2014 auto \u2014</option>${xOpts}
+      </select>
+    </div>
+    <div class="dw-chart-menu-row">
+      <label class="dw-chart-menu-lbl">Y axis</label>
+      <select class="dw-chart-menu-sel" onchange="dashboardChartSetField('${widgetId}','y',this.value)">
+        <option value="">\u2014 auto \u2014</option>${yOpts}
+      </select>
+    </div>
+    <div class="dw-chart-menu-row">
+      <label class="dw-chart-menu-lbl">Type</label>
+      <select class="dw-chart-menu-sel" onchange="dashboardChartSetType('${widgetId}',this.value)">
+        <option value="line"${(cfg.chartType ?? "line") === "line" ? " selected" : ""}>Line</option>
+        <option value="bar"${cfg.chartType === "bar" ? " selected" : ""}>Bar</option>
+        <option value="scatter"${cfg.chartType === "scatter" ? " selected" : ""}>Scatter</option>
+      </select>
+    </div>`;
+    const toolbar = document.querySelector(`#dw-chart-body-${widgetId}`)?.previousElementSibling;
+    toolbar?.insertAdjacentElement("afterend", menu);
+    const closeHandler = (e) => {
+      if (!menu.contains(e.target)) {
+        menu.remove();
+        document.removeEventListener("click", closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", closeHandler), 0);
+  }
+  function dashboardChartSetField(widgetId, axis, value) {
+    const w = _curWidget(widgetId);
+    if (!w)
+      return;
+    const cfg = w.config;
+    if (axis === "x")
+      cfg.xField = value || void 0;
+    else
+      cfg.yField = value || void 0;
+    if (cfg.view === "chart") {
+      const bodyEl = document.getElementById(`dw-chart-body-${widgetId}`);
+      if (bodyEl)
+        bodyEl.innerHTML = _chartSvg();
+    }
+  }
+  function dashboardChartSetType(widgetId, chartType) {
+    const w = _curWidget(widgetId);
+    if (!w)
+      return;
+    w.config.chartType = chartType;
+    if (w.config.view === "chart") {
+      const bodyEl = document.getElementById(`dw-chart-body-${widgetId}`);
+      if (bodyEl)
+        bodyEl.innerHTML = _chartSvg();
+    }
+  }
+  function dashboardComputeAction(widgetId, event) {
+    window.ghost?.send?.("pipeline_action", { widgetId, event });
+  }
+  function dashboardFilesView(widgetId, viewMode) {
+    const w = _curWidget(widgetId);
+    if (w) {
+      w.config.viewMode = viewMode;
+      renderDashboard(state.curDashboardAgentId);
+    }
+  }
+  function dashboardFileSelect(widgetId, fileId) {
+    const w = _curWidget(widgetId);
+    if (!w)
+      return;
+    const cfg = w.config;
+    const sel = cfg.selected ?? [];
+    const idx = sel.indexOf(fileId);
+    if (idx >= 0)
+      sel.splice(idx, 1);
+    else
+      sel.push(fileId);
+    cfg.selected = sel;
+    renderDashboard(state.curDashboardAgentId);
+  }
+  function dashboardFilesItemAction(widgetId, fileId, event) {
+    window.ghost?.send?.("file_action", { widgetId, fileId, event });
+  }
+  function dashboardFilesAction(widgetId, event) {
+    const w = _curWidget(widgetId);
+    const sel = w?.config?.selected ?? [];
+    window.ghost?.send?.("file_batch_action", { widgetId, event, fileIds: sel });
+  }
+  function dashboardPipeNav(stageId) {
+    const db = state.agentDashboards[state.curDashboardAgentId];
+    const stage = db?.pipeline?.find((s) => s.id === stageId);
+    if (!stage)
+      return;
+    document.querySelector(`[data-widget-id="${stage.widgetId}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  function dashboardPause() {
+    window.ghost?.send?.("agent_pause", { agentId: state.curDashboardAgentId });
+  }
+  function dashboardStop() {
+    window.ghost?.send?.("agent_stop", { agentId: state.curDashboardAgentId });
+  }
+  function openNewAgentModal() {
+    window.showToast?.("New Agent \u2014 coming soon");
+  }
+  function dashboardHitlRespond(widgetId, response) {
+    const msgs = document.getElementById(`dw-conv-msgs-${widgetId}`);
+    const hitlEl = msgs?.querySelector(".hitl");
+    if (hitlEl)
+      hitlEl.remove();
+    window.ghost?.send?.("hitl_response", { widgetId, response });
+  }
+  function appendConvMessage(widgetId, role, text) {
+    const msgs = document.getElementById(`dw-conv-msgs-${widgetId}`);
+    if (!msgs)
+      return;
+    const d = document.createElement("div");
+    if (role === "hitl") {
+      d.className = "dw-conv-msg agent hitl";
+      d.innerHTML = `
+      <span class="dw-msg-ico">\u26A0\uFE0F</span>
+      <div class="dw-msg-body dw-hitl-body">
+        <div class="dw-hitl-msg">${esc(text)}</div>
+        <div class="dw-hitl-btns">
+          <button class="dw-hitl-btn confirm"
+            onclick="dashboardHitlRespond('${widgetId}','confirm')">\u2713 Confirm</button>
+          <button class="dw-hitl-btn skip"
+            onclick="dashboardHitlRespond('${widgetId}','skip')">\u2715 Skip</button>
+        </div>
+      </div>`;
+    } else {
+      d.className = `dw-conv-msg ${role}`;
+      const ico = role === "agent" ? '<span class="dw-msg-ico">\u{1F916}</span>' : "";
+      d.innerHTML = `${ico}<div class="dw-msg-body">${esc(text)}</div>`;
+    }
+    msgs.appendChild(d);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+  function appendTailLine(widgetId, line) {
+    const pre = document.getElementById(`dw-tail-${widgetId}`);
+    if (!pre)
+      return;
+    const cursor = pre.querySelector(".dw-tail-cursor");
+    if (cursor)
+      cursor.remove();
+    const d = document.createElement("div");
+    d.textContent = line;
+    pre.appendChild(d);
+    while (pre.childElementCount > 201)
+      pre.removeChild(pre.firstElementChild);
+    const newCursor = document.createElement("span");
+    newCursor.className = "dw-tail-cursor";
+    newCursor.textContent = "\u258C";
+    pre.appendChild(newCursor);
+    pre.scrollTop = pre.scrollHeight;
+  }
+  function refreshDashboardChart(table) {
+    Object.values(state.agentDashboards).forEach((db) => {
+      db.widgets.forEach((w) => {
+        if (w.type !== "chart")
+          return;
+        const cfg = w.config;
+        if (cfg.table !== table)
+          return;
+        if (db.agentId !== state.curDashboardAgentId)
+          return;
+        const bodyEl = document.getElementById(`dw-chart-body-${w.id}`);
+        if (!bodyEl)
+          return;
+        const view = cfg.view ?? "table";
+        bodyEl.innerHTML = view === "chart" ? _chartSvg() : _chartTablePreview(cfg);
+      });
+    });
+  }
+  function appendComputeChunk(widgetId, text, done) {
+    const body = document.getElementById(`dw-compute-body-${widgetId}`);
+    if (!body)
+      return;
+    body.querySelector(".dw-compute-cursor")?.remove();
+    body.insertAdjacentText("beforeend", text);
+    if (!done) {
+      const cursor = document.createElement("span");
+      cursor.className = "dw-compute-cursor";
+      cursor.textContent = "\u258C";
+      body.appendChild(cursor);
+    } else {
+      const db = state.agentDashboards[state.curDashboardAgentId];
+      const w = db?.widgets.find((x) => x.id === widgetId);
+      if (w) {
+        w.config.streaming = false;
+        if (w.config.reviewActions?.length) {
+          w.state = "review";
+          renderDashboard(state.curDashboardAgentId);
+        }
+      }
+    }
+    body.scrollTop = body.scrollHeight;
+  }
+  function dashboardFilePdfPreview(widgetId, fileId, path) {
+    const containerId = `dw-pdf-${widgetId}-${fileId}`;
+    const container = document.getElementById(containerId);
+    if (!container)
+      return;
+    if (container.innerHTML) {
+      container.innerHTML = "";
+      return;
+    }
+    container.innerHTML = '<div class="dw-pdf-loading">Loading preview\u2026</div>';
+    window.ghost?.send?.("file_thumbnail", { fileId, path }).then(() => {
+    }).catch(() => {
+      container.innerHTML = '<div class="dw-pdf-loading">Preview unavailable</div>';
+    });
+  }
+  function handleFileThumbnailResult(fileId, dataUrl) {
+    document.querySelectorAll(`[id^="dw-pdf-"]`).forEach((el) => {
+      const id = el.getAttribute("id") ?? "";
+      if (!id.endsWith(`-${fileId}`))
+        return;
+      el.innerHTML = `<img src="${dataUrl}" style="max-width:100%;border-radius:6px;margin-top:6px" alt="PDF preview">`;
+    });
+  }
+  function prependDashboardFile(widgetId, file) {
+    const w = Object.values(state.agentDashboards).flatMap((db) => db.widgets).find((x) => x.id === widgetId);
+    if (!w || w.type !== "files")
+      return;
+    const cfg = w.config;
+    const newFile = { ...file, isNew: true };
+    cfg.files = [newFile, ...cfg.files ?? []];
+    if (w.agentId === state.curDashboardAgentId) {
+      const bodyEl = document.getElementById(`dw-files-body-${widgetId}`);
+      if (!bodyEl)
+        return;
+      const isGallery = bodyEl.classList.contains("dw-files-gallery");
+      const html = isGallery ? _galleryItem(newFile, w, cfg) : _listItem(newFile, w, cfg);
+      bodyEl.insertAdjacentHTML("afterbegin", html);
+    }
+  }
+  function _allAgents() {
+    return [
+      ...AGENTS.browser.profiles.flatMap((p) => p.agents),
+      ...AGENTS.loop,
+      ...AGENTS.reactive
+    ];
+  }
+  function _findAgent(id) {
+    return _allAgents().find((a) => a.id === id) ?? null;
+  }
+  function _curWidget(widgetId) {
+    return state.agentDashboards[state.curDashboardAgentId]?.widgets.find((w) => w.id === widgetId);
+  }
+  function _statusLabel(status) {
+    const m = {
+      running: "\u25B6 Running",
+      done: "\u2713 Done",
+      idle: "\u23F8 Idle",
+      listening: "\u25CF Listening",
+      waiting: "\u26A0 Waiting"
+    };
+    return m[status] ?? status;
+  }
+
+  // src/data/demo-dashboards.ts
+  var DEMO_DASHBOARDS = [
+    // 1. BTC Monitor (Loop Agent — data monitoring)
+    {
+      agentId: "btc-monitor",
+      widgets: [
+        {
+          id: "btc-monitor-w1",
+          type: "conversation",
+          size: "2x1",
+          agentId: "btc-monitor",
+          state: "running",
+          title: "Conversation",
+          config: { mode: "tail" }
+        },
+        {
+          id: "btc-monitor-w2",
+          type: "chart",
+          size: "2x1",
+          agentId: "btc-monitor",
+          state: "running",
+          title: "BTC Prices",
+          config: { table: "btc_prices", xField: "ts", yField: "price", chartType: "line", view: "chart", range: "24h" }
+        }
+      ]
+    },
+    // 2. Nash-AI Reporter (Browser Agent — PDF list)
+    {
+      agentId: "nash-reporter",
+      widgets: [
+        {
+          id: "nash-reporter-w1",
+          type: "conversation",
+          size: "2x1",
+          agentId: "nash-reporter",
+          state: "running",
+          title: "Conversation",
+          config: { mode: "chat" }
+        },
+        {
+          id: "nash-reporter-w2",
+          type: "files",
+          size: "2x2",
+          agentId: "nash-reporter",
+          state: "done",
+          title: "Reports",
+          config: {
+            dir: "~/.gits/outputs/nash-reporter",
+            viewMode: "list",
+            actions: [
+              { label: "Preview", event: "file_preview" },
+              { label: "Send", event: "file_send" }
+            ],
+            files: [
+              { id: "r1", name: "gs_q2_2024.pdf", path: "/tmp/gs_q2_2024.pdf", mimeType: "application/pdf", size: 2457600, createdAt: "2026-03-15 14:43", isNew: true },
+              { id: "r2", name: "morgan_q1_2024.pdf", path: "/tmp/morgan_q1_2024.pdf", mimeType: "application/pdf", size: 1843200, createdAt: "2026-03-14 09:21" },
+              { id: "r3", name: "ubs_tech_report.pdf", path: "/tmp/ubs_tech_report.pdf", mimeType: "application/pdf", size: 3145728, createdAt: "2026-03-13 16:08" }
+            ]
+          }
+        }
+      ]
+    },
+    // 3. Discord Digest (Loop Agent — Claude compute with review)
+    {
+      agentId: "discord-digest",
+      widgets: [
+        {
+          id: "discord-digest-w1",
+          type: "conversation",
+          size: "2x1",
+          agentId: "discord-digest",
+          state: "idle",
+          title: "Conversation",
+          config: { mode: "tail" }
+        },
+        {
+          id: "discord-digest-w2",
+          type: "compute",
+          size: "2x2",
+          agentId: "discord-digest",
+          state: "review",
+          title: "Today's Digest",
+          config: {
+            content: `## Discord #dev Digest \xB7 Mar 15
+
+**3 action items found**
+
+### \u{1F525} Hot topics
+- **Deploy pipeline** broken since 14:30 \u2014 @alice patching now
+- New **Tauri 2.1** released \u2014 upgrade discussion started by @bob
+- \`ghost-ui\` v43 merged with agent dashboard feature
+
+### \u{1F4E6} PRs merged
+- Fix: session picker crash on empty workspace
+- Feat: add agent badge counter to sidebar
+
+### \u{1F4AC} Notable discussions
+- Performance of IPC bridge when streaming large outputs
+- Request: keyboard shortcuts for mode switching`,
+            streaming: false,
+            reviewActions: [
+              { label: "\u2713 Approve & Post", event: "digest_approve" },
+              { label: "\u2715 Discard", event: "digest_discard" }
+            ]
+          }
+        }
+      ]
+    },
+    // 4. HN Digest (Loop Agent — image files via browser)
+    {
+      agentId: "hn-digest",
+      widgets: [
+        {
+          id: "hn-digest-w1",
+          type: "conversation",
+          size: "2x1",
+          agentId: "hn-digest",
+          state: "idle",
+          title: "Conversation",
+          config: { mode: "chat" }
+        },
+        {
+          id: "hn-digest-w2",
+          type: "chart",
+          size: "2x1",
+          agentId: "hn-digest",
+          state: "done",
+          title: "HN Links",
+          config: { table: "hn_links", view: "table", range: "24h" }
+        }
+      ]
+    },
+    // 5. FanVue Cloner (Browser Agent — gallery + pipeline)
+    {
+      agentId: "fanvue-cloner",
+      widgets: [
+        {
+          id: "fanvue-cloner-w1",
+          type: "conversation",
+          size: "2x1",
+          agentId: "fanvue-cloner",
+          state: "running",
+          title: "Conversation",
+          config: { mode: "tail" }
+        },
+        {
+          id: "fanvue-cloner-w2",
+          type: "files",
+          size: "2x2",
+          agentId: "fanvue-cloner",
+          state: "running",
+          title: "Captured Images",
+          config: {
+            dir: "~/.gits/outputs/fanvue-cloner",
+            viewMode: "gallery",
+            selectable: true,
+            selected: [],
+            actions: [
+              { label: "Use", event: "image_select" },
+              { label: "Skip", event: "image_skip" }
+            ],
+            batchActions: [
+              { label: "Process Selected \u2192", event: "batch_process" }
+            ],
+            files: [
+              { id: "img1", name: "profile_001.jpg", path: "/tmp/p1.jpg", mimeType: "image/jpeg", size: 204800, createdAt: "2026-03-15 23:01", isNew: true },
+              { id: "img2", name: "profile_002.jpg", path: "/tmp/p2.jpg", mimeType: "image/jpeg", size: 184320, createdAt: "2026-03-15 23:01", isNew: true },
+              { id: "img3", name: "profile_003.jpg", path: "/tmp/p3.jpg", mimeType: "image/jpeg", size: 225280, createdAt: "2026-03-15 23:00" },
+              { id: "img4", name: "profile_004.jpg", path: "/tmp/p4.jpg", mimeType: "image/jpeg", size: 196608, createdAt: "2026-03-15 23:00" }
+            ]
+          }
+        },
+        {
+          id: "fanvue-cloner-w3",
+          type: "compute",
+          size: "2x1",
+          agentId: "fanvue-cloner",
+          state: "idle",
+          title: "Analysis",
+          config: {
+            content: "## Waiting for image selection\u2026\n\nSelect images above, then run analysis.",
+            streaming: false
+          }
+        }
+      ],
+      pipeline: [
+        { id: "stage-crawl", label: "Crawl", widgetId: "fanvue-cloner-w1", state: "running" },
+        { id: "stage-select", label: "Select", widgetId: "fanvue-cloner-w2", state: "idle" },
+        { id: "stage-analyze", label: "Analyze", widgetId: "fanvue-cloner-w3", state: "idle" }
+      ]
+    }
+  ];
+
+  // src/views/library.ts
+  function initLibrary() {
+    switchLibraryTab(state.curLibraryTab);
+  }
+  function switchLibraryTab(tab) {
+    state.curLibraryTab = tab;
+    document.querySelectorAll(".lib-tab").forEach((el) => {
+      el.classList.toggle("on", el.getAttribute("data-tab") === tab);
+    });
+    const skillsPane = document.getElementById("lib-skills-pane");
+    const dataPane = document.getElementById("lib-data-pane");
+    if (skillsPane) {
+      skillsPane.style.display = tab === "skills" ? "flex" : "none";
+      skillsPane.style.flex = "1";
+    }
+    if (dataPane) {
+      dataPane.style.display = tab === "data" ? "flex" : "none";
+      dataPane.style.flex = "1";
+    }
+  }
+  function linkToLibrary(tab, tableId) {
+    setMode("library");
+    switchLibraryTab(tab);
+    if (tab === "data" && tableId) {
+      window.selDataTable?.(null, tableId);
+    }
   }
 
   // src/ui/toast.ts
@@ -1208,111 +2242,6 @@
     runnerTogglePause(skillName, null);
     renderRunnerGrid();
   }
-
-  // src/data/db.ts
-  var DB_COLLECTIONS = {
-    fromAgents: [
-      { id: "btc_prices", name: "btc_prices", rows: 128, updated: "2m ago", icon: "\u{1F4CA}", table: "btc_prices", sourceAgent: "btc-monitor" },
-      { id: "hn_links", name: "hn_links", rows: 340, updated: "2h ago", icon: "\u{1F517}", table: "hn_links", sourceAgent: "hn-digest-loop" },
-      { id: "nash_reports", name: "nash_reports", rows: 47, updated: "10m ago", icon: "\u{1F4C4}", table: "nash_reports", sourceAgent: "nash-reporter" }
-    ],
-    fromSkills: [
-      { id: "market_scans", name: "market_scans", rows: 86, updated: "14m ago", icon: "\u{1F4C8}", table: "market_scans", sourceSkill: "market" },
-      { id: "screenshots", name: "screenshots", rows: 12, updated: "1h ago", icon: "\u{1F5BC}", table: "screenshots", sourceSkill: "screenshot" }
-    ],
-    manual: [
-      { id: "notes", name: "notes", rows: 8, updated: "3d ago", icon: "\u{1F4DD}", table: "notes" }
-    ]
-  };
-  var TABLE_SOURCE_MAP = {};
-  DB_COLLECTIONS.fromAgents.forEach((c) => {
-    TABLE_SOURCE_MAP[c.table] = { type: "agent", id: c.sourceAgent };
-  });
-  DB_COLLECTIONS.fromSkills.forEach((c) => {
-    TABLE_SOURCE_MAP[c.table] = { type: "skill", id: c.sourceSkill };
-  });
-  var DB = {
-    tasks: {
-      cols: ["id", "goal", "status", "profile", "created_at", "summary"],
-      rows: [
-        { id: "tsk_01hw8m", goal: "Find the current BTC price on CoinGecko and save it", status: "done", profile: "Personal", created_at: "2026-03-14 14:41:02", summary: "BTC price $67,432.18 extracted and saved" },
-        { id: "tsk_01hw9k", goal: "Download Goldman Sachs Q2 report from Nash-AI", status: "running", profile: "nash-ai", created_at: "2026-03-14 14:43:00", summary: null },
-        { id: "tsk_01hwaq", goal: 'Log in to Notion and export "Week 12" page as PDF', status: "needs_review", profile: "Work", created_at: "2026-03-14 14:45:00", summary: null },
-        { id: "tsk_01hwbr", goal: 'Search HackerNews for "AI agents" and save top 10 links', status: "queued", profile: "Personal", created_at: "2026-03-14 14:47:00", summary: null }
-      ]
-    },
-    btc_prices: {
-      cols: ["id", "price", "ts"],
-      rows: Array.from({ length: 10 }, (_, i) => ({ id: "btc_" + i, price: "$" + (67e3 + i * 10) + ".00", ts: `2026-03-15 ${String(14 - i).padStart(2, "0")}:00:00` }))
-    },
-    hn_links: {
-      cols: ["id", "title", "url", "score"],
-      rows: [
-        { id: 1, title: "Show HN: Ghost agent fleet", url: "https://news.ycombinator.com/item?id=1", score: 342 },
-        { id: 2, title: "LLM agents in production", url: "https://news.ycombinator.com/item?id=2", score: 287 },
-        { id: 3, title: "Browser automation with real Chrome", url: "https://news.ycombinator.com/item?id=3", score: 201 }
-      ]
-    },
-    nash_reports: {
-      cols: ["id", "filename", "size_kb", "downloaded_at"],
-      rows: [
-        { id: "rpt_1", filename: "gs_q2_2024.pdf", size_kb: 2345, downloaded_at: "2026-03-15 14:43:10" }
-      ]
-    },
-    market_scans: {
-      cols: ["id", "symbol", "price", "ts"],
-      rows: [
-        { id: 1, symbol: "BTC", price: "$67,432.18", ts: "2026-03-15 14:41:00" },
-        { id: 2, symbol: "ETH", price: "$3,210.55", ts: "2026-03-15 14:41:00" }
-      ]
-    },
-    screenshots: { cols: ["id", "url", "ts"], rows: [] },
-    notes: { cols: ["id", "text", "created_at"], rows: [{ id: 1, text: "Check Nash-AI reports weekly", created_at: "2026-03-12" }] }
-  };
-  var DATA_FILES = [
-    {
-      type: "folder",
-      id: "f-agents",
-      name: "agents",
-      open: true,
-      children: [
-        {
-          type: "sqlite",
-          id: "db-btc",
-          name: "btc_monitor.db",
-          open: false,
-          tables: [{ id: "btc_prices", name: "btc_prices", rows: 128 }]
-        },
-        {
-          type: "sqlite",
-          id: "db-hn",
-          name: "hn_digest.db",
-          open: true,
-          tables: [
-            { id: "hn_links", name: "hn_links", rows: 340 },
-            { id: "nash_reports", name: "nash_reports", rows: 47 }
-          ]
-        }
-      ]
-    },
-    {
-      type: "folder",
-      id: "f-skills",
-      name: "skills",
-      open: false,
-      children: [
-        {
-          type: "sqlite",
-          id: "db-market",
-          name: "market.db",
-          open: false,
-          tables: [{ id: "market_scans", name: "market_scans", rows: 86 }]
-        },
-        { type: "folder", id: "f-screenshots", name: "screenshots", open: false, children: [] }
-      ]
-    },
-    { type: "csv", id: "csv-notes", name: "notes.csv", tableId: "notes", rows: 8 }
-  ];
 
   // src/views/data-tree.ts
   function _findDataNode(nodes, id) {
@@ -1523,7 +2452,7 @@
       } else if (sourceMeta.type === "skill") {
         const sk = SKILLS[sourceMeta.id];
         const label = sk ? esc(sk.name) : esc(sourceMeta.id);
-        sourceBadgeHtml = `<span class="db-source-badge">Source: Skill \u2014 <a onclick="setMode('skill')">${label}</a></span>`;
+        sourceBadgeHtml = `<span class="db-source-badge">Source: Skill \u2014 <a onclick="linkToLibrary('skills')">${label}</a></span>`;
       }
     }
     if (tname)
@@ -1781,7 +2710,7 @@
             actRow.className = "sk-stream-actions";
             actRow.innerHTML = `<span class="sk-done-label">\u2713 Done \xB7 ${elapsed}</span>
             <button class="sk-copy-btn" onclick="navigator.clipboard.writeText(${JSON.stringify(output)}).then(()=>showToast('Output copied!'))">Copy output</button>
-            <button class="sk-data-link" onclick="setMode('data')">View in Data \u2192</button>`;
+            <button class="sk-data-link" onclick="linkToLibrary('data')">View in Data \u2192</button>`;
             streamPanel.after(actRow);
           }
         }
@@ -1897,7 +2826,7 @@
     closeNewSkillModal();
     showToast(`\u2713 Skill "${name}" saved`);
     setTimeout(() => {
-      setMode("skill");
+      linkToLibrary("skills");
       selSkill(null, newId);
     }, 400);
   }
@@ -2170,24 +3099,50 @@
       renderSkillPanel(skills);
     });
     window.ghost.on("agent_log", (data) => {
-      const skillName = data.skill_name;
-      if (!skillName)
-        return;
-      const logPanelId = "runner-log-panel-" + skillName.replace(/[^a-z0-9]/gi, "_");
-      const lp = document.getElementById(logPanelId);
-      if (!lp)
-        return;
       const line = data.line || data.text || "";
-      if (!line)
+      const skillName = data.skill_name;
+      if (skillName) {
+        const logPanelId = "runner-log-panel-" + skillName.replace(/[^a-z0-9]/gi, "_");
+        const lp = document.getElementById(logPanelId);
+        if (lp && line) {
+          if (lp.querySelector("div[style]"))
+            lp.innerHTML = "";
+          const d = document.createElement("div");
+          d.className = "ag-log-row";
+          d.style.cssText = "font-size:11.5px;font-family:monospace;color:rgba(0,0,0,.7);padding:2px 0;border-bottom:1px solid rgba(0,0,0,.04)";
+          d.textContent = line;
+          lp.appendChild(d);
+          lp.scrollTop = lp.scrollHeight;
+        }
+      }
+      if (line && data.widget_id) {
+        appendTailLine(data.widget_id, line);
+      }
+    });
+    window.ghost.on("conversation_message", (data) => {
+      if (!data.widget_id || !data.text)
         return;
-      if (lp.querySelector("div[style]"))
-        lp.innerHTML = "";
-      const d = document.createElement("div");
-      d.className = "ag-log-row";
-      d.style.cssText = "font-size:11.5px;font-family:monospace;color:rgba(0,0,0,.7);padding:2px 0;border-bottom:1px solid rgba(0,0,0,.04)";
-      d.textContent = line;
-      lp.appendChild(d);
-      lp.scrollTop = lp.scrollHeight;
+      const role = data.role === "hitl" ? "hitl" : data.role === "user" ? "user" : "agent";
+      appendConvMessage(data.widget_id, role, data.text);
+    });
+    window.ghost.on("db_write", (data) => {
+      if (data.table)
+        refreshDashboardChart(data.table);
+    });
+    window.ghost.on("compute_chunk", (data) => {
+      if (!data.widget_id)
+        return;
+      appendComputeChunk(data.widget_id, data.text ?? "", data.done === true);
+    });
+    window.ghost.on("file_created", (data) => {
+      if (!data.widget_id || !data.file)
+        return;
+      prependDashboardFile(data.widget_id, data.file);
+    });
+    window.ghost.on("file_thumbnail_result", (data) => {
+      if (data.file_id && data.data_url) {
+        handleFileThumbnailResult(data.file_id, data.data_url);
+      }
     });
     function _requestSessions() {
       _dbg("ghostSetup: sending sessions command");
@@ -2224,8 +3179,13 @@
     document.getElementById("agents-popover").classList.remove("on");
   }
   (function init() {
+    DEMO_DASHBOARDS.forEach((db) => {
+      state.agentDashboards[db.agentId] = db;
+    });
     renderGrid();
-    renderFleet();
+    renderAgentList();
+    renderOverview();
+    initLibrary();
     const pop = document.getElementById("agents-popover-list");
     if (pop) {
       let html = "";
@@ -2317,4 +3277,28 @@
   window.addm = addm;
   window.selSkillByName = selSkillByName;
   window.renderSkillDetailReal = renderSkillDetailReal;
+  window.selectDashboardAgent = selectDashboardAgent;
+  window.renderDashboard = renderDashboard;
+  window.renderOverview = renderOverview;
+  window.dashboardWidgetToggleTail = dashboardWidgetToggleTail;
+  window.dashboardConvSend = dashboardConvSend;
+  window.dashboardConvSendBtn = dashboardConvSendBtn;
+  window.dashboardHitlRespond = dashboardHitlRespond;
+  window.dashboardChartView = dashboardChartView;
+  window.dashboardChartRange = dashboardChartRange;
+  window.dashboardChartConfig = dashboardChartConfig;
+  window.dashboardChartSetField = dashboardChartSetField;
+  window.dashboardChartSetType = dashboardChartSetType;
+  window.dashboardComputeAction = dashboardComputeAction;
+  window.dashboardFilesView = dashboardFilesView;
+  window.dashboardFileSelect = dashboardFileSelect;
+  window.dashboardFilesItemAction = dashboardFilesItemAction;
+  window.dashboardFilesAction = dashboardFilesAction;
+  window.dashboardFilePdfPreview = dashboardFilePdfPreview;
+  window.dashboardPipeNav = dashboardPipeNav;
+  window.dashboardPause = dashboardPause;
+  window.dashboardStop = dashboardStop;
+  window.openNewAgentModal = openNewAgentModal;
+  window.switchLibraryTab = switchLibraryTab;
+  window.linkToLibrary = linkToLibrary;
 })();

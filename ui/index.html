@@ -52,15 +52,12 @@
           <span class="mode-ico">💻</span> Code
         </div>
         <div class="mode" data-mode="agents" onclick="setMode('agents')">
-          <span class="mode-ico">🌐</span> Agent
+          <span class="mode-ico">🌐</span> Agents
           <span class="mode-badge" id="agents-badge">[3]</span>
           <span class="mode-badge warn">⚠</span>
         </div>
-        <div class="mode" data-mode="skill" onclick="setMode('skill')">
-          <span class="mode-ico">⚡</span> Skill
-        </div>
-        <div class="mode" data-mode="data" onclick="setMode('data')">
-          <span class="mode-ico">🗄</span> Data
+        <div class="mode" data-mode="library" onclick="setMode('library')">
+          <span class="mode-ico">📦</span> Library
         </div>
       </div>
 
@@ -104,168 +101,160 @@
 
 
       <!-- ══════════════════════════════════════
-           AGENTS VIEW — Fleet Control Center
+           AGENTS VIEW — Dashboard
       ══════════════════════════════════════ -->
       <div id="view-agents" class="view">
 
-        <!-- Agents empty state -->
-        <div id="agents-empty" class="empty agents-empty-state" style="display:none">
-          <div class="empty-ico">⚡</div>
-          <div class="empty-txt">No agents running yet.</div>
-          <div class="empty-sub">Ask the Build agent to create one.</div>
-          <button class="sk-run-btn" style="margin-top:10px" onclick="setMode('build')">Go to Build →</button>
+        <!-- Left: agent list -->
+        <div class="dash-agent-list" id="dash-agent-list">
+          <!-- overview entry -->
+          <div class="dash-al-overview on" id="dash-overview-btn" onclick="selectDashboardAgent('__overview__')">
+            <span class="dal-ico">🗂</span>
+            <div>
+              <div class="dal-name">Overview</div>
+              <div class="dal-sub" id="dash-overview-sub">— agents</div>
+            </div>
+          </div>
+          <!-- agent rows filled by JS -->
+          <div id="dash-agent-rows"></div>
+          <div class="dash-al-new" onclick="openNewAgentModal()">＋ New Agent</div>
         </div>
 
-        <div class="fleet-scroll" id="fleet-scroll">
+        <!-- Right: dashboard panel -->
+        <div class="dash-panel" id="dash-panel">
 
-          <!-- Browser Profiles -->
-          <div class="fleet-section">
-            <div class="fleet-section-hd">
-              <div class="fleet-section-lbl">🌐 Browser</div>
-              <div class="fleet-section-sub">Real Chrome · your sessions · no re-logging in</div>
+          <!-- dashboard header -->
+          <div class="dash-hdr" id="dash-hdr" style="display:none">
+            <div class="dash-hdr-dot" id="dash-hdr-dot"></div>
+            <div>
+              <div class="dash-hdr-name" id="dash-hdr-name"></div>
+              <div class="dash-hdr-sub" id="dash-hdr-sub"></div>
             </div>
-            <div class="profile-row" id="profile-row"><!-- filled by JS --></div>
-            <div class="profile-agents-row" id="profile-agents-row"><!-- filled by JS --></div>
+            <div class="dash-hdr-spacer"></div>
+            <div class="dash-hdr-status" id="dash-hdr-status"></div>
+            <button class="dash-hdr-btn" id="dash-hdr-pause" onclick="dashboardPause()" style="display:none">⏸ Pause</button>
+            <button class="dash-hdr-btn" id="dash-hdr-stop" onclick="dashboardStop()" style="display:none">🛑 Stop</button>
           </div>
 
-          <!-- Trigger Agents -->
-          <div class="fleet-section">
-            <div class="fleet-section-hd">
-              <div class="fleet-section-lbl">⚡ Trigger</div>
-              <div class="fleet-section-sub">Scheduled or event-driven · loop &amp; reactive</div>
-            </div>
-            <div class="fleet-grid" id="trigger-grid"><!-- filled by JS --></div>
+          <!-- pipeline progress bar -->
+          <div class="dash-pipe" id="dash-pipe" style="display:none">
+            <!-- filled by JS -->
           </div>
 
-          <!-- Runner Agents (from SkillRunner backend) -->
-          <div class="fleet-section">
-            <div class="fleet-section-hd">
-              <div class="fleet-section-lbl">🛠 Runner</div>
-              <div class="fleet-section-sub">Skill-backed · scheduled or reactive · managed by SkillRunner</div>
-            </div>
-            <div class="fleet-grid" id="runner-grid"><!-- filled by JS --></div>
+          <!-- widget grid -->
+          <div class="dash-grid" id="dash-grid">
+            <!-- filled by JS -->
           </div>
 
-        </div>
-
-        <!-- Agent detail drawer (slides up from bottom) -->
-        <div class="fleet-drawer" id="fleet-drawer">
-          <div class="fleet-drawer-head">
-            <div class="fleet-drawer-title" id="fleet-drawer-title">Agent Detail</div>
-            <button class="fleet-drawer-close" onclick="closeFleetDrawer()">✕</button>
-          </div>
-          <div class="fleet-drawer-body" id="fleet-drawer-body"><!-- filled by JS --></div>
-        </div>
+        </div><!-- /.dash-panel -->
 
       </div><!-- /#view-agents -->
 
 
       <!-- ══════════════════════════════════════
-           SKILLS VIEW
+           LIBRARY VIEW (Skills + Data tabs)
       ══════════════════════════════════════ -->
-      <div id="view-skill" class="view">
+      <div id="view-library" class="view">
 
-        <!-- Skill list -->
-        <div class="sk-list">
-          <div class="sk-list-head">
-            <div class="sk-list-title">Skills</div>
-            <button class="sk-new-btn" onclick="openNewSkillModal()">＋ New Skill</button>
-          </div>
-          <div class="sk-scroll" id="sk-scroll">
-            <div class="ski on" onclick="selSkill(this,'market')">
-              <div class="ski-name">Market Scanner</div>
-              <div class="ski-desc">Fetch latest prices for a symbol list</div>
-              <span class="ski-tag">finance</span>
-            </div>
-            <div class="ski" onclick="selSkill(this,'screenshot')">
-              <div class="ski-name">Screenshot Monitor</div>
-              <div class="ski-desc">Capture and diff a page at intervals</div>
-              <span class="ski-tag">browser</span>
-            </div>
-            <div class="ski" onclick="selSkill(this,'csvproc')">
-              <div class="ski-name">CSV Processor</div>
-              <div class="ski-desc">Transform and clean a CSV dataset</div>
-              <span class="ski-tag">data</span>
-            </div>
-            <div class="ski" onclick="selSkill(this,'report')">
-              <div class="ski-name">Report Generator</div>
-              <div class="ski-desc">Pull data from DB and render PDF</div>
-              <span class="ski-tag">data</span><span class="ski-tag">pdf</span>
-            </div>
-            <div class="ski" onclick="selSkill(this,'discord')">
-              <div class="ski-name">Discord Notifier</div>
-              <div class="ski-desc">Post a formatted message to a channel</div>
-              <span class="ski-tag">notify</span>
-            </div>
-            <div class="ski" onclick="selSkill(this,'github_pr')">
-              <div class="ski-name">GitHub PR Reviewer</div>
-              <div class="ski-desc">Review diffs with Claude and post a summary comment</div>
-              <span class="ski-tag">reactive</span>
-            </div>
-            <div class="ski" onclick="selSkill(this,'digest')">
-              <div class="ski-name">Discord Digest</div>
-              <div class="ski-desc">Summarize channel activity with Claude every 6h</div>
-              <span class="ski-tag">loop</span>
-            </div>
-          </div>
+        <!-- tab bar -->
+        <div class="lib-tabbar">
+          <div class="lib-tab on" data-tab="skills" onclick="switchLibraryTab('skills')">⚡ Skills</div>
+          <div class="lib-tab" data-tab="data" onclick="switchLibraryTab('data')">🗄 Data</div>
         </div>
 
-        <!-- Skill detail -->
-        <div class="sk-detail" id="sk-detail">
-          <!-- filled by JS -->
-        </div>
+        <!-- existing skill view content (reused) -->
+        <div id="lib-skills-pane" style="flex:1;display:flex;overflow:hidden">
 
-        <!-- Runner Skills panel (from backend skills_list) -->
-        <div class="runner-skills-panel" id="runner-skills-panel">
-          <div class="runner-skills-panel-head">
-            <div class="runner-skills-panel-title">🛠 Runner Skills</div>
-            <div class="runner-skills-panel-sub">Loaded from ~/.gits/skills/ · scheduled &amp; reactive</div>
-          </div>
-          <div class="runner-skills-list" id="runner-skills-list">
-            <div style="font-size:12px;color:rgba(0,0,0,.35);padding:8px 0;font-style:italic">Connect to backend to load skills.</div>
-          </div>
-        </div>
-
-      </div><!-- /#view-skill -->
-
-
-      <!-- ══════════════════════════════════════
-           DATA VIEW
-      ══════════════════════════════════════ -->
-      <div id="view-data" class="view">
-
-        <!-- File tree left panel -->
-        <div class="data-tree-panel">
-          <div class="data-tree-head">
-            <div class="data-tree-path">📁 ~/myproject/data</div>
-          </div>
-          <div class="data-tree-inner" id="data-tree-inner"><!-- filled by JS --></div>
-        </div>
-
-        <!-- Table main area -->
-        <div class="db-main">
-          <div class="db-topbar">
-            <div class="db-tname" id="db-tname">btc_prices</div>
-            <div class="db-toolbar">
-              <div class="db-view-tabs">
-                <div class="db-view-tab on" data-view="table" onclick="switchDbView('table')">Table</div>
-                <div class="db-view-tab" data-view="cards" onclick="switchDbView('cards')">Cards</div>
+          <!-- Skill list -->
+          <div class="sk-list">
+            <div class="sk-list-head">
+              <div class="sk-list-title">Skills</div>
+              <button class="sk-new-btn" onclick="openNewSkillModal()">＋ New Skill</button>
+            </div>
+            <div class="sk-scroll" id="sk-scroll">
+              <div class="ski on" onclick="selSkill(this,'market')">
+                <div class="ski-name">Market Scanner</div>
+                <div class="ski-desc">Fetch latest prices for a symbol list</div>
+                <span class="ski-tag">finance</span>
               </div>
-              <input class="db-search" id="db-search" placeholder="Filter rows…" oninput="filterTable()">
-              <span class="db-count" id="db-count">— rows</span>
-              <div class="ibtn" title="Export CSV" onclick="exportCSV()">&#8595;</div>
-              <div class="ibtn" title="Refresh" onclick="refreshTable()">&#8635;</div>
+              <div class="ski" onclick="selSkill(this,'screenshot')">
+                <div class="ski-name">Screenshot Monitor</div>
+                <div class="ski-desc">Capture and diff a page at intervals</div>
+                <span class="ski-tag">browser</span>
+              </div>
+              <div class="ski" onclick="selSkill(this,'csvproc')">
+                <div class="ski-name">CSV Processor</div>
+                <div class="ski-desc">Transform and clean a CSV dataset</div>
+                <span class="ski-tag">data</span>
+              </div>
+              <div class="ski" onclick="selSkill(this,'report')">
+                <div class="ski-name">Report Generator</div>
+                <div class="ski-desc">Pull data from DB and render PDF</div>
+                <span class="ski-tag">data</span><span class="ski-tag">pdf</span>
+              </div>
+              <div class="ski" onclick="selSkill(this,'discord')">
+                <div class="ski-name">Discord Notifier</div>
+                <div class="ski-desc">Post a formatted message to a channel</div>
+                <span class="ski-tag">notify</span>
+              </div>
+              <div class="ski" onclick="selSkill(this,'github_pr')">
+                <div class="ski-name">GitHub PR Reviewer</div>
+                <div class="ski-desc">Review diffs with Claude and post a summary comment</div>
+                <span class="ski-tag">reactive</span>
+              </div>
+              <div class="ski" onclick="selSkill(this,'digest')">
+                <div class="ski-name">Discord Digest</div>
+                <div class="ski-desc">Summarize channel activity with Claude every 6h</div>
+                <span class="ski-tag">loop</span>
+              </div>
             </div>
           </div>
-          <div class="db-scroll">
-            <table class="dbt" id="db-table">
-              <thead id="db-thead"></thead>
-              <tbody id="db-tbody"></tbody>
-            </table>
+          <div class="sk-detail" id="sk-detail"><!-- filled by JS --></div>
+          <div class="runner-skills-panel" id="runner-skills-panel">
+            <div class="runner-skills-panel-head">
+              <div class="runner-skills-panel-title">🛠 Runner Skills</div>
+              <div class="runner-skills-panel-sub">Loaded from ~/.gits/skills/ · scheduled &amp; reactive</div>
+            </div>
+            <div class="runner-skills-list" id="runner-skills-list">
+              <div style="font-size:12px;color:rgba(0,0,0,.35);padding:8px 0;font-style:italic">Connect to backend to load skills.</div>
+            </div>
           </div>
-        </div>
 
-      </div><!-- /#view-data -->
+        </div><!-- /#lib-skills-pane -->
+
+        <!-- existing data view content (reused) -->
+        <div id="lib-data-pane" style="flex:1;display:none;overflow:hidden">
+          <div class="data-tree-panel">
+            <div class="data-tree-head">
+              <div class="data-tree-path">📁 ~/myproject/data</div>
+            </div>
+            <div class="data-tree-inner" id="data-tree-inner"><!-- filled by JS --></div>
+          </div>
+          <div class="db-main">
+            <div class="db-topbar">
+              <div class="db-tname" id="db-tname">btc_prices</div>
+              <div class="db-toolbar">
+                <div class="db-view-tabs">
+                  <div class="db-view-tab on" data-view="table" onclick="switchDbView('table')">Table</div>
+                  <div class="db-view-tab" data-view="cards" onclick="switchDbView('cards')">Cards</div>
+                </div>
+                <input class="db-search" id="db-search" placeholder="Filter rows…" oninput="filterTable()">
+                <span class="db-count" id="db-count">— rows</span>
+                <div class="ibtn" title="Export CSV" onclick="exportCSV()">&#8595;</div>
+                <div class="ibtn" title="Refresh" onclick="refreshTable()">&#8635;</div>
+              </div>
+            </div>
+            <div class="db-scroll">
+              <table class="dbt" id="db-table">
+                <thead id="db-thead"></thead>
+                <tbody id="db-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div><!-- /#lib-data-pane -->
+
+      </div><!-- /#view-library -->
+
 
       <!-- Row detail drawer -->
       <div id="db-drawer">

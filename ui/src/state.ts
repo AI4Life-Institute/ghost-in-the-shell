@@ -1,4 +1,4 @@
-import type { Pane, Session, RunnerRun, SkillDef } from './types';
+import type { Pane, Session, RunnerRun, SkillDef, AgentDashboard } from './types';
 
 export const state = {
   activeSessId: null as string | null,
@@ -25,4 +25,7 @@ export const state = {
   skillRunExpanded: {} as Record<string, boolean>,
   runnerAgents: {} as Record<string, RunnerRun>,
   skillDefs: {} as Record<string, SkillDef>,
+  curDashboardAgentId: '' as string,
+  agentDashboards: {} as Record<string, AgentDashboard>,
+  curLibraryTab: 'skills' as 'skills' | 'data',
 };

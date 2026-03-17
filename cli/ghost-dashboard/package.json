@@ -1,0 +1,21 @@
+{
+  "name": "ghost-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ghost-dashboard": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "npx esbuild src/index.ts --bundle --outfile=dist/index.js --platform=node --target=node20 --format=esm --banner:js='#!/usr/bin/env node'",
+    "dev": "npx tsx src/index.ts",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0",
+    "vitest": "^1.6.0",
+    "@types/node": "^20.0.0"
+  }
+}

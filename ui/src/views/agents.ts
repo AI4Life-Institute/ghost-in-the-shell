@@ -2,7 +2,7 @@ import { state } from '../state';
 import { esc } from '../utils';
 import { AGENTS } from '../data/agents';
 import { showToast } from '../ui/toast';
-import { setMode } from './mode';
+import { linkToLibrary } from './library';
 import type { Agent } from '../types';
 
 export function _flatAgent(id: string): Agent | null {
@@ -146,7 +146,7 @@ export function _renderFleetDrawer(agentId: string): void {
         <button class="ag-btn">⏸ Pause</button>
         <button class="ag-btn">▶ Run Now</button>
         <button class="ag-btn" style="color:#dc2626;border-color:rgba(220,38,38,.25)" onclick="showToast('Agent deleted (simulated)')">🗑 Delete</button>
-        <button class="ag-btn link" onclick="setMode('data')">View in Data →</button>
+        <button class="ag-btn link" onclick="linkToLibrary('data')">View in Data →</button>
       </div>
     </div>`;
   const colRight = `

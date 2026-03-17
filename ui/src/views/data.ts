@@ -4,7 +4,7 @@ import { DB, TABLE_SOURCE_MAP } from '../data/db';
 import { SKILLS } from '../data/skills';
 import { _flatAgent } from './agents';
 import { showToast } from '../ui/toast';
-import { setMode } from './mode';
+import { linkToLibrary } from './library';
 import { renderDataTree } from './data-tree';
 
 export function selTable(el: HTMLElement | null, id: string): void {
@@ -44,7 +44,7 @@ export function renderTable(): void {
     } else if (sourceMeta.type === 'skill') {
       const sk = SKILLS[sourceMeta.id];
       const label = sk ? esc(sk.name) : esc(sourceMeta.id);
-      sourceBadgeHtml = `<span class="db-source-badge">Source: Skill — <a onclick="setMode('skill')">${label}</a></span>`;
+      sourceBadgeHtml = `<span class="db-source-badge">Source: Skill — <a onclick="linkToLibrary('skills')">${label}</a></span>`;
     }
   }
   if (tname) tname.innerHTML = state.curTableId + sourceBadgeHtml;

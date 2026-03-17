@@ -19,6 +19,19 @@ import {
   openFleetDrawer, closeFleetDrawer, _flatAgent, _fleetCardHTML,
   renderTriggerGrid,
 } from './views/agents';
+import {
+  renderAgentList, selectDashboardAgent, renderDashboard, renderOverview,
+  dashboardWidgetToggleTail, dashboardConvSend, dashboardConvSendBtn,
+  dashboardHitlRespond,
+  dashboardChartView, dashboardChartRange, dashboardChartConfig,
+  dashboardChartSetField, dashboardChartSetType,
+  dashboardComputeAction,
+  dashboardFilesView, dashboardFileSelect, dashboardFilesItemAction, dashboardFilesAction,
+  dashboardFilePdfPreview,
+  dashboardPipeNav, dashboardPause, dashboardStop, openNewAgentModal,
+} from './views/dashboard';
+import { DEMO_DASHBOARDS } from './data/demo-dashboards';
+import { initLibrary, switchLibraryTab, linkToLibrary } from './views/library';
 import { renderRunnerGrid, renderRunnerCard, openRunnerDrawer, runnerRunNow, runnerTogglePause, runnerTogglePauseById } from './views/runner';
 import { renderDataTree, toggleDataNode, _findDataNode, _renderTreeNodes } from './views/data-tree';
 import { selDataTable, selTable, renderTable, sortBy, filterTable, openDrawer, closeDrawer, exportCSV, refreshTable, switchDbView } from './views/data';
@@ -45,8 +58,13 @@ function closeAgentsPopover(): void {
 // ── Init ───────────────────────────────────────────────────────────────────
 
 (function init() {
+  // Seed demo dashboards into state (12.4 mock data)
+  DEMO_DASHBOARDS.forEach(db => { state.agentDashboards[db.agentId] = db; });
+
   renderGrid();
-  renderFleet();
+  renderAgentList();
+  renderOverview();
+  initLibrary();
 
   const pop = document.getElementById('agents-popover-list');
   if (pop) {
@@ -148,3 +166,29 @@ document.addEventListener('click', (e: MouseEvent) => {
 (window as any).addm = addm;
 (window as any).selSkillByName = selSkillByName;
 (window as any).renderSkillDetailReal = renderSkillDetailReal;
+// Dashboard
+(window as any).selectDashboardAgent = selectDashboardAgent;
+(window as any).renderDashboard = renderDashboard;
+(window as any).renderOverview = renderOverview;
+(window as any).dashboardWidgetToggleTail = dashboardWidgetToggleTail;
+(window as any).dashboardConvSend = dashboardConvSend;
+(window as any).dashboardConvSendBtn = dashboardConvSendBtn;
+(window as any).dashboardHitlRespond = dashboardHitlRespond;
+(window as any).dashboardChartView = dashboardChartView;
+(window as any).dashboardChartRange = dashboardChartRange;
+(window as any).dashboardChartConfig = dashboardChartConfig;
+(window as any).dashboardChartSetField = dashboardChartSetField;
+(window as any).dashboardChartSetType = dashboardChartSetType;
+(window as any).dashboardComputeAction = dashboardComputeAction;
+(window as any).dashboardFilesView = dashboardFilesView;
+(window as any).dashboardFileSelect = dashboardFileSelect;
+(window as any).dashboardFilesItemAction = dashboardFilesItemAction;
+(window as any).dashboardFilesAction = dashboardFilesAction;
+(window as any).dashboardFilePdfPreview = dashboardFilePdfPreview;
+(window as any).dashboardPipeNav = dashboardPipeNav;
+(window as any).dashboardPause = dashboardPause;
+(window as any).dashboardStop = dashboardStop;
+(window as any).openNewAgentModal = openNewAgentModal;
+// Library
+(window as any).switchLibraryTab = switchLibraryTab;
+(window as any).linkToLibrary = linkToLibrary;

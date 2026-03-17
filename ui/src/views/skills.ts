@@ -2,7 +2,7 @@ import { state } from '../state';
 import { esc } from '../utils';
 import { SKILLS } from '../data/skills';
 import { showToast } from '../ui/toast';
-import { setMode } from './mode';
+import { linkToLibrary } from './library';
 
 export function selSkill(el: HTMLElement | null, id: string): void {
   document.querySelectorAll('.ski').forEach(s => s.classList.remove('on'));
@@ -154,7 +154,7 @@ export function runSkill(id: string): void {
           actRow.className = 'sk-stream-actions';
           actRow.innerHTML = `<span class="sk-done-label">✓ Done · ${elapsed}</span>
             <button class="sk-copy-btn" onclick="navigator.clipboard.writeText(${JSON.stringify(output)}).then(()=>showToast('Output copied!'))">Copy output</button>
-            <button class="sk-data-link" onclick="setMode('data')">View in Data →</button>`;
+            <button class="sk-data-link" onclick="linkToLibrary('data')">View in Data →</button>`;
           streamPanel.after(actRow);
         }
       }
@@ -261,7 +261,7 @@ export function saveNewSkill(): void {
   }
   closeNewSkillModal();
   showToast(`✓ Skill "${name}" saved`);
-  setTimeout(() => { setMode('skill'); selSkill(null, newId); }, 400);
+  setTimeout(() => { linkToLibrary('skills'); selSkill(null, newId); }, 400);
 }
 
 // ── Real-data skill functions (from backend skillDefs) ────────────────────
