@@ -101,6 +101,26 @@ class TmuxController:
         except Exception:
             return False
 
+    async def pane_current_command(self, window_id: str) -> str:
+        """Return the foreground command running in a window's active pane.
+
+        Returns an empty string if the window does not exist.
+        Uses tmux's #{pane_current_command} format variable.
+        """
+        def _sync() -> str:
+            pane = self._find_pane(window_id)
+            if pane is None:
+                return ""
+            try:
+                result = pane.cmd("display-message", "-p", "#{pane_current_command}")
+                return (result.stdout[0] if result.stdout else "").strip()
+            except Exception:
+                return ""
+        try:
+            return await asyncio.to_thread(_sync)
+        except Exception:
+            return ""
+
     # ------------------------------------------------------------------
     # Window Management
     # ------------------------------------------------------------------

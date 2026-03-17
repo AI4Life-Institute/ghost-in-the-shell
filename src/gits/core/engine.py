@@ -175,9 +175,19 @@ class Engine:
             return
 
         if msg.text:
-            # Auto-resume if suspended
+            # Auto-resume if explicitly suspended OR if the CLI has exited
+            # (pane is now running a shell like zsh/bash instead of the CLI)
             if binding.suspended:
                 await self._resume_suspended(binding)
+            else:
+                current_cmd = await self.tmux.pane_current_command(binding.window_id)
+                shell_names = {"zsh", "bash", "sh", "fish", "dash"}
+                if current_cmd and current_cmd.lower() in shell_names:
+                    logger.info(
+                        "CLI exited in window %s (current cmd: %s), auto-resuming",
+                        binding.window_id, current_cmd,
+                    )
+                    await self._resume_suspended(binding)
 
             await self.session_mgr.touch_active(msg.channel_id)
 
