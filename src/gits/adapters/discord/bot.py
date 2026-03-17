@@ -460,6 +460,17 @@ class DiscordAdapter(PlatformAdapter):
                     "Access denied.", ephemeral=True
                 )
                 return
+            # Check bot has send-message permission before attempting bind.
+            channel = interaction.channel
+            if channel and interaction.guild:
+                perms = channel.permissions_for(interaction.guild.me)
+                if not perms.send_messages:
+                    await interaction.response.send_message(
+                        "⚠️ Bot 在此频道没有 **Send Messages** 权限，无法绑定。\n"
+                        "请到 Discord 频道/Category 设置 → Permissions → 给 bot 角色勾上 **Send Messages**。",
+                        ephemeral=True,
+                    )
+                    return
             await interaction.response.defer()
             if self._engine:
                 await self._engine.handle_bind(
