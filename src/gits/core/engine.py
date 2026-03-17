@@ -22,7 +22,7 @@ from .launcher import CLISession, CodingCLILauncher
 from .monitor import PaneMonitor
 from .screenshot import ScreenshotEngine
 from .session import SessionManager
-from .terminal_parser import PromptInfo
+from .terminal_parser import PromptInfo, parse_status_line
 from .tmux import TmuxController
 
 logger = logging.getLogger(__name__)
@@ -567,7 +567,7 @@ class Engine:
 
         # Send initial prompt after CLI starts up
         async def _send_initial_prompt() -> None:
-            await asyncio.sleep(2.0)  # wait for CLI to be ready
+            await _wait_for_cli_idle(self.tmux, win.window_id)
             submit = _submit_keys_for_cli(cli)
             await self.tmux.send_text(win.window_id, message, submit_keys=submit)
 
@@ -633,7 +633,7 @@ class Engine:
         # Send initial prompt
         if starter_message:
             async def _send_initial_prompt() -> None:
-                await asyncio.sleep(2.0)
+                await _wait_for_cli_idle(self.tmux, win.window_id)
                 submit = _submit_keys_for_cli(cli)
                 await self.tmux.send_text(
                     win.window_id, starter_message, submit_keys=submit
@@ -1025,7 +1025,7 @@ class Engine:
 
         if message:
             async def _send_initial_prompt() -> None:
-                await asyncio.sleep(2.0)  # wait for CLI to be ready
+                await _wait_for_cli_idle(self.tmux, binding.window_id)
                 submit = _submit_keys_for_cli(binding.coding_cli)
                 await self.tmux.send_text(binding.window_id, message, submit_keys=submit)
 
@@ -1511,10 +1511,10 @@ class Engine:
 
         # After the CLI initialises, auto-inject context as the first message
         async def _inject() -> None:
-            await asyncio.sleep(5)
             binding = self.session_mgr.get_binding(pending_channel)
             if not binding:
                 return
+            await _wait_for_cli_idle(self.tmux, binding.window_id)
             # Use @-file reference (Claude Code syntax); other CLIs will see
             # the absolute path and can read it themselves.
             abs_import = str(_Path(work_dir) / ".gits-import.md")
@@ -1672,6 +1672,33 @@ class Engine:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+async def _wait_for_cli_idle(
+    tmux: TmuxController,
+    window_id: str,
+    timeout: float = 30.0,
+    poll_interval: float = 1.0,
+) -> None:
+    """Poll the pane until the CLI shows an idle prompt, or timeout expires.
+
+    Detects the Claude Code chrome separator + prompt symbol (❯ / >) via
+    ``parse_status_line``.  Falls back gracefully if the pane never shows
+    recognisable chrome (e.g. non-Claude CLIs) — the caller still sends
+    its message after the timeout.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(poll_interval)
+        try:
+            pane_text = await tmux.capture_pane_text(window_id)
+            if parse_status_line(pane_text) == "idle":
+                return
+        except Exception:
+            pass
+    logger.debug(
+        "wait_for_cli_idle: timed out after %.0fs for window %s", timeout, window_id
+    )
 
 
 # CLIs that need Escape+Enter to submit (multi-line editor mode)
