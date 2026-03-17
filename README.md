@@ -29,6 +29,7 @@ Watch your AI write code, review its terminal output, and approve permission pro
 - **Session resume** — reconnecting to a directory shows a session picker so you can continue where you left off
 - **Cross-CLI session import** — when resuming, sessions from other CLIs appear in the picker (marked `↗[codex]`); selecting one extracts the full conversation to `.gits-import.md` and injects it into a fresh session of your target CLI, so you can pick up a Codex conversation in Claude Code (or vice versa) without losing context
 - **tmux-backed sessions** — each project runs in a real tmux window; developers get full terminal access locally while Ghost handles the Discord bridge
+- **Automatic memory management** — idle CLI processes are automatically suspended after inactivity (threshold adapts to available system RAM: 2 h normally, down to 10 min under memory pressure) and transparently resumed the moment a new message arrives, keeping memory usage in check without losing conversation history
 - **Subscription-safe** — Ghost drives the official CLI tools (Claude Code, Codex) exactly as a human would; no API key required, no terms-of-service gray area — your existing Pro/Max subscription just works
 
 ## Why Ghost?
