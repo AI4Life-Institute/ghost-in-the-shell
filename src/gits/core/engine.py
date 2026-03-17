@@ -94,6 +94,7 @@ class Engine:
         self.guard = GuardHandler(tmux=self.tmux, ops_session=ops_session)
         await self.guard.ensure_ops_session()
 
+        self.health.set_engine(self)
         await self.health.start()
 
         # Register health recovery callback
@@ -174,6 +175,12 @@ class Engine:
             return
 
         if msg.text:
+            # Auto-resume if suspended
+            if binding.suspended:
+                await self._resume_suspended(binding)
+
+            await self.session_mgr.touch_active(msg.channel_id)
+
             logger.info(
                 "Forwarding message to tmux %s: %s",
                 binding.window_id,
@@ -946,6 +953,41 @@ class Engine:
                 await self._adapter.archive_thread(channel_id)
             except Exception:
                 logger.debug("Could not archive thread %s", channel_id)
+
+    async def _suspend_binding(self, channel_id: str) -> None:
+        """Kill the claude process in a tmux window but keep the window alive."""
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None or binding.suspended:
+            return
+        logger.info(
+            "Suspending idle binding %s (window %s, last active %.0f min ago)",
+            channel_id,
+            binding.window_id,
+            (time.time() - binding.last_active_at) / 60,
+        )
+        try:
+            await self.tmux.send_keys(binding.window_id, "C-c")
+            await asyncio.sleep(0.5)
+            await self.tmux.send_text(binding.window_id, "exit")
+        except Exception:
+            logger.debug("Could not send exit to window %s", binding.window_id)
+        await self.session_mgr.mark_suspended(channel_id)
+
+    async def _resume_suspended(self, binding: Any) -> None:
+        """Resume a suspended binding by relaunching the CLI."""
+        logger.info("Auto-resuming suspended binding %s", binding.channel_id)
+        cmd = self.launcher.build_launch_command(
+            cli=binding.coding_cli,
+            session_id=binding.cli_session_id,
+        )
+        if binding.permission_mode:
+            cmd = _append_permission_flag(cmd, binding.coding_cli, binding.permission_mode)
+        try:
+            await self.tmux.send_text(binding.window_id, cmd)
+            await asyncio.sleep(3.0)  # wait for CLI to be ready
+        except Exception:
+            logger.exception("Failed to resume binding %s", binding.channel_id)
+        await self.session_mgr.touch_active(binding.channel_id)
 
     async def handle_new(
         self, channel_id: str, interaction: Any, message: str | None = None

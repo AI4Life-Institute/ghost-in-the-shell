@@ -30,6 +30,8 @@ class SessionBinding:
     created_at: str = field(
         default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S")
     )
+    last_active_at: float = field(default_factory=time.time)
+    suspended: bool = False
 
 
 class SessionManager:
@@ -146,6 +148,21 @@ class SessionManager:
         binding = self._bindings.get(channel_id)
         if binding:
             binding.cli_session_id = session_id
+            await self._save()
+
+    async def touch_active(self, channel_id: str) -> None:
+        """Update last_active_at and clear suspended flag."""
+        binding = self._bindings.get(channel_id)
+        if binding:
+            binding.last_active_at = time.time()
+            binding.suspended = False
+            await self._save()
+
+    async def mark_suspended(self, channel_id: str) -> None:
+        """Mark a binding as suspended (claude process killed)."""
+        binding = self._bindings.get(channel_id)
+        if binding:
+            binding.suspended = True
             await self._save()
 
     async def update_cli_session_id_by_window(

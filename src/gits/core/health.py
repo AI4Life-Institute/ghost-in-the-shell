@@ -9,13 +9,49 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
+import subprocess
+import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .launcher import CodingCLILauncher
 from .session import SessionManager
 from .tmux import TmuxController
 
+if TYPE_CHECKING:
+    from .engine import Engine
+
 logger = logging.getLogger(__name__)
+
+
+def _available_memory_mb() -> int:
+    """Return available system memory in MB using vm_stat (macOS) or /proc/meminfo (Linux)."""
+    try:
+        result = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            page_size = 16384  # default macOS page size
+            m = re.search(r"page size of (\d+) bytes", result.stdout)
+            if m:
+                page_size = int(m.group(1))
+            free = inactive = 0
+            for line in result.stdout.splitlines():
+                if "Pages free:" in line:
+                    free = int(re.sub(r"\D", "", line))
+                elif "Pages inactive:" in line:
+                    inactive = int(re.sub(r"\D", "", line))
+            return (free + inactive) * page_size // 1024 // 1024
+    except Exception:
+        pass
+    # Linux fallback
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 9999  # unknown → assume plenty
 
 
 @dataclass
@@ -40,6 +76,9 @@ class HealthMonitor:
     from persisted state, including CLI session resume.
     """
 
+    IDLE_SUSPEND_SECONDS = 2 * 60 * 60  # 2 hours
+    IDLE_SCAN_INTERVAL = 30 * 60  # scan every 30 minutes
+
     def __init__(
         self,
         tmux: TmuxController,
@@ -55,7 +94,13 @@ class HealthMonitor:
         self.max_retries = max_retries
         self._running = False
         self._task: asyncio.Task | None = None
+        self._idle_task: asyncio.Task | None = None
         self._on_recovery: list = []  # callbacks
+        self._engine: Engine | None = None  # set via set_engine()
+
+    def set_engine(self, engine: Engine) -> None:
+        """Set engine reference for idle suspension."""
+        self._engine = engine
 
     def on_recovery(self, callback) -> None:
         """Register a callback for recovery events.
@@ -68,15 +113,17 @@ class HealthMonitor:
         """Start the health check loop."""
         self._running = True
         self._task = asyncio.create_task(self._check_loop())
+        self._idle_task = asyncio.create_task(self._idle_scan_loop())
         logger.info("HealthMonitor started (interval=%.1fs)", self.check_interval)
 
     async def stop(self) -> None:
         """Stop the health check loop."""
         self._running = False
-        if self._task:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+        for task in (self._task, self._idle_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         logger.info("HealthMonitor stopped")
 
     async def _check_loop(self) -> None:
@@ -87,6 +134,51 @@ class HealthMonitor:
             except Exception:
                 logger.exception("Health check error")
             await asyncio.sleep(self.check_interval)
+
+    async def _idle_scan_loop(self) -> None:
+        """Periodically suspend bindings that have been idle too long."""
+        # Initial delay so startup isn't immediately scanning
+        await asyncio.sleep(self.IDLE_SCAN_INTERVAL)
+        while self._running:
+            try:
+                await self._suspend_idle_bindings()
+            except Exception:
+                logger.exception("Idle scan error")
+            await asyncio.sleep(self.IDLE_SCAN_INTERVAL)
+
+    async def _suspend_idle_bindings(self) -> None:
+        """Suspend bindings that haven't been active, using memory-aware thresholds."""
+        if self._engine is None:
+            return
+
+        avail_mb = await asyncio.to_thread(_available_memory_mb)
+        if avail_mb < 1024:
+            # Critical: suspend everything not active in last 10 min
+            threshold = 10 * 60
+            logger.warning("Memory critical (%d MB available) — aggressive suspend", avail_mb)
+        elif avail_mb < 2048:
+            threshold = 30 * 60   # < 2GB: 30 min
+        elif avail_mb < 4096:
+            threshold = 60 * 60   # < 4GB: 1 hour
+        else:
+            threshold = self.IDLE_SUSPEND_SECONDS  # 2 hours
+
+        logger.debug("Idle scan: available=%d MB, threshold=%.0f min", avail_mb, threshold / 60)
+
+        now = time.time()
+        bindings = self.session_mgr.list_bindings()
+        for binding in bindings:
+            if binding.suspended:
+                continue
+            idle_secs = now - binding.last_active_at
+            if idle_secs >= threshold:
+                logger.info(
+                    "Idle suspend: %s (%.0f min idle, %d MB avail)",
+                    binding.channel_id,
+                    idle_secs / 60,
+                    avail_mb,
+                )
+                await self._engine._suspend_binding(binding.channel_id)
 
     async def _check_health(self) -> None:
         """Run a single health check."""
@@ -116,6 +208,12 @@ class HealthMonitor:
                 )
                 # Log but don't auto-recover individual windows
                 # (user might have intentionally closed it)
+
+        # Emergency: if memory is critically low, trigger idle scan immediately
+        if self._engine is not None:
+            avail_mb = await asyncio.to_thread(_available_memory_mb)
+            if avail_mb < 1024:
+                await self._suspend_idle_bindings()
 
     async def _recover_all(self) -> RecoveryResult:
         """Attempt to recover all bindings after tmux failure."""
