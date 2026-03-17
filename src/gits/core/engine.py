@@ -805,15 +805,54 @@ class Engine:
             lines.append(f"Parent: <#{binding.parent_channel_id}>")
         if binding.subdir:
             lines.append(f"Subdir: `{binding.subdir}`")
+        if binding.permission_mode:
+            lines.append(f"Permission: `{binding.permission_mode}`")
         lines.append(f"Created: `{binding.created_at}`")
 
-        # Session file path (for other agents to reference directly)
+        # Session file path + live stats
         if binding.cli_session_id:
+            lines.append(f"Session ID: `{binding.cli_session_id}`")
             sess_file = self.launcher.get_session_file(
                 binding.work_dir, binding.coding_cli or "claude", binding.cli_session_id
             )
             if sess_file:
                 lines.append(f"Session file: `{sess_file}`")
+                try:
+                    st = Path(sess_file).stat()
+                    import time as _time
+                    age = int(_time.time() - st.st_mtime)
+                    size_kb = st.st_size // 1024
+                    active_icon = "🟢" if age < 300 else "🟡"
+                    lines.append(
+                        f"Session file status: {active_icon} size={size_kb}KB, "
+                        f"last write {age}s ago"
+                    )
+                except OSError:
+                    lines.append("Session file status: ❓ (stat failed)")
+            else:
+                lines.append("Session file: ❌ not found")
+
+        # session_map.json entry for this window (detects session drift)
+        try:
+            import json as _json
+            smap_path = self.settings.session_map_file
+            if smap_path.exists():
+                smap = _json.loads(smap_path.read_text())
+                win_entry = next(
+                    (v for k, v in smap.items() if k.endswith(f":{binding.window_id}")),
+                    None,
+                )
+                if win_entry:
+                    map_sid = win_entry.get("session_id", "")
+                    drift = map_sid != binding.cli_session_id
+                    drift_icon = "⚠️ DRIFT" if drift else "✅ match"
+                    lines.append(
+                        f"session_map[@{binding.window_id}]: `{map_sid[:16]}…` {drift_icon}"
+                    )
+                else:
+                    lines.append(f"session_map[@{binding.window_id}]: ❓ no entry")
+        except Exception:
+            pass
 
         # Imported context file (from cross-CLI import)
         import_file = Path(binding.work_dir) / ".gits-import.md"

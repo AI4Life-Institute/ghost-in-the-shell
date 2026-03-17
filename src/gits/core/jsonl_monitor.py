@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -296,13 +297,46 @@ class JsonlMonitor:
                     continue
                 new_sid = entry.get("session_id", "")
                 if new_sid and new_sid != binding.cli_session_id:
+                    # Only follow to a new session if the current session is
+                    # no longer active (file missing or stale for >5 minutes).
+                    # This prevents hijacking an active coding session when GITS
+                    # launches an additional task-runner session in the same window.
+                    if binding.cli_session_id and self._current_session_is_active(binding):
+                        current_path = self._find_jsonl_file(binding)
+                        try:
+                            mtime = current_path.stat().st_mtime if current_path else None
+                            age_secs = round(time.time() - mtime, 1) if mtime else None
+                        except OSError:
+                            age_secs = None
+                        logger.info(
+                            "Skipping session_id update for channel %s "
+                            "(window %s): current session %s is still active "
+                            "[file=%s, age=%.1fs, threshold=%ds, proposed_new=%s]",
+                            binding.channel_id,
+                            binding.window_id,
+                            binding.cli_session_id,
+                            current_path.name if current_path else "NOT_FOUND",
+                            age_secs if age_secs is not None else -1,
+                            self._SESSION_ACTIVE_THRESHOLD_SECS,
+                            new_sid,
+                        )
+                        continue
+                    old_path = self._find_jsonl_file(binding)
+                    try:
+                        old_age = round(time.time() - old_path.stat().st_mtime, 1) if old_path else None
+                    except OSError:
+                        old_age = None
                     logger.info(
                         "Updating cli_session_id for channel %s "
-                        "(window %s): %s -> %s",
+                        "(window %s): %s -> %s "
+                        "[old_file=%s, old_age=%ss, reason=%s]",
                         binding.channel_id,
                         binding.window_id,
                         binding.cli_session_id,
                         new_sid,
+                        old_path.name if old_path else "NOT_FOUND",
+                        old_age if old_age is not None else "N/A",
+                        "no_existing_session" if not binding.cli_session_id else "session_stale",
                     )
                     await self._session_mgr.update_cli_session_id(
                         binding.channel_id, new_sid
@@ -323,6 +357,25 @@ class JsonlMonitor:
                     "Error checking output for channel %s", binding.channel_id,
                     exc_info=True,
                 )
+
+    _SESSION_ACTIVE_THRESHOLD_SECS = 5 * 60  # 5 minutes
+
+    def _current_session_is_active(self, binding: Any) -> bool:
+        """Return True if the binding's current session file was modified recently.
+
+        Used to decide whether to follow a new session that appeared in the
+        same tmux window.  If the existing session's JSONL file has been
+        written to within the last 5 minutes we consider it still active and
+        refuse to switch away from it.
+        """
+        jsonl_path = self._find_jsonl_file(binding)
+        if jsonl_path is None:
+            return False
+        try:
+            mtime = jsonl_path.stat().st_mtime
+        except OSError:
+            return False
+        return (time.time() - mtime) < self._SESSION_ACTIVE_THRESHOLD_SECS
 
     @staticmethod
     def _read_session_map() -> dict:
