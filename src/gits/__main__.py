@@ -401,6 +401,33 @@ def _cmd_hook(args: argparse.Namespace) -> None:
     except OSError as e:
         logger.error("Failed to write session_map: %s", e)
 
+    # Also write a per-pane session file: ~/.gits/pane_sessions/<TMUX_PANE>.json
+    # This is the authoritative source for pane-based session detection and
+    # avoids all mtime-based race conditions when multiple windows share a
+    # project directory.  The monitor reads /proc/<claude_pid>/environ to get
+    # TMUX_PANE, then looks up this file directly.
+    import tempfile as _tempfile
+    pane_sessions_dir = Path.home() / ".gits" / "pane_sessions"
+    try:
+        pane_sessions_dir.mkdir(parents=True, exist_ok=True)
+        pane_file = pane_sessions_dir / f"{pane_id}.json"
+        payload_out = {
+            "session_id": session_id,
+            "cwd": cwd,
+            "window_key": session_window_key,
+        }
+        fd2, tmp2 = _tempfile.mkstemp(dir=pane_sessions_dir, suffix=".tmp")
+        try:
+            with open(fd2, "w") as f:
+                json.dump(payload_out, f)
+            Path(tmp2).replace(pane_file)
+            logger.debug("Wrote pane session file: %s -> %s", pane_file.name, session_id)
+        except BaseException:
+            Path(tmp2).unlink(missing_ok=True)
+            raise
+    except OSError as e:
+        logger.warning("Failed to write pane session file: %s", e)
+
 
 # -- Hook install ------------------------------------------------------------
 

@@ -551,7 +551,18 @@ class JsonlMonitor:
         )
 
     def _detect_session_from_pid(self, pane_pid: int) -> str | None:
-        """Synchronous worker for _detect_session_via_pane (runs in thread)."""
+        """Synchronous worker for _detect_session_via_pane (runs in thread).
+
+        Detection strategies (most to least authoritative):
+        1. Per-pane session file: read TMUX_PANE from claude's environ, look up
+           ~/.gits/pane_sessions/<TMUX_PANE>.json written by the hook.  This is
+           the definitive source — one file per pane, no cross-window races.
+        2. Open fd scan: check /proc/<pid>/fd for an open .jsonl file in the
+           project dir.  Reliable but Claude doesn't keep the fd open in practice.
+        3. mtime with process-age filter: scan the project dir for JSONL files
+           modified AFTER the claude process started.  Far fewer false positives
+           than plain mtime since old sessions are excluded.
+        """
         claude_pid = self._find_claude_descendant(pane_pid)
         if claude_pid is None:
             return None
@@ -562,10 +573,35 @@ class JsonlMonitor:
         except OSError:
             return None
 
-        # Strategy 1: find the exact JSONL file this process has open for writing.
-        # Scanning /proc/<pid>/fd/ gives us the file descriptors the process holds,
-        # which uniquely identifies its session even when multiple claude instances
-        # share the same project directory.
+        # ── Strategy 1: per-pane session file (most authoritative) ───────────
+        # Read TMUX_PANE from the claude process's environment, then look up
+        # ~/.gits/pane_sessions/<TMUX_PANE>.json written by the hook.
+        # This is pane-specific and immune to cross-window contamination.
+        try:
+            environ_raw = Path(f"/proc/{claude_pid}/environ").read_bytes()
+            environ = dict(
+                entry.split(b"=", 1)
+                for entry in environ_raw.split(b"\x00")
+                if b"=" in entry
+            )
+            tmux_pane = environ.get(b"TMUX_PANE", b"").decode("utf-8", errors="replace")
+            if tmux_pane:
+                pane_file = Path.home() / ".gits" / "pane_sessions" / f"{tmux_pane}.json"
+                if pane_file.exists():
+                    data = json.loads(pane_file.read_text())
+                    sid = data.get("session_id", "")
+                    if sid:
+                        logger.debug(
+                            "Pane detection via pane-file for pid=%d pane=%s: %s",
+                            claude_pid, tmux_pane, sid,
+                        )
+                        return sid
+        except OSError:
+            pass
+        except Exception:
+            logger.debug("Pane session file lookup failed for pid=%d", claude_pid, exc_info=True)
+
+        # ── Strategy 2: open fd scan ──────────────────────────────────────────
         dir_hash = cwd.replace("/", "-")
         for variant in (dir_hash, dir_hash.lstrip("-")):
             project_dir = self._projects_path / variant
@@ -587,8 +623,12 @@ class JsonlMonitor:
             except OSError:
                 pass
 
-        # Strategy 2: fallback — most recently modified JSONL (legacy behaviour,
-        # used when /proc/fd scan fails, e.g. permission denied).
+        # ── Strategy 3: mtime with process-age filter ─────────────────────────
+        # Only consider JSONL files modified AFTER the claude process started.
+        # This eliminates sessions from previous invocations and other windows
+        # that happen to share the same project directory.
+        process_start_time = self._get_process_start_time(claude_pid)
+
         for variant in (dir_hash, dir_hash.lstrip("-")):
             project_dir = self._projects_path / variant
             if not project_dir.is_dir():
@@ -603,6 +643,10 @@ class JsonlMonitor:
                         mtime = f.stat().st_mtime
                     except OSError:
                         continue
+                    # Skip files that predate this claude process — they belong
+                    # to earlier sessions or other windows.
+                    if process_start_time and mtime < process_start_time:
+                        continue
                     if mtime > best_mtime:
                         best_mtime = mtime
                         best = f
@@ -610,12 +654,42 @@ class JsonlMonitor:
                 continue
             if best is not None:
                 logger.debug(
-                    "Pane detection fell back to mtime for pid=%d: %s",
-                    claude_pid, best.name,
+                    "Pane detection via mtime-filtered for pid=%d "
+                    "(start=%.0f): %s",
+                    claude_pid, process_start_time or 0, best.name,
                 )
-                return best.stem  # stem == session_id UUID
+                return best.stem
 
         return None
+
+    @staticmethod
+    def _get_process_start_time(pid: int) -> float | None:
+        """Return the wall-clock start time of a process (seconds since epoch).
+
+        Reads /proc/<pid>/stat field 22 (starttime in clock ticks since boot)
+        and combines it with /proc/stat btime (boot time).
+        Returns None if the information is unavailable.
+        """
+        try:
+            stat_line = Path(f"/proc/{pid}/stat").read_text()
+            # Field 22 is starttime; field 2 is comm (may contain spaces/parens)
+            # Strip the comm field "(name)" to safely split the rest.
+            after_comm = stat_line[stat_line.rfind(")") + 2:]
+            fields = after_comm.split()
+            starttime_ticks = int(fields[19])  # 0-indexed after comm strip
+
+            btime: int | None = None
+            for line in Path("/proc/stat").read_text().splitlines():
+                if line.startswith("btime "):
+                    btime = int(line.split()[1])
+                    break
+            if btime is None:
+                return None
+
+            hz = os.sysconf("SC_CLK_TCK")
+            return btime + starttime_ticks / hz
+        except Exception:
+            return None
 
     @staticmethod
     def _find_claude_descendant(root_pid: int) -> int | None:
