@@ -297,6 +297,9 @@ class JsonlMonitor:
         """
         bindings = self._session_mgr.list_bindings()
 
+        # Read session_map once up front so pane detection can consult it.
+        session_map = self._read_session_map()
+
         # ── Step 1: pane-based session detection (authoritative) ─────────────
         if self._tmux is not None:
             for binding in bindings:
@@ -316,7 +319,7 @@ class JsonlMonitor:
                     )
                     detected = None
                 if detected and detected != binding.cli_session_id:
-                    # Guard: don't steal a session that belongs to another channel.
+                    # Guard 1: don't steal a session that belongs to another channel.
                     # If `detected` is already assigned to a different binding,
                     # the mtime fallback picked the wrong file — skip this update.
                     already_owned = any(
@@ -330,6 +333,26 @@ class JsonlMonitor:
                             "detected session %s already owned by another channel",
                             binding.channel_id, binding.window_id, detected,
                         )
+                        continue
+                    # Guard 2: don't let the mtime fallback override a session that
+                    # session_map explicitly assigned to a DIFFERENT window.
+                    # session_map is written by the hook (authoritative); mtime is a
+                    # best-guess that goes wrong when two channels share a project dir.
+                    if session_map:
+                        our_key_suffix = f":{binding.window_id}"
+                        for k, v in session_map.items():
+                            if not isinstance(v, dict):
+                                continue
+                            if v.get("session_id") == detected and not k.endswith(our_key_suffix):
+                                logger.warning(
+                                    "Pane detection skipped for ch=%s (window %s): "
+                                    "detected session %s belongs to a different window "
+                                    "(%s) per session_map — mtime fallback overruled",
+                                    binding.channel_id, binding.window_id, detected, k,
+                                )
+                                detected = None
+                                break
+                    if not detected:
                         continue
                     logger.info(
                         "Pane detection updated session for ch=%s (window %s): "
@@ -349,7 +372,8 @@ class JsonlMonitor:
         # The hook writes keys as "{tmux_session_name}:{window_id}".
         # Rather than guessing the session name we search all keys for
         # a suffix matching ":{window_id}".
-        session_map = self._read_session_map()
+        if not session_map:
+            session_map = self._read_session_map()
         if session_map:
             for binding in bindings:
                 if not binding.window_id:
@@ -754,19 +778,29 @@ class JsonlMonitor:
                 return candidate
 
         # Strategy 3: scan all project directories for the session file.
-        try:
-            for d in claude_projects.iterdir():
-                if not d.is_dir():
-                    continue
-                candidate = d / session_filename
-                if candidate.exists():
-                    logger.debug(
-                        "Found JSONL via scan: %s (expected dir_hash=%s, actual=%s)",
-                        candidate, dir_hash, d.name,
-                    )
-                    return candidate
-        except OSError:
-            pass
+        # Only do this when the expected project dir does NOT exist at all —
+        # if the expected dir exists but lacks the file, the session belongs to
+        # a different project and should NOT be returned (it would prevent the
+        # session-switch guard from updating a binding whose work_dir changed).
+        expected_dir_exists = any(
+            (claude_projects / v).is_dir()
+            for v in (dir_hash, dir_hash.lstrip("-"))
+            if v
+        )
+        if not expected_dir_exists:
+            try:
+                for d in claude_projects.iterdir():
+                    if not d.is_dir():
+                        continue
+                    candidate = d / session_filename
+                    if candidate.exists():
+                        logger.debug(
+                            "Found JSONL via scan: %s (expected dir_hash=%s, actual=%s)",
+                            candidate, dir_hash, d.name,
+                        )
+                        return candidate
+            except OSError:
+                pass
 
         return None
 
