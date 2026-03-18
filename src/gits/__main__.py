@@ -289,6 +289,28 @@ def _cmd_hook(args: argparse.Namespace) -> None:
         logger.debug("Ignoring non-SessionStart event: %s", event)
         return
 
+    # Skip non-interactive (one-shot) claude invocations such as `claude -p`.
+    # These are background tasks launched by orchestrators; updating session_map
+    # for them would steal the window's interactive session and break forwarding.
+    # Detection: check if the grandparent claude process was started with -p /
+    # --print flags by reading /proc/<ppid>/cmdline.
+    try:
+        ppid = os.getppid()
+        cmdline_raw = Path(f"/proc/{ppid}/cmdline").read_bytes()
+        cmdline_args = cmdline_raw.split(b"\x00")
+        is_noninteractive = any(
+            arg in (b"-p", b"--print") for arg in cmdline_args
+        )
+        if is_noninteractive:
+            logger.debug(
+                "Skipping session_map update: parent claude (pid=%d) is "
+                "running in non-interactive mode (-p/--print)",
+                ppid,
+            )
+            return
+    except OSError:
+        pass  # /proc not available (non-Linux), proceed normally
+
     # Get tmux session:window_id for this pane
     pane_id = os.environ.get("TMUX_PANE", "")
     if not pane_id:
