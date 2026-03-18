@@ -256,6 +256,8 @@ def _make_binding(channel_id="ch1", cli_session_id="sess-123", work_dir="/tmp/pr
     b.channel_id = channel_id
     b.cli_session_id = cli_session_id
     b.work_dir = work_dir
+    b.suspended = False
+    b.coding_cli = "claude"
     return b
 
 
@@ -314,7 +316,7 @@ class TestByteOffsetTracking:
         callback.assert_not_called()
 
         # Offset should be set to file size
-        file_key = str(jsonl_file)
+        file_key = (binding.channel_id, str(jsonl_file))
         assert monitor._offsets[file_key] == jsonl_file.stat().st_size
 
     @pytest.mark.asyncio
@@ -439,7 +441,7 @@ class TestTruncationHandling:
 
         # First poll — skip to end
         await monitor._poll_once()
-        file_key = str(jsonl_file)
+        file_key = (binding.channel_id, str(jsonl_file))
         assert monitor._offsets[file_key] > 0
 
         # Truncate file to something smaller
@@ -878,3 +880,283 @@ class TestSessionMapIntegration:
         callback.assert_called_once()
         assert callback.call_args[0][0] == binding.channel_id
         assert callback.call_args[0][1] == "Hello from the new session!"
+
+
+# -- Hardening: offset isolation, persistence, session-switch guard ----------
+
+
+class TestPerChannelOffsetIsolation:
+    """Two channels sharing one JSONL file each track their own read position."""
+
+    @pytest.mark.asyncio
+    async def test_shared_file_both_channels_receive_all_messages(self, tmp_path):
+        """Neither channel's offset should advance the other's read position."""
+        projects = tmp_path / "projects"
+        session_id = "shared-session-abc"
+        project_dir = projects / "-tmp-shared"
+        project_dir.mkdir(parents=True)
+        jsonl_file = project_dir / f"{session_id}.jsonl"
+
+        # Write a line that both channels should see
+        _make_jsonl_file(jsonl_file, [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "first message"}]},
+            }
+        ])
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        ch_a = _make_binding(channel_id="ch-a", cli_session_id=session_id, work_dir="/tmp/shared")
+        ch_b = _make_binding(channel_id="ch-b", cli_session_id=session_id, work_dir="/tmp/shared")
+        session_mgr.list_bindings.return_value = [ch_a, ch_b]
+
+        cb_a = AsyncMock()
+        cb_b = AsyncMock()
+
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr,
+            poll_interval=0.05,
+            projects_path=projects,
+        )
+        # Route callbacks per channel
+        async def dispatch(channel_id, text):
+            if channel_id == "ch-a":
+                await cb_a(channel_id, text)
+            else:
+                await cb_b(channel_id, text)
+
+        monitor.on_message(dispatch)
+        monitor._read_session_map = lambda: {}
+
+        # Poll 1: both channels see file for first time — skip to end
+        await monitor._poll_once()
+        cb_a.assert_not_called()
+        cb_b.assert_not_called()
+
+        # Append new content
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "new message"}]},
+            }) + "\n")
+
+        # Poll 2: both channels should independently receive the new line
+        await monitor._poll_once()
+        cb_a.assert_called_once()
+        cb_b.assert_called_once()
+        assert cb_a.call_args[0][1] == "new message"
+        assert cb_b.call_args[0][1] == "new message"
+
+        # Offsets must be independent keys
+        key_a = ("ch-a", str(jsonl_file))
+        key_b = ("ch-b", str(jsonl_file))
+        assert key_a in monitor._offsets
+        assert key_b in monitor._offsets
+
+
+class TestOffsetPersistence:
+    """Offsets survive a simulated restart and resume from last position."""
+
+    @pytest.mark.asyncio
+    async def test_new_content_after_restart_forwarded_without_replay(self, tmp_path):
+        session_id = "persist-session"
+        project_dir = tmp_path / "projects" / "-tmp-persist"
+        project_dir.mkdir(parents=True)
+        jsonl_file = project_dir / f"{session_id}.jsonl"
+        offsets_file = tmp_path / "jsonl_offsets.json"
+
+        _make_jsonl_file(jsonl_file, [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "old history"}]},
+            }
+        ])
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+        binding = _make_binding(channel_id="ch1", cli_session_id=session_id, work_dir="/tmp/persist")
+        session_mgr.list_bindings.return_value = [binding]
+
+        # --- First "run" ---
+        monitor1 = JsonlMonitor(
+            session_mgr=session_mgr,
+            poll_interval=0.05,
+            projects_path=tmp_path / "projects",
+        )
+        monitor1._offsets_file = offsets_file
+        monitor1._read_session_map = lambda: {}
+
+        cb1 = AsyncMock()
+        monitor1.on_message(cb1)
+
+        # Poll: skip to end (first-seen)
+        await monitor1._poll_once()
+        cb1.assert_not_called()
+
+        # Force-save offsets to disk
+        monitor1._save_offsets(force=True)
+        assert offsets_file.exists()
+
+        # --- Simulated restart: second monitor instance ---
+        monitor2 = JsonlMonitor(
+            session_mgr=session_mgr,
+            poll_interval=0.05,
+            projects_path=tmp_path / "projects",
+        )
+        monitor2._offsets_file = offsets_file
+        monitor2._load_offsets()  # reload from disk
+        monitor2._read_session_map = lambda: {}
+
+        cb2 = AsyncMock()
+        monitor2.on_message(cb2)
+
+        # Append new content after "restart"
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "post-restart message"}]},
+            }) + "\n")
+
+        # Poll: should only see new content, not replay "old history"
+        await monitor2._poll_once()
+        cb2.assert_called_once()
+        assert cb2.call_args[0][1] == "post-restart message"
+
+
+class TestSessionSwitchGuard:
+    """Background jobs must not hijack a channel's session when its file is still present."""
+
+    @pytest.mark.asyncio
+    async def test_proposed_session_rejected_when_current_file_exists(self, tmp_path):
+        projects = tmp_path / "projects"
+        current_sid = "current-session-111"
+        bg_sid = "background-session-999"
+
+        # Create the current session's JSONL file
+        project_dir = projects / "-tmp-guard"
+        project_dir.mkdir(parents=True)
+        (project_dir / f"{current_sid}.jsonl").write_text(
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "real work"}]},
+            }) + "\n"
+        )
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(
+            channel_id="ch-guard",
+            cli_session_id=current_sid,
+            work_dir="/tmp/guard",
+        )
+        binding.window_id = "@6"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr,
+            poll_interval=0.05,
+            projects_path=projects,
+        )
+        # Background job wrote bg_sid into session_map for this window
+        monitor._read_session_map = lambda: {
+            "gits:@6": {"session_id": bg_sid, "cwd": "/tmp/guard"}
+        }
+
+        await monitor._poll_once()
+
+        # session_id must NOT have been updated — file still exists
+        session_mgr.update_cli_session_id.assert_not_called()
+        assert binding.cli_session_id == current_sid
+
+    @pytest.mark.asyncio
+    async def test_proposed_session_accepted_when_current_file_gone(self, tmp_path):
+        projects = tmp_path / "projects"
+        old_sid = "gone-session-000"
+        new_sid = "new-session-111"
+
+        # Create the new session's JSONL file (old file is absent)
+        project_dir = projects / "-tmp-accept"
+        project_dir.mkdir(parents=True)
+        (project_dir / f"{new_sid}.jsonl").write_text(
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "fresh start"}]},
+            }) + "\n"
+        )
+        # old_sid.jsonl is intentionally NOT created
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(
+            channel_id="ch-accept",
+            cli_session_id=old_sid,
+            work_dir="/tmp/accept",
+        )
+        binding.window_id = "@8"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr,
+            poll_interval=0.05,
+            projects_path=projects,
+        )
+        monitor._read_session_map = lambda: {
+            "gits:@8": {"session_id": new_sid, "cwd": "/tmp/accept"}
+        }
+
+        await monitor._poll_once()
+
+        # Old file is gone → new session accepted
+        session_mgr.update_cli_session_id.assert_called_once_with("ch-accept", new_sid)
+        assert binding.cli_session_id == new_sid
+
+
+class TestSuspendedBindingSkipped:
+    """Suspended bindings must not advance their JSONL offset."""
+
+    @pytest.mark.asyncio
+    async def test_suspended_binding_offset_not_advanced(self, tmp_path):
+        projects = tmp_path / "projects"
+        session_id = "susp-session-xyz"
+        project_dir = projects / "-tmp-susp"
+        project_dir.mkdir(parents=True)
+        jsonl_file = project_dir / f"{session_id}.jsonl"
+        _make_jsonl_file(jsonl_file, [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "you should not see this"}]},
+            }
+        ])
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(
+            channel_id="ch-susp",
+            cli_session_id=session_id,
+            work_dir="/tmp/susp",
+        )
+        binding.suspended = True
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr,
+            poll_interval=0.05,
+            projects_path=projects,
+        )
+        monitor.on_message(callback)
+        monitor._read_session_map = lambda: {}
+
+        await monitor._poll_once()
+
+        # Callback must not fire — binding was suspended
+        callback.assert_not_called()
+
+        # Offset must not have been recorded (binding was skipped entirely)
+        file_key = ("ch-susp", str(jsonl_file))
+        assert file_key not in monitor._offsets

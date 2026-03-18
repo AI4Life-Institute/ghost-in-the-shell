@@ -587,6 +587,19 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), interaction
                 )
 
+        @tree.command(name="enter", description="Send Enter key")
+        async def cmd_enter(interaction: discord.Interaction):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_enter(
+                    str(interaction.channel_id), interaction
+                )
+
         @tree.command(name="esc", description="Send Escape key")
         async def cmd_esc(interaction: discord.Interaction):
             if not self._check_interaction_access(interaction):

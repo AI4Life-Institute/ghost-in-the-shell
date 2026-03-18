@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -213,11 +214,13 @@ class JsonlMonitor:
         poll_interval: float = 2.0,
         projects_path: Path | None = None,
         launcher: Any = None,
+        tmux: Any = None,
     ):
         self._session_mgr = session_mgr
         self._poll_interval = poll_interval
         self._projects_path = projects_path or Path.home() / ".claude" / "projects"
         self._launcher = launcher  # optional; used to resolve alias session paths
+        self._tmux = tmux  # optional; used for pane-based session detection
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -284,11 +287,64 @@ class JsonlMonitor:
     async def _poll_once(self) -> None:
         """Single poll iteration: check all bindings for new JSONL content.
 
-        Also reads ~/.gits/session_map.json to pick up new CLI session IDs
-        written by the ``gits hook`` subprocess.
+        Session detection order (most authoritative first):
+        1. Pane-based: walk the tmux pane's process tree to find the foreground
+           claude process, read its cwd, and pick the most recently modified
+           JSONL in that project directory.  Works even when the hook never fires
+           (e.g. plain-text conversations with no tool calls).
+        2. session_map.json: hook-written fallback for bindings without a
+           window_id or when tmux is not available.
         """
         bindings = self._session_mgr.list_bindings()
 
+        # ── Step 1: pane-based session detection (authoritative) ─────────────
+        if self._tmux is not None:
+            for binding in bindings:
+                if not binding.window_id:
+                    continue
+                if getattr(binding, "suspended", False):
+                    continue
+                cli = getattr(binding, "coding_cli", "claude")
+                if cli != "claude":
+                    continue
+                try:
+                    detected = await self._detect_session_via_pane(binding)
+                except Exception:
+                    logger.debug(
+                        "Pane session detection failed for ch=%s window=%s",
+                        binding.channel_id, binding.window_id, exc_info=True,
+                    )
+                    detected = None
+                if detected and detected != binding.cli_session_id:
+                    # Guard: don't steal a session that belongs to another channel.
+                    # If `detected` is already assigned to a different binding,
+                    # the mtime fallback picked the wrong file — skip this update.
+                    already_owned = any(
+                        other.channel_id != binding.channel_id
+                        and other.cli_session_id == detected
+                        for other in bindings
+                    )
+                    if already_owned:
+                        logger.warning(
+                            "Pane detection skipped for ch=%s (window %s): "
+                            "detected session %s already owned by another channel",
+                            binding.channel_id, binding.window_id, detected,
+                        )
+                        continue
+                    logger.info(
+                        "Pane detection updated session for ch=%s (window %s): "
+                        "%s -> %s",
+                        binding.channel_id,
+                        binding.window_id,
+                        binding.cli_session_id,
+                        detected,
+                    )
+                    await self._session_mgr.update_cli_session_id(
+                        binding.channel_id, detected
+                    )
+                    binding.cli_session_id = detected
+
+        # ── Step 2: session_map.json fallback ─────────────────────────────────
         # Try to pick up session IDs from session_map.json.
         # The hook writes keys as "{tmux_session_name}:{window_id}".
         # Rather than guessing the session name we search all keys for
@@ -308,30 +364,55 @@ class JsonlMonitor:
                     continue
                 new_sid = entry.get("session_id", "")
                 if new_sid and new_sid != binding.cli_session_id:
-                    # Only follow to a new session if the current session is
-                    # no longer active (file missing or stale for >5 minutes).
-                    # This prevents hijacking an active coding session when GITS
-                    # launches an additional task-runner session in the same window.
-                    if binding.cli_session_id and self._current_session_is_active(binding):
-                        current_path = self._find_jsonl_file(binding)
-                        try:
-                            mtime = current_path.stat().st_mtime if current_path else None
-                            age_secs = round(time.time() - mtime, 1) if mtime else None
-                        except OSError:
-                            age_secs = None
-                        logger.info(
-                            "Skipping session_id update for channel %s "
-                            "(window %s): current session %s is still active "
-                            "[file=%s, age=%.1fs, threshold=%ds, proposed_new=%s]",
-                            binding.channel_id,
-                            binding.window_id,
-                            binding.cli_session_id,
-                            current_path.name if current_path else "NOT_FOUND",
-                            age_secs if age_secs is not None else -1,
-                            self._SESSION_ACTIVE_THRESHOLD_SECS,
-                            new_sid,
+                    # Only follow a new session if the current session file is
+                    # truly gone (deleted / never existed).  A session that is
+                    # merely idle (stale) but whose file still exists on disk
+                    # could simply mean the user stepped away for a while;
+                    # switching away would hijack their channel if a background
+                    # process (e.g. an orchestrator job) happened to inherit
+                    # TMUX_PANE and start its own `claude -p` in the same
+                    # project directory.
+                    #
+                    # Exception: if the current session_id is owned by a
+                    # *different* window in session_map, it means pane detection
+                    # mis-assigned a foreign session to this binding ("stolen"
+                    # session).  In that case trust session_map unconditionally.
+                    if binding.cli_session_id:
+                        # Detect stolen session: our session_id appears in
+                        # session_map under a different window_id.
+                        our_key_suffix = f":{binding.window_id}"
+                        stolen = any(
+                            not k.endswith(our_key_suffix)
+                            and isinstance(v, dict)
+                            and v.get("session_id") == binding.cli_session_id
+                            for k, v in session_map.items()
                         )
-                        continue
+                        if not stolen:
+                            current_path = self._find_jsonl_file(binding)
+                            if current_path is not None:
+                                # File still exists and not stolen — keep tracking.
+                                logger.info(
+                                    "Skipping session_id update for channel %s "
+                                    "(window %s): current session %s file still exists "
+                                    "[file=%s, proposed_new=%s]",
+                                    binding.channel_id,
+                                    binding.window_id,
+                                    binding.cli_session_id,
+                                    current_path.name,
+                                    new_sid,
+                                )
+                                continue
+                        else:
+                            logger.warning(
+                                "Stolen session detected for channel %s (window %s): "
+                                "session %s belongs to a different window per session_map "
+                                "— correcting to %s",
+                                binding.channel_id,
+                                binding.window_id,
+                                binding.cli_session_id,
+                                new_sid,
+                            )
+
                     old_path = self._find_jsonl_file(binding)
                     try:
                         old_age = round(time.time() - old_path.stat().st_mtime, 1) if old_path else None
@@ -371,8 +452,6 @@ class JsonlMonitor:
                     exc_info=True,
                 )
 
-    _SESSION_ACTIVE_THRESHOLD_SECS = 5 * 60  # 5 minutes
-
     # -- Offset persistence -------------------------------------------------
 
     def _load_offsets(self) -> None:
@@ -411,22 +490,132 @@ class JsonlMonitor:
         except Exception:
             logger.warning("Failed to save jsonl_offsets.json", exc_info=True)
 
-    def _current_session_is_active(self, binding: Any) -> bool:
-        """Return True if the binding's current session file was modified recently.
+    async def _detect_session_via_pane(self, binding: Any) -> str | None:
+        """Detect the active Claude session by inspecting the tmux pane process tree.
 
-        Used to decide whether to follow a new session that appeared in the
-        same tmux window.  If the existing session's JSONL file has been
-        written to within the last 5 minutes we consider it still active and
-        refuse to switch away from it.
+        Algorithm:
+        1. Ask TmuxController for the pane's shell PID.
+        2. Walk /proc/<pid>/task/<pid>/children recursively to find claude
+           descendant processes.  Only direct descendants of the pane shell are
+           considered — background jobs that merely inherited TMUX_PANE are not
+           in this tree.
+        3. Read /proc/<claude_pid>/cwd to get the working directory.
+        4. Hash the cwd to a Claude projects dir name and scan for the most
+           recently modified *.jsonl file.  The filename stem IS the session_id.
+
+        Returns the session_id string, or None if detection fails.
         """
-        jsonl_path = self._find_jsonl_file(binding)
-        if jsonl_path is None:
-            return False
+        if self._tmux is None:
+            return None
+        pane_pid = await self._tmux.pane_pid(binding.window_id)
+        if not pane_pid:
+            return None
+        return await asyncio.to_thread(
+            self._detect_session_from_pid, pane_pid
+        )
+
+    def _detect_session_from_pid(self, pane_pid: int) -> str | None:
+        """Synchronous worker for _detect_session_via_pane (runs in thread)."""
+        claude_pid = self._find_claude_descendant(pane_pid)
+        if claude_pid is None:
+            return None
+
+        # Read the claude process's working directory
         try:
-            mtime = jsonl_path.stat().st_mtime
+            cwd = os.readlink(f"/proc/{claude_pid}/cwd")
         except OSError:
-            return False
-        return (time.time() - mtime) < self._SESSION_ACTIVE_THRESHOLD_SECS
+            return None
+
+        # Strategy 1: find the exact JSONL file this process has open for writing.
+        # Scanning /proc/<pid>/fd/ gives us the file descriptors the process holds,
+        # which uniquely identifies its session even when multiple claude instances
+        # share the same project directory.
+        dir_hash = cwd.replace("/", "-")
+        for variant in (dir_hash, dir_hash.lstrip("-")):
+            project_dir = self._projects_path / variant
+            if not project_dir.is_dir():
+                continue
+            project_dir_str = str(project_dir.resolve())
+            fd_dir = Path(f"/proc/{claude_pid}/fd")
+            try:
+                for fd_entry in fd_dir.iterdir():
+                    try:
+                        target = os.readlink(str(fd_entry))
+                    except OSError:
+                        continue
+                    if not target.endswith(".jsonl"):
+                        continue
+                    target_path = Path(target)
+                    if str(target_path.parent.resolve()) == project_dir_str:
+                        return target_path.stem
+            except OSError:
+                pass
+
+        # Strategy 2: fallback — most recently modified JSONL (legacy behaviour,
+        # used when /proc/fd scan fails, e.g. permission denied).
+        for variant in (dir_hash, dir_hash.lstrip("-")):
+            project_dir = self._projects_path / variant
+            if not project_dir.is_dir():
+                continue
+            best: Path | None = None
+            best_mtime: float = 0.0
+            try:
+                for f in project_dir.iterdir():
+                    if f.suffix != ".jsonl":
+                        continue
+                    try:
+                        mtime = f.stat().st_mtime
+                    except OSError:
+                        continue
+                    if mtime > best_mtime:
+                        best_mtime = mtime
+                        best = f
+            except OSError:
+                continue
+            if best is not None:
+                logger.debug(
+                    "Pane detection fell back to mtime for pid=%d: %s",
+                    claude_pid, best.name,
+                )
+                return best.stem  # stem == session_id UUID
+
+        return None
+
+    @staticmethod
+    def _find_claude_descendant(root_pid: int) -> int | None:
+        """Walk the /proc process tree from root_pid and return the first
+        descendant whose executable name is 'claude'.
+
+        Uses /proc/<pid>/task/<pid>/children for breadth-first traversal.
+        Returns None if no claude process is found.
+        """
+        visited: set[int] = set()
+        queue: list[int] = [root_pid]
+        while queue:
+            pid = queue.pop(0)
+            if pid in visited:
+                continue
+            visited.add(pid)
+            # Check if this process is claude (skip root pane shell itself)
+            if pid != root_pid:
+                try:
+                    comm = Path(f"/proc/{pid}/comm").read_text().strip()
+                    if comm == "claude":
+                        return pid
+                except OSError:
+                    continue
+            # Enqueue children
+            try:
+                children_text = Path(
+                    f"/proc/{pid}/task/{pid}/children"
+                ).read_text()
+                for child in children_text.split():
+                    child_pid = int(child)
+                    if child_pid not in visited:
+                        queue.append(child_pid)
+            except (OSError, ValueError):
+                pass
+        return None
 
     @staticmethod
     def _read_session_map() -> dict:

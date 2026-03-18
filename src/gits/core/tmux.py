@@ -101,6 +101,26 @@ class TmuxController:
         except Exception:
             return False
 
+    async def pane_pid(self, window_id: str) -> int | None:
+        """Return the PID of the shell process running in a window's active pane.
+
+        Returns None if the window does not exist or the PID cannot be read.
+        """
+        def _sync() -> int | None:
+            pane = self._find_pane(window_id)
+            if pane is None:
+                return None
+            try:
+                result = pane.cmd("display-message", "-p", "#{pane_pid}")
+                pid_str = (result.stdout[0] if result.stdout else "").strip()
+                return int(pid_str) if pid_str.isdigit() else None
+            except Exception:
+                return None
+        try:
+            return await asyncio.to_thread(_sync)
+        except Exception:
+            return None
+
     async def pane_current_command(self, window_id: str) -> str:
         """Return the foreground command running in a window's active pane.
 
