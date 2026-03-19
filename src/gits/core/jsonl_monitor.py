@@ -324,11 +324,13 @@ class JsonlMonitor:
                     )
                     detected = None
                 if detected and detected != binding.cli_session_id:
-                    # Guard 1: don't steal a session that belongs to another channel.
-                    # If `detected` is already assigned to a different binding,
-                    # the mtime fallback picked the wrong file — skip this update.
+                    # Guard 1: don't steal a session that belongs to a channel on a
+                    # DIFFERENT window.  Two channels on the same window may
+                    # legitimately share the active session, so only block when
+                    # the owning channel is bound to a different window_id.
                     already_owned = any(
                         other.channel_id != binding.channel_id
+                        and other.window_id != binding.window_id
                         and other.cli_session_id == detected
                         for other in bindings
                     )
