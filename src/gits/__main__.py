@@ -292,22 +292,49 @@ def _cmd_hook(args: argparse.Namespace) -> None:
     # Skip non-interactive (one-shot) claude invocations such as `claude -p`.
     # These are background tasks launched by orchestrators; updating session_map
     # for them would steal the window's interactive session and break forwarding.
-    # Detection: check if the grandparent claude process was started with -p /
-    # --print flags by reading /proc/<ppid>/cmdline.
+    #
+    # Detection: walk up the process tree to find the first ancestor whose
+    # comm is "claude" and check its cmdline for -p / --print.  Walking is
+    # necessary because Claude may invoke the hook via a shell
+    # ("/bin/sh -c gits hook"), making the direct parent a shell process
+    # rather than the claude binary itself.
     try:
-        ppid = os.getppid()
-        cmdline_raw = Path(f"/proc/{ppid}/cmdline").read_bytes()
-        cmdline_args = cmdline_raw.split(b"\x00")
-        is_noninteractive = any(
-            arg in (b"-p", b"--print") for arg in cmdline_args
-        )
-        if is_noninteractive:
-            logger.debug(
-                "Skipping session_map update: parent claude (pid=%d) is "
-                "running in non-interactive mode (-p/--print)",
-                ppid,
+        pid = os.getpid()
+        visited: set[int] = set()
+        claude_ancestor_pid: int | None = None
+        while pid > 1 and pid not in visited:
+            visited.add(pid)
+            try:
+                status_lines = Path(f"/proc/{pid}/status").read_text().splitlines()
+                ppid = next(
+                    int(line.split()[1])
+                    for line in status_lines
+                    if line.startswith("PPid:")
+                )
+            except (OSError, StopIteration):
+                break
+            try:
+                comm = Path(f"/proc/{ppid}/comm").read_text().strip()
+                if comm == "claude":
+                    claude_ancestor_pid = ppid
+                    break
+            except OSError:
+                pass
+            pid = ppid
+
+        if claude_ancestor_pid is not None:
+            cmdline_raw = Path(f"/proc/{claude_ancestor_pid}/cmdline").read_bytes()
+            cmdline_args = cmdline_raw.split(b"\x00")
+            is_noninteractive = any(
+                arg in (b"-p", b"--print") for arg in cmdline_args
             )
-            return
+            if is_noninteractive:
+                logger.debug(
+                    "Skipping session_map update: claude ancestor (pid=%d) is "
+                    "running in non-interactive mode (-p/--print)",
+                    claude_ancestor_pid,
+                )
+                return
     except OSError:
         pass  # /proc not available (non-Linux), proceed normally
 
