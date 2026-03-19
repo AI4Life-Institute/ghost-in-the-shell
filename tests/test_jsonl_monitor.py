@@ -1208,14 +1208,22 @@ class TestMtimeCrossWindowContamination:
 
     @pytest.mark.asyncio
     async def test_mtime_overruled_when_binding_already_has_wrong_session(self, tmp_path):
-        """If ch-28 already has the stolen session (from a previous wrong mtime poll),
-        and session_map has the correct one, session_map must win — bypassing the
-        file-existence guard because the file belongs to the other window."""
+        """If ch-28 already holds a session that mtime keeps returning (from a prior
+        cross-window steal), session_map must correct it.
+
+        Setup: two channels share the same project dir (triggers mtime_uncertain).
+        The stolen session does NOT appear in session_map for any window — this is
+        the realistic post-correction-cycle state where @27's session was already
+        updated but ch-28 is stuck.  mtime_uncertain fires (session_map assigns @28
+        to correct_sid but mtime says stolen_sid, and stolen_sid is absent from the
+        map), so Step 2 bypasses the file-existence guard and corrects ch-28.
+        """
         projects = tmp_path / "projects"
         stolen_sid = "stolen-sess"
         correct_sid = "correct-sess"
 
-        # Create the stolen session's JSONL file (so file-existence guard would normally block)
+        # Create the stolen session's JSONL file (so file-existence guard would normally block
+        # WITHOUT the mtime_uncertain bypass)
         project_dir = projects / "-tmp-ai4stock"
         project_dir.mkdir(parents=True)
         (project_dir / f"{stolen_sid}.jsonl").write_text("{}\n")
@@ -1223,11 +1231,19 @@ class TestMtimeCrossWindowContamination:
         session_mgr = MagicMock()
         session_mgr.update_cli_session_id = AsyncMock()
 
+        # ch-27 and ch-28 share the same work_dir → triggers other_channels_same_dir
+        ch27 = _make_binding(channel_id="ch-27", cli_session_id=stolen_sid, work_dir="/tmp/ai4stock")
+        ch27.window_id = "@27"
         ch28 = _make_binding(channel_id="ch-28", cli_session_id=stolen_sid, work_dir="/tmp/ai4stock")
         ch28.window_id = "@28"
-        session_mgr.list_bindings.return_value = [ch28]
+        session_mgr.list_bindings.return_value = [ch27, ch28]
 
-        session_map = {"gits:@28": {"session_id": correct_sid}}
+        # @27 has no entry in session_map (e.g., already corrected in a previous cycle),
+        # @28 is correctly assigned correct_sid.  stolen_sid does NOT appear as any
+        # window's value → detected_in_map=False → mtime_uncertain fires for ch-28.
+        session_map = {
+            "gits:@28": {"session_id": correct_sid},
+        }
 
         monitor = JsonlMonitor(
             session_mgr=session_mgr,
@@ -1236,13 +1252,14 @@ class TestMtimeCrossWindowContamination:
         )
         monitor._tmux = MagicMock()  # enable pane detection block
         monitor._read_session_map = lambda: session_map
-        # mtime returns the same stolen session (no diff detected by pane logic)
+        # mtime keeps returning stolen_sid for ch-28 (contamination persists)
         monitor._detect_session_via_pane = AsyncMock(return_value=(stolen_sid, "mtime"))
 
         await monitor._poll_once()
 
         # session_map must have corrected ch-28 to correct_sid
-        session_mgr.update_cli_session_id.assert_called_once_with("ch-28", correct_sid)
+        calls = {args[0]: args[1] for args, _ in session_mgr.update_cli_session_id.call_args_list}
+        assert calls.get("ch-28") == correct_sid, "ch-28 must be corrected to correct_sid"
         assert ch28.cli_session_id == correct_sid
 
     @pytest.mark.asyncio

@@ -336,35 +336,48 @@ class JsonlMonitor:
                 if detected is None:
                     continue
 
-                # mtime is unreliable when multiple windows share a project dir.
-                # If session_map has an explicit entry for this window pointing to a
-                # DIFFERENT session, and the mtime result is unknown to session_map,
-                # defer to session_map rather than trusting the mtime guess.
+                # mtime is unreliable when multiple windows share a project dir:
+                # the most-recently-modified JSONL may belong to a *different*
+                # window's Claude process.  Only apply this guard when there IS
+                # at least one other active (non-suspended) channel using the
+                # same work_dir — that's the only scenario where mtime can pick
+                # the wrong window's file.  If this window's work_dir is unique,
+                # mtime is unambiguous and should be trusted even when session_map
+                # disagrees (session_map can be stale, e.g. after --resume with a
+                # session that lives in a different project directory).
                 if strategy == "mtime" and session_map:
-                    our_key_suffix = f":{binding.window_id}"
-                    this_window_sm_sid = next(
-                        (
-                            v.get("session_id", "")
-                            for k, v in session_map.items()
-                            if k.endswith(our_key_suffix) and isinstance(v, dict)
-                        ),
-                        None,
+                    other_channels_same_dir = any(
+                        other.channel_id != binding.channel_id
+                        and not getattr(other, "suspended", False)
+                        and getattr(other, "work_dir", None) == getattr(binding, "work_dir", None)
+                        for other in bindings
                     )
-                    if this_window_sm_sid and this_window_sm_sid != detected:
-                        detected_in_map = any(
-                            isinstance(v, dict) and v.get("session_id") == detected
-                            for v in session_map.values()
+                    if other_channels_same_dir:
+                        our_key_suffix = f":{binding.window_id}"
+                        this_window_sm_sid = next(
+                            (
+                                v.get("session_id", "")
+                                for k, v in session_map.items()
+                                if k.endswith(our_key_suffix) and isinstance(v, dict)
+                            ),
+                            None,
                         )
-                        if not detected_in_map:
-                            logger.warning(
-                                "Pane detection (mtime) for ch=%s (window %s): "
-                                "detected %s not in session_map "
-                                "(session_map assigns this window → %s) — "
-                                "likely cross-window mtime collision; deferring to session_map",
-                                binding.channel_id, binding.window_id, detected, this_window_sm_sid,
+                        if this_window_sm_sid and this_window_sm_sid != detected:
+                            detected_in_map = any(
+                                isinstance(v, dict) and v.get("session_id") == detected
+                                for v in session_map.values()
                             )
-                            mtime_uncertain.add(binding.channel_id)
-                            continue  # skip pane_resolved.add too
+                            if not detected_in_map:
+                                logger.warning(
+                                    "Pane detection (mtime) for ch=%s (window %s): "
+                                    "detected %s not in session_map "
+                                    "(session_map assigns this window → %s) — "
+                                    "shared project dir, likely cross-window mtime collision; "
+                                    "deferring to session_map",
+                                    binding.channel_id, binding.window_id, detected, this_window_sm_sid,
+                                )
+                                mtime_uncertain.add(binding.channel_id)
+                                continue  # skip pane_resolved.add too
 
                 if detected != binding.cli_session_id:
                     # Guard 1: don't steal a session owned by a channel on a DIFFERENT window
