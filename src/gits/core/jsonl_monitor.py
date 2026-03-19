@@ -300,6 +300,11 @@ class JsonlMonitor:
         # Read session_map once up front so pane detection can consult it.
         session_map = self._read_session_map()
 
+        # Track bindings whose session was confirmed by pane detection this
+        # cycle.  These must be excluded from the session_map fallback so the
+        # two steps do not fight each other in a ping-pong loop.
+        pane_resolved: set[str] = set()  # channel_ids resolved by pane
+
         # ── Step 1: pane-based session detection (authoritative) ─────────────
         if self._tmux is not None:
             for binding in bindings:
@@ -366,6 +371,10 @@ class JsonlMonitor:
                         binding.channel_id, detected
                     )
                     binding.cli_session_id = detected
+                # Mark as pane-resolved whenever pane detection succeeded
+                # (even if detected == current), so session_map doesn't override.
+                if detected is not None:
+                    pane_resolved.add(binding.channel_id)
 
         # ── Step 2: session_map.json fallback ─────────────────────────────────
         # Try to pick up session IDs from session_map.json.
@@ -376,6 +385,9 @@ class JsonlMonitor:
             session_map = self._read_session_map()
         if session_map:
             for binding in bindings:
+                # Skip bindings already resolved by pane detection this cycle.
+                if binding.channel_id in pane_resolved:
+                    continue
                 if not binding.window_id:
                     continue
                 # Find matching entry by window_id suffix
@@ -388,66 +400,27 @@ class JsonlMonitor:
                     continue
                 new_sid = entry.get("session_id", "")
                 if new_sid and new_sid != binding.cli_session_id:
-                    # Decide whether to follow the new session from session_map.
-                    #
-                    # The hook is authoritative: it only fires for interactive
-                    # sessions (non-interactive `claude -p` is filtered out).
-                    # So when session_map explicitly assigns a new session to this
-                    # window we should follow it — UNLESS the current session was
-                    # itself legitimately hook-assigned AND is still the current
-                    # session_map entry for this window (meaning the hook hasn't
-                    # moved on yet, so the new entry came from somewhere else).
-                    #
-                    # "Legitimately assigned" = the current session_id is the
-                    # current session_map entry for THIS window.  If it was set
-                    # by pane detection mtime or is stale in session_map, it is
-                    # NOT legitimately assigned and the guard must not protect it.
+                    # Only follow a new session if the current session file is
+                    # truly gone.  A file that still exists on disk means the
+                    # session is still valid (possibly just idle), or a background
+                    # process (e.g. an orchestrator job that inherited TMUX_PANE)
+                    # wrote a competing entry into session_map.
+                    # Pane-resolved bindings are already skipped above so this
+                    # guard only applies when tmux/pane detection is unavailable.
                     if binding.cli_session_id:
-                        our_key_suffix = f":{binding.window_id}"
-
-                        # Check if current session is stolen (appears in session_map
-                        # under a DIFFERENT window) — always follow session_map then.
-                        stolen = any(
-                            not k.endswith(our_key_suffix)
-                            and isinstance(v, dict)
-                            and v.get("session_id") == binding.cli_session_id
-                            for k, v in session_map.items()
-                        )
-                        if stolen:
-                            logger.warning(
-                                "Stolen session detected for channel %s (window %s): "
-                                "session %s belongs to a different window per session_map "
-                                "— correcting to %s",
+                        current_path = self._find_jsonl_file(binding)
+                        if current_path is not None:
+                            logger.info(
+                                "Skipping session_id update for channel %s "
+                                "(window %s): current session %s file still exists "
+                                "[file=%s, proposed_new=%s]",
                                 binding.channel_id,
                                 binding.window_id,
                                 binding.cli_session_id,
+                                current_path.name,
                                 new_sid,
                             )
-                        else:
-                            # Only guard if current session is the CURRENT
-                            # session_map entry for this window — i.e. hook
-                            # legitimately put it here and hasn't moved on.
-                            # If it isn't in session_map for this window it was
-                            # set by pane mtime (unreliable) and must not block.
-                            current_is_hook_assigned = any(
-                                k.endswith(our_key_suffix)
-                                and isinstance(v, dict)
-                                and v.get("session_id") == binding.cli_session_id
-                                for k, v in session_map.items()
-                            )
-                            if current_is_hook_assigned:
-                                # Hook explicitly assigned the current session to
-                                # this window and hasn't changed it yet — keep it.
-                                logger.info(
-                                    "Skipping session_id update for channel %s "
-                                    "(window %s): current session %s is the current "
-                                    "hook-assigned session [proposed_new=%s]",
-                                    binding.channel_id,
-                                    binding.window_id,
-                                    binding.cli_session_id,
-                                    new_sid,
-                                )
-                                continue
+                            continue
 
                     old_path = self._find_jsonl_file(binding)
                     try:
