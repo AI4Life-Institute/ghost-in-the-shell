@@ -1397,25 +1397,39 @@ class TestOpenCodeMonitoring:
 
 
 class TestHookNonInteractiveFilter:
-    """G group: hook skips session_map update for non-interactive CLI invocations."""
+    """G group: hook skips session_map update for non-interactive CLI invocations.
 
-    def _run_hook_with_proc(self, tmp_path, comm: str, cmdline_args: list[bytes]) -> bool:
-        """Simulate the hook ancestor walk.
+    Tests call _cmd_hook() directly so that import-scoping bugs (e.g.
+    UnboundLocalError from a late `from pathlib import Path`) are caught at
+    the same time as the filter logic.
+    """
 
-        Returns True if the hook would return early (skip session_map update),
-        False if it would proceed.
+    SESSION_ID = "aaaabbbb-cccc-dddd-eeee-ffffffffffff"
+
+    def _run_hook(self, tmp_path, comm: str, cmdline_args: list[bytes]) -> bool:
+        """Call _cmd_hook() for real with mocked /proc and tmux.
+
+        Returns True  → hook returned early (session_map NOT written).
+        Returns False → hook ran to completion (session_map written).
         """
-        import sys
+        import argparse
+        import io
         from pathlib import Path
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
 
-        # Simulate: current pid=100, parent=200 (shell), grandparent=300 (cli)
+        from gits.__main__ import _cmd_hook  # real function — catches import bugs
+
+        map_file = tmp_path / ".gits" / "session_map.json"
+
+        # Simulate: current pid=100 → shell (200) → cli (300)
         proc_data: dict[str, str | bytes] = {
             "/proc/100/status": "PPid:\t200\n",
             "/proc/200/status": "PPid:\t300\n",
             "/proc/200/comm": "sh\n",
             "/proc/300/comm": f"{comm}\n",
-            "/proc/300/cmdline": b"\x00".join(c for c in [comm.encode()] + cmdline_args) + b"\x00",
+            "/proc/300/cmdline": b"\x00".join(
+                [comm.encode()] + cmdline_args
+            ) + b"\x00",
         }
 
         def fake_read_text(self_path):
@@ -1430,78 +1444,54 @@ class TestHookNonInteractiveFilter:
             val = proc_data.get(str(self_path))
             if val is None:
                 raise FileNotFoundError(str(self_path))
-            if isinstance(val, str):
-                return val.encode()
-            return val
+            return val if isinstance(val, bytes) else val.encode()
+
+        tmux_result = MagicMock()
+        tmux_result.stdout = "gits:@99\n"
+
+        payload = json.dumps({
+            "session_id": self.SESSION_ID,
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+        })
+
+        args = argparse.Namespace(
+            install=False,
+            install_copilot=False,
+            install_codex=False,
+            install_opencode=False,
+        )
 
         with patch.object(Path, "read_text", fake_read_text), \
              patch.object(Path, "read_bytes", fake_read_bytes), \
-             patch("os.getpid", return_value=100):
-            # Import and extract just the ancestor-walk logic
-            # We test by running the logic inline
-            import os
+             patch.object(Path, "home", staticmethod(lambda: tmp_path)), \
+             patch("os.getpid", return_value=100), \
+             patch("sys.stdin", io.StringIO(payload)), \
+             patch("subprocess.run", return_value=tmux_result):
+            _cmd_hook(args)
 
-            pid = os.getpid()
-            visited: set[int] = set()
-            claude_ancestor_pid = None
-            codex_ancestor_pid = None
-
-            while pid > 1 and pid not in visited:
-                visited.add(pid)
-                try:
-                    status_lines = Path(f"/proc/{pid}/status").read_text().splitlines()
-                    ppid_line = next(
-                        line for line in status_lines if line.startswith("PPid:")
-                    )
-                    ppid = int(ppid_line.split()[1])
-                except (FileNotFoundError, StopIteration):
-                    break
-                try:
-                    c = Path(f"/proc/{ppid}/comm").read_text().strip()
-                    if c == "claude":
-                        claude_ancestor_pid = ppid
-                        break
-                    if c == "codex":
-                        codex_ancestor_pid = ppid
-                        break
-                except FileNotFoundError:
-                    pass
-                pid = ppid
-
-            if claude_ancestor_pid is not None:
-                raw = Path(f"/proc/{claude_ancestor_pid}/cmdline").read_bytes()
-                args = raw.split(b"\x00")
-                if any(a in (b"-p", b"--print") for a in args):
-                    return True  # would return early
-
-            if codex_ancestor_pid is not None:
-                raw = Path(f"/proc/{codex_ancestor_pid}/cmdline").read_bytes()
-                args = raw.split(b"\x00")
-                if any(a in (b"-q", b"--quiet") for a in args):
-                    return True  # would return early
-
-            return False  # would proceed normally
+        return not map_file.exists()  # True = returned early (no write)
 
     def test_g1_claude_p_returns_early(self, tmp_path):
         """G1: claude -p ancestor → hook skips session_map update."""
-        assert self._run_hook_with_proc(tmp_path, "claude", [b"-p", b"some prompt"]) is True
+        assert self._run_hook(tmp_path, "claude", [b"-p", b"some prompt"]) is True
 
     def test_g2_codex_q_returns_early(self, tmp_path):
         """G2: codex -q ancestor → hook skips session_map update."""
-        assert self._run_hook_with_proc(tmp_path, "codex", [b"-q", b"task text"]) is True
+        assert self._run_hook(tmp_path, "codex", [b"-q", b"task text"]) is True
 
     def test_g3_claude_print_returns_early(self, tmp_path):
         """G3: claude --print ancestor → hook skips session_map update."""
-        assert self._run_hook_with_proc(tmp_path, "claude", [b"--print", b"query"]) is True
+        assert self._run_hook(tmp_path, "claude", [b"--print", b"query"]) is True
 
     def test_g4_codex_quiet_returns_early(self, tmp_path):
         """G4: codex --quiet ancestor → hook skips session_map update."""
-        assert self._run_hook_with_proc(tmp_path, "codex", [b"--quiet"]) is True
+        assert self._run_hook(tmp_path, "codex", [b"--quiet"]) is True
 
     def test_interactive_claude_proceeds(self, tmp_path):
-        """Interactive claude (no -p/--print) → hook proceeds normally."""
-        assert self._run_hook_with_proc(tmp_path, "claude", []) is False
+        """Interactive claude (no -p/--print) → hook writes session_map."""
+        assert self._run_hook(tmp_path, "claude", []) is False
 
     def test_interactive_codex_proceeds(self, tmp_path):
-        """Interactive codex (no -q/--quiet) → hook proceeds normally."""
-        assert self._run_hook_with_proc(tmp_path, "codex", []) is False
+        """Interactive codex (no -q/--quiet) → hook writes session_map."""
+        assert self._run_hook(tmp_path, "codex", []) is False
