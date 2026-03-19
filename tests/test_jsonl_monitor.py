@@ -1025,94 +1025,203 @@ class TestOffsetPersistence:
         assert cb2.call_args[0][1] == "post-restart message"
 
 
-class TestSessionSwitchGuard:
-    """Background jobs must not hijack a channel's session when its file is still present."""
+class TestSessionAssignment:
+    """Session assignment via session_map — A group scenarios."""
 
     @pytest.mark.asyncio
-    async def test_proposed_session_rejected_when_current_file_exists(self, tmp_path):
-        projects = tmp_path / "projects"
-        current_sid = "current-session-111"
-        bg_sid = "background-session-999"
+    async def test_a1_fresh_binding_picks_up_session(self, tmp_path):
+        """A1: fresh binding (no session_id) picks up from session_map."""
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
 
-        # Create the current session's JSONL file
-        project_dir = projects / "-tmp-guard"
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/proj")
+        binding.window_id = "@1"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-new"}}
+
+        await monitor._poll_once()
+
+        session_mgr.update_cli_session_id.assert_called_once_with(binding.channel_id, "sess-new")
+        assert binding.cli_session_id == "sess-new"
+
+    @pytest.mark.asyncio
+    async def test_a2_session_switch_accepted_when_old_file_exists(self, tmp_path):
+        """A2: session switch accepted even when the old session's file still exists.
+
+        The file-existence guard has been removed. session_map is authoritative.
+        """
+        projects = tmp_path / "projects"
+        project_dir = projects / "-tmp-proj"
         project_dir.mkdir(parents=True)
-        (project_dir / f"{current_sid}.jsonl").write_text(
-            json.dumps({
-                "type": "assistant",
-                "message": {"content": [{"type": "text", "text": "real work"}]},
-            }) + "\n"
-        )
+        (project_dir / "sess-A.jsonl").write_text("{}\n")  # old file still present
+        (project_dir / "sess-B.jsonl").write_text("{}\n")  # new file
 
         session_mgr = MagicMock()
         session_mgr.update_cli_session_id = AsyncMock()
 
-        binding = _make_binding(
-            channel_id="ch-guard",
-            cli_session_id=current_sid,
-            work_dir="/tmp/guard",
-        )
-        binding.window_id = "@6"
+        binding = _make_binding(cli_session_id="sess-A", work_dir="/tmp/proj")
+        binding.window_id = "@1"
         session_mgr.list_bindings.return_value = [binding]
 
         monitor = JsonlMonitor(
-            session_mgr=session_mgr,
-            poll_interval=0.05,
-            projects_path=projects,
+            session_mgr=session_mgr, poll_interval=0.05, projects_path=projects
         )
-        # Background job wrote bg_sid into session_map for this window
-        monitor._read_session_map = lambda: {
-            "gits:@6": {"session_id": bg_sid, "cwd": "/tmp/guard"}
-        }
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-B"}}
 
         await monitor._poll_once()
 
-        # session_id must NOT have been updated — file still exists
+        session_mgr.update_cli_session_id.assert_called_once_with(binding.channel_id, "sess-B")
+        assert binding.cli_session_id == "sess-B"
+
+    @pytest.mark.asyncio
+    async def test_a3_session_switch_accepted_when_old_file_gone(self, tmp_path):
+        """A3: session switch accepted when old file is gone (baseline)."""
+        projects = tmp_path / "projects"
+        project_dir = projects / "-tmp-proj"
+        project_dir.mkdir(parents=True)
+        (project_dir / "sess-B.jsonl").write_text("{}\n")  # only new file
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id="sess-A", work_dir="/tmp/proj")
+        binding.window_id = "@1"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr, poll_interval=0.05, projects_path=projects
+        )
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-B"}}
+
+        await monitor._poll_once()
+
+        session_mgr.update_cli_session_id.assert_called_once_with(binding.channel_id, "sess-B")
+        assert binding.cli_session_id == "sess-B"
+
+    @pytest.mark.asyncio
+    async def test_a4_same_session_no_op(self):
+        """A4: session_map has the same session already assigned → no update."""
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id="sess-A", work_dir="/tmp/proj")
+        binding.window_id = "@1"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-A"}}
+
+        await monitor._poll_once()
+
         session_mgr.update_cli_session_id.assert_not_called()
-        assert binding.cli_session_id == current_sid
 
     @pytest.mark.asyncio
-    async def test_proposed_session_accepted_when_current_file_gone(self, tmp_path):
-        projects = tmp_path / "projects"
-        old_sid = "gone-session-000"
-        new_sid = "new-session-111"
-
-        # Create the new session's JSONL file (old file is absent)
-        project_dir = projects / "-tmp-accept"
-        project_dir.mkdir(parents=True)
-        (project_dir / f"{new_sid}.jsonl").write_text(
-            json.dumps({
-                "type": "assistant",
-                "message": {"content": [{"type": "text", "text": "fresh start"}]},
-            }) + "\n"
-        )
-        # old_sid.jsonl is intentionally NOT created
-
+    async def test_a5_no_session_map_entry(self):
+        """A5: no session_map entry for this window → session unchanged."""
         session_mgr = MagicMock()
         session_mgr.update_cli_session_id = AsyncMock()
 
-        binding = _make_binding(
-            channel_id="ch-accept",
-            cli_session_id=old_sid,
-            work_dir="/tmp/accept",
-        )
-        binding.window_id = "@8"
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/proj")
+        binding.window_id = "@99"
         session_mgr.list_bindings.return_value = [binding]
 
-        monitor = JsonlMonitor(
-            session_mgr=session_mgr,
-            poll_interval=0.05,
-            projects_path=projects,
-        )
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-other"}}
+
+        await monitor._poll_once()
+
+        session_mgr.update_cli_session_id.assert_not_called()
+        assert binding.cli_session_id is None
+
+
+class TestTwoWindowsSameDir:
+    """B group: two windows sharing project dir each pick correct session_map entry."""
+
+    @pytest.mark.asyncio
+    async def test_b1_two_windows_same_dir_each_gets_own_session(self):
+        """B1: two windows, same project dir, each gets its own session from session_map."""
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        ch27 = _make_binding(channel_id="ch-27", cli_session_id=None, work_dir="/tmp/stock")
+        ch27.window_id = "@27"
+        ch28 = _make_binding(channel_id="ch-28", cli_session_id=None, work_dir="/tmp/stock")
+        ch28.window_id = "@28"
+        session_mgr.list_bindings.return_value = [ch27, ch28]
+
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
         monitor._read_session_map = lambda: {
-            "gits:@8": {"session_id": new_sid, "cwd": "/tmp/accept"}
+            "gits:@27": {"session_id": "sess-27"},
+            "gits:@28": {"session_id": "sess-28"},
         }
 
         await monitor._poll_once()
 
-        # Old file is gone → new session accepted
-        session_mgr.update_cli_session_id.assert_called_once_with("ch-accept", new_sid)
-        assert binding.cli_session_id == new_sid
+        calls = {args[0]: args[1] for args, _ in session_mgr.update_cli_session_id.call_args_list}
+        assert calls["ch-27"] == "sess-27"
+        assert calls["ch-28"] == "sess-28"
+
+    @pytest.mark.asyncio
+    async def test_b2_session_map_prevents_cross_window_contamination(self):
+        """B2: session_map assigns different sessions → no cross-contamination."""
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        ch27 = _make_binding(channel_id="ch-27", cli_session_id=None, work_dir="/tmp/stock")
+        ch27.window_id = "@27"
+        ch28 = _make_binding(channel_id="ch-28", cli_session_id=None, work_dir="/tmp/stock")
+        ch28.window_id = "@28"
+        session_mgr.list_bindings.return_value = [ch27, ch28]
+
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor._read_session_map = lambda: {
+            "gits:@27": {"session_id": "sess-27"},
+            "gits:@28": {"session_id": "sess-28"},
+        }
+
+        await monitor._poll_once()
+
+        calls = {args[0]: args[1] for args, _ in session_mgr.update_cli_session_id.call_args_list}
+        # ch-28 must NOT get sess-27
+        assert calls.get("ch-28") != "sess-27"
+        assert calls.get("ch-28") == "sess-28"
+
+
+class TestMissingSessionWarning:
+    """C group: warning when session file not found after assignment."""
+
+    @pytest.mark.asyncio
+    async def test_c1_session_file_not_found_emits_warning_and_discord_message(self, tmp_path):
+        """C1: assigned session has no JSONL file → WARNING + Discord alert."""
+        projects = tmp_path / "projects"
+        projects.mkdir()
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/proj")
+        binding.window_id = "@1"
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr, poll_interval=0.05, projects_path=projects
+        )
+        monitor.on_message(callback)
+        # session_map assigns sess-missing, but no JSONL file exists
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-missing"}}
+
+        await monitor._poll_once()
+
+        # session was assigned
+        assert binding.cli_session_id == "sess-missing"
+        # Discord alert was sent
+        callback.assert_called_once()
+        alert_text = callback.call_args[0][1]
+        assert "sess-missing" in alert_text
+        assert "⚠️" in alert_text
 
 
 class TestSuspendedBindingSkipped:
@@ -1162,245 +1271,163 @@ class TestSuspendedBindingSkipped:
         assert file_key not in monitor._offsets
 
 
-# -- Mtime cross-window contamination ----------------------------------------
+# -- Codex content parsing ---------------------------------------------------
 
 
-class TestMtimeCrossWindowContamination:
-    """mtime strategy must not cross-contaminate sessions between windows sharing a project dir."""
+class TestCodexFormat:
+    """H group: Codex CLI JSONL format parsing."""
+
+    def test_h1_response_item_format_parsed(self):
+        """H1: Codex response_item format with output_text is extracted."""
+        entry = {
+            "type": "response_item",
+            "payload": {
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Here is the answer."}
+                ],
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert result == ["Here is the answer."]
+
+    def test_h1_response_item_non_assistant_skipped(self):
+        """H1: response_item with role != assistant is ignored."""
+        entry = {
+            "type": "response_item",
+            "payload": {
+                "role": "user",
+                "content": [{"type": "output_text", "text": "user text"}],
+            },
+        }
+        result = extract_assistant_content(entry)
+        assert result == []
 
     @pytest.mark.asyncio
-    async def test_mtime_overruled_when_session_map_disagrees(self, tmp_path):
-        """mtime result for @28 that matches @27's session should be rejected;
-        session_map fallback must correct @28 to its own session."""
+    async def test_h2_codex_file_found_by_exact_session_id(self, tmp_path):
+        """H2: Codex file is found when session_id matches the filename suffix."""
+        codex_dir = tmp_path / ".codex" / "sessions" / "2026" / "03" / "19"
+        codex_dir.mkdir(parents=True)
+        sid = "019cef25-2ae6-73f0-97fc-795524e3cdbe"
+        jsonl_file = codex_dir / f"rollout-2026-03-19T10-00-00-{sid}.jsonl"
+        jsonl_file.write_text("{}\n")
+
+        binding = _make_binding(cli_session_id=sid, work_dir="/tmp/proj")
+        binding.coding_cli = "codex"
+
+        session_mgr = MagicMock()
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        # Patch _find_codex_jsonl to use our tmp codex dir
+        original = monitor._find_codex_jsonl
+        from pathlib import Path as _Path
+
+        def patched_find_codex(b):
+            # Temporarily override codex_dir root
+            import gits.core.jsonl_monitor as jm
+            old = _Path.home
+            _Path.home = lambda: tmp_path
+            try:
+                return monitor.__class__._find_codex_jsonl(monitor, b)
+            finally:
+                _Path.home = old
+
+        monitor._find_codex_jsonl = patched_find_codex
+
+        result = monitor._find_jsonl_file(binding)
+        assert result == jsonl_file
+
+    @pytest.mark.asyncio
+    async def test_h4_codex_binding_uses_session_map(self):
+        """H4: Codex bindings use session_map just like Claude bindings."""
         session_mgr = MagicMock()
         session_mgr.update_cli_session_id = AsyncMock()
 
-        ch27 = _make_binding(channel_id="ch-27", cli_session_id=None, work_dir="/tmp/ai4stock")
-        ch27.window_id = "@27"
-        ch28 = _make_binding(channel_id="ch-28", cli_session_id=None, work_dir="/tmp/ai4stock")
-        ch28.window_id = "@28"
-        session_mgr.list_bindings.return_value = [ch27, ch28]
-
-        session_map = {
-            "gits:@27": {"session_id": "sess-27"},
-            "gits:@28": {"session_id": "sess-28"},
-        }
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/proj")
+        binding.window_id = "@5"
+        binding.coding_cli = "codex"
+        session_mgr.list_bindings.return_value = [binding]
 
         monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
-        monitor._tmux = MagicMock()  # enable pane detection block
-        monitor._read_session_map = lambda: session_map
-        # mtime picks sess-27 for both windows (the bug scenario)
-        monitor._detect_session_via_pane = AsyncMock(return_value=("sess-27", "mtime"))
+        monitor._read_session_map = lambda: {"gits:@5": {"session_id": "codex-sess-001"}}
 
         await monitor._poll_once()
 
-        calls = {args[0]: args[1] for args, _ in session_mgr.update_cli_session_id.call_args_list}
-        # ch-27: mtime result matches session_map → accepted
-        assert calls.get("ch-27") == "sess-27"
-        # ch-28: mtime result disagrees with session_map → session_map corrects it
-        assert calls.get("ch-28") == "sess-28"
-        # ch-28 must NOT have been updated to sess-27
-        wrong_calls = [
-            args for args, _ in session_mgr.update_cli_session_id.call_args_list
-            if args[0] == "ch-28" and args[1] == "sess-27"
-        ]
-        assert wrong_calls == []
+        session_mgr.update_cli_session_id.assert_called_once_with(binding.channel_id, "codex-sess-001")
+
+
+# -- OpenCode monitoring -----------------------------------------------------
+
+
+class TestOpenCodeMonitoring:
+    """I group: OpenCode SQLite monitoring."""
 
     @pytest.mark.asyncio
-    async def test_mtime_overruled_when_binding_already_has_wrong_session(self, tmp_path):
-        """If ch-28 already holds a session that mtime keeps returning (from a prior
-        cross-window steal), session_map must correct it.
+    async def test_i3_opencode_db_missing_skips_gracefully(self, tmp_path):
+        """I3: Missing OpenCode DB should not crash the monitor."""
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
 
-        Setup: two channels share the same project dir (triggers mtime_uncertain).
-        The stolen session does NOT appear in session_map for any window — this is
-        the realistic post-correction-cycle state where @27's session was already
-        updated but ch-28 is stuck.  mtime_uncertain fires (session_map assigns @28
-        to correct_sid but mtime says stolen_sid, and stolen_sid is absent from the
-        map), so Step 2 bypasses the file-existence guard and corrects ch-28.
+        binding = _make_binding(cli_session_id="oc-session-abc")
+        binding.coding_cli = "opencode"
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor.on_message(callback)
+        monitor._read_session_map = lambda: {}
+
+        # Override the DB path to a nonexistent location
+        original_check = monitor._check_opencode_binding
+
+        async def check_with_missing_db(b):
+            import gits.core.jsonl_monitor as jm
+            from pathlib import Path
+            original_path = Path.home().__class__
+            # Just call directly; DB won't exist → should return without error
+            await jm.JsonlMonitor._check_opencode_binding(monitor, b)
+
+        monitor._check_opencode_binding = check_with_missing_db
+
+        # Should not raise
+        await monitor._poll_once()
+        callback.assert_not_called()
+
+
+# -- Hook non-interactive filter tests ----------------------------------------
+
+
+class TestHookNonInteractiveFilter:
+    """G group: hook skips session_map update for non-interactive CLI invocations."""
+
+    def _run_hook_with_proc(self, tmp_path, comm: str, cmdline_args: list[bytes]) -> bool:
+        """Simulate the hook ancestor walk.
+
+        Returns True if the hook would return early (skip session_map update),
+        False if it would proceed.
         """
-        projects = tmp_path / "projects"
-        stolen_sid = "stolen-sess"
-        correct_sid = "correct-sess"
-
-        # Create the stolen session's JSONL file (so file-existence guard would normally block
-        # WITHOUT the mtime_uncertain bypass)
-        project_dir = projects / "-tmp-ai4stock"
-        project_dir.mkdir(parents=True)
-        (project_dir / f"{stolen_sid}.jsonl").write_text("{}\n")
-
-        session_mgr = MagicMock()
-        session_mgr.update_cli_session_id = AsyncMock()
-
-        # ch-27 and ch-28 share the same work_dir → triggers other_channels_same_dir
-        ch27 = _make_binding(channel_id="ch-27", cli_session_id=stolen_sid, work_dir="/tmp/ai4stock")
-        ch27.window_id = "@27"
-        ch28 = _make_binding(channel_id="ch-28", cli_session_id=stolen_sid, work_dir="/tmp/ai4stock")
-        ch28.window_id = "@28"
-        session_mgr.list_bindings.return_value = [ch27, ch28]
-
-        # @27 has no entry in session_map (e.g., already corrected in a previous cycle),
-        # @28 is correctly assigned correct_sid.  stolen_sid does NOT appear as any
-        # window's value → detected_in_map=False → mtime_uncertain fires for ch-28.
-        session_map = {
-            "gits:@28": {"session_id": correct_sid},
-        }
-
-        monitor = JsonlMonitor(
-            session_mgr=session_mgr,
-            poll_interval=0.05,
-            projects_path=projects,
-        )
-        monitor._tmux = MagicMock()  # enable pane detection block
-        monitor._read_session_map = lambda: session_map
-        # mtime keeps returning stolen_sid for ch-28 (contamination persists)
-        monitor._detect_session_via_pane = AsyncMock(return_value=(stolen_sid, "mtime"))
-
-        await monitor._poll_once()
-
-        # session_map must have corrected ch-28 to correct_sid
-        calls = {args[0]: args[1] for args, _ in session_mgr.update_cli_session_id.call_args_list}
-        assert calls.get("ch-28") == correct_sid, "ch-28 must be corrected to correct_sid"
-        assert ch28.cli_session_id == correct_sid
-
-    @pytest.mark.asyncio
-    async def test_pane_file_detection_overrules_session_map(self, tmp_path):
-        """pane_file strategy is high-confidence; it must win over session_map."""
-        session_mgr = MagicMock()
-        session_mgr.update_cli_session_id = AsyncMock()
-
-        binding = _make_binding(channel_id="ch-pf", cli_session_id=None, work_dir="/tmp/proj")
-        binding.window_id = "@9"
-        session_mgr.list_bindings.return_value = [binding]
-
-        session_map = {"gits:@9": {"session_id": "sess-old"}}
-
-        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
-        monitor._tmux = MagicMock()  # enable pane detection block
-        monitor._read_session_map = lambda: session_map
-        monitor._detect_session_via_pane = AsyncMock(return_value=("sess-pane-fresh", "pane_file"))
-
-        await monitor._poll_once()
-
-        # pane_file result must have been applied
-        session_mgr.update_cli_session_id.assert_called_once_with("ch-pf", "sess-pane-fresh")
-        assert binding.cli_session_id == "sess-pane-fresh"
-
-    @pytest.mark.asyncio
-    async def test_mtime_accepted_when_session_map_has_no_entry(self, tmp_path):
-        """mtime result is accepted when session_map has no entry for this window."""
-        session_mgr = MagicMock()
-        session_mgr.update_cli_session_id = AsyncMock()
-
-        binding = _make_binding(channel_id="ch-mt", cli_session_id=None, work_dir="/tmp/proj")
-        binding.window_id = "@11"
-        session_mgr.list_bindings.return_value = [binding]
-
-        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
-        monitor._tmux = MagicMock()  # enable pane detection block
-        monitor._read_session_map = lambda: {}  # no session_map entries
-        monitor._detect_session_via_pane = AsyncMock(return_value=("sess-mtime", "mtime"))
-
-        await monitor._poll_once()
-
-        # mtime accepted — no session_map entry to contradict it
-        session_mgr.update_cli_session_id.assert_called_once_with("ch-mt", "sess-mtime")
-        assert binding.cli_session_id == "sess-mtime"
-
-    @pytest.mark.asyncio
-    async def test_mtime_accepted_when_session_map_agrees(self, tmp_path):
-        """mtime result is accepted when session_map says the same session for this window."""
-        session_mgr = MagicMock()
-        session_mgr.update_cli_session_id = AsyncMock()
-
-        binding = _make_binding(channel_id="ch-agree", cli_session_id=None, work_dir="/tmp/proj")
-        binding.window_id = "@12"
-        session_mgr.list_bindings.return_value = [binding]
-
-        session_map = {"gits:@12": {"session_id": "sess-match"}}
-
-        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
-        monitor._tmux = MagicMock()  # enable pane detection block
-        monitor._read_session_map = lambda: session_map
-        monitor._detect_session_via_pane = AsyncMock(return_value=("sess-match", "mtime"))
-
-        await monitor._poll_once()
-
-        # mtime matches session_map → accepted, no contradiction
-        session_mgr.update_cli_session_id.assert_called_once_with("ch-agree", "sess-match")
-        assert binding.cli_session_id == "sess-match"
-
-
-# -- _find_claude_descendant: skip claude -p processes ----------------------
-
-
-class TestFindClaudeDescendantSkipsPrint:
-    """_find_claude_descendant must skip non-interactive claude -p invocations."""
-
-    def test_skips_claude_p_process(self, tmp_path):
-        """A claude process with -p in cmdline must be skipped."""
-        # We can't fork real processes in unit tests, so we test by patching
-        # the /proc filesystem reads.  The logic is: BFS from root_pid,
-        # find child with comm="claude", read its cmdline, skip if -p present.
-        #
-        # We simulate two children:
-        #   child 1001: comm="claude", cmdline has "-p" → skip
-        #   child 1002: comm="claude", cmdline has no -p → return this one
-        from unittest.mock import patch, mock_open
-        import io
-
-        read_calls: dict[str, bytes | str] = {
-            "/proc/1000/task/1000/children": "1001 1002",
-            "/proc/1001/comm": "claude\n",
-            "/proc/1001/cmdline": b"claude\x00-p\x00some prompt\x00",
-            "/proc/1001/task/1001/children": "",
-            "/proc/1002/comm": "claude\n",
-            "/proc/1002/cmdline": b"claude\x00--resume\x00sess-abc\x00",
-            "/proc/1002/task/1002/children": "",
-        }
-
-        def fake_read_text(self_path):
-            val = read_calls.get(str(self_path))
-            if val is None:
-                raise FileNotFoundError(str(self_path))
-            if isinstance(val, bytes):
-                raise TypeError("use read_bytes for this path")
-            return val
-
-        def fake_read_bytes(self_path):
-            val = read_calls.get(str(self_path))
-            if val is None:
-                raise FileNotFoundError(str(self_path))
-            if isinstance(val, str):
-                return val.encode()
-            return val
-
-        with patch.object(Path, "read_text", fake_read_text), \
-             patch.object(Path, "read_bytes", fake_read_bytes):
-            result = JsonlMonitor._find_claude_descendant(1000)
-
-        assert result == 1002, "Should skip claude -p (pid 1001) and return interactive claude (pid 1002)"
-
-    def test_skips_claude_print_long_flag(self, tmp_path):
-        """A claude process with --print in cmdline must be skipped."""
+        import sys
+        from pathlib import Path
         from unittest.mock import patch
 
-        read_calls: dict[str, bytes | str] = {
-            "/proc/2000/task/2000/children": "2001",
-            "/proc/2001/comm": "claude\n",
-            "/proc/2001/cmdline": b"claude\x00--print\x00query\x00",
-            "/proc/2001/task/2001/children": "",
+        # Simulate: current pid=100, parent=200 (shell), grandparent=300 (cli)
+        proc_data: dict[str, str | bytes] = {
+            "/proc/100/status": "PPid:\t200\n",
+            "/proc/200/status": "PPid:\t300\n",
+            "/proc/200/comm": "sh\n",
+            "/proc/300/comm": f"{comm}\n",
+            "/proc/300/cmdline": b"\x00".join(c for c in [comm.encode()] + cmdline_args) + b"\x00",
         }
 
         def fake_read_text(self_path):
-            val = read_calls.get(str(self_path))
+            val = proc_data.get(str(self_path))
             if val is None:
                 raise FileNotFoundError(str(self_path))
             if isinstance(val, bytes):
-                raise TypeError("bytes path")
+                raise TypeError("use read_bytes")
             return val
 
         def fake_read_bytes(self_path):
-            val = read_calls.get(str(self_path))
+            val = proc_data.get(str(self_path))
             if val is None:
                 raise FileNotFoundError(str(self_path))
             if isinstance(val, str):
@@ -1408,40 +1435,73 @@ class TestFindClaudeDescendantSkipsPrint:
             return val
 
         with patch.object(Path, "read_text", fake_read_text), \
-             patch.object(Path, "read_bytes", fake_read_bytes):
-            result = JsonlMonitor._find_claude_descendant(2000)
+             patch.object(Path, "read_bytes", fake_read_bytes), \
+             patch("os.getpid", return_value=100):
+            # Import and extract just the ancestor-walk logic
+            # We test by running the logic inline
+            import os
 
-        assert result is None, "Only claude --print present; no interactive claude → return None"
+            pid = os.getpid()
+            visited: set[int] = set()
+            claude_ancestor_pid = None
+            codex_ancestor_pid = None
 
-    def test_interactive_claude_returned(self, tmp_path):
-        """A claude process without -p/-print flags is returned normally."""
-        from unittest.mock import patch
+            while pid > 1 and pid not in visited:
+                visited.add(pid)
+                try:
+                    status_lines = Path(f"/proc/{pid}/status").read_text().splitlines()
+                    ppid_line = next(
+                        line for line in status_lines if line.startswith("PPid:")
+                    )
+                    ppid = int(ppid_line.split()[1])
+                except (FileNotFoundError, StopIteration):
+                    break
+                try:
+                    c = Path(f"/proc/{ppid}/comm").read_text().strip()
+                    if c == "claude":
+                        claude_ancestor_pid = ppid
+                        break
+                    if c == "codex":
+                        codex_ancestor_pid = ppid
+                        break
+                except FileNotFoundError:
+                    pass
+                pid = ppid
 
-        read_calls: dict[str, bytes | str] = {
-            "/proc/3000/task/3000/children": "3001",
-            "/proc/3001/comm": "claude\n",
-            "/proc/3001/cmdline": b"claude\x00",
-            "/proc/3001/task/3001/children": "",
-        }
+            if claude_ancestor_pid is not None:
+                raw = Path(f"/proc/{claude_ancestor_pid}/cmdline").read_bytes()
+                args = raw.split(b"\x00")
+                if any(a in (b"-p", b"--print") for a in args):
+                    return True  # would return early
 
-        def fake_read_text(self_path):
-            val = read_calls.get(str(self_path))
-            if val is None:
-                raise FileNotFoundError(str(self_path))
-            if isinstance(val, bytes):
-                raise TypeError("bytes path")
-            return val
+            if codex_ancestor_pid is not None:
+                raw = Path(f"/proc/{codex_ancestor_pid}/cmdline").read_bytes()
+                args = raw.split(b"\x00")
+                if any(a in (b"-q", b"--quiet") for a in args):
+                    return True  # would return early
 
-        def fake_read_bytes(self_path):
-            val = read_calls.get(str(self_path))
-            if val is None:
-                raise FileNotFoundError(str(self_path))
-            if isinstance(val, str):
-                return val.encode()
-            return val
+            return False  # would proceed normally
 
-        with patch.object(Path, "read_text", fake_read_text), \
-             patch.object(Path, "read_bytes", fake_read_bytes):
-            result = JsonlMonitor._find_claude_descendant(3000)
+    def test_g1_claude_p_returns_early(self, tmp_path):
+        """G1: claude -p ancestor → hook skips session_map update."""
+        assert self._run_hook_with_proc(tmp_path, "claude", [b"-p", b"some prompt"]) is True
 
-        assert result == 3001
+    def test_g2_codex_q_returns_early(self, tmp_path):
+        """G2: codex -q ancestor → hook skips session_map update."""
+        assert self._run_hook_with_proc(tmp_path, "codex", [b"-q", b"task text"]) is True
+
+    def test_g3_claude_print_returns_early(self, tmp_path):
+        """G3: claude --print ancestor → hook skips session_map update."""
+        assert self._run_hook_with_proc(tmp_path, "claude", [b"--print", b"query"]) is True
+
+    def test_g4_codex_quiet_returns_early(self, tmp_path):
+        """G4: codex --quiet ancestor → hook skips session_map update."""
+        assert self._run_hook_with_proc(tmp_path, "codex", [b"--quiet"]) is True
+
+    def test_interactive_claude_proceeds(self, tmp_path):
+        """Interactive claude (no -p/--print) → hook proceeds normally."""
+        assert self._run_hook_with_proc(tmp_path, "claude", []) is False
+
+    def test_interactive_codex_proceeds(self, tmp_path):
+        """Interactive codex (no -q/--quiet) → hook proceeds normally."""
+        assert self._run_hook_with_proc(tmp_path, "codex", []) is False

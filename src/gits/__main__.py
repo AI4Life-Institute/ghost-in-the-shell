@@ -302,6 +302,7 @@ def _cmd_hook(args: argparse.Namespace) -> None:
         pid = os.getpid()
         visited: set[int] = set()
         claude_ancestor_pid: int | None = None
+        codex_ancestor_pid: int | None = None
         while pid > 1 and pid not in visited:
             visited.add(pid)
             try:
@@ -318,6 +319,9 @@ def _cmd_hook(args: argparse.Namespace) -> None:
                 if comm == "claude":
                     claude_ancestor_pid = ppid
                     break
+                if comm == "codex":
+                    codex_ancestor_pid = ppid
+                    break
             except OSError:
                 pass
             pid = ppid
@@ -333,6 +337,20 @@ def _cmd_hook(args: argparse.Namespace) -> None:
                     "Skipping session_map update: claude ancestor (pid=%d) is "
                     "running in non-interactive mode (-p/--print)",
                     claude_ancestor_pid,
+                )
+                return
+
+        if codex_ancestor_pid is not None:
+            cmdline_raw = Path(f"/proc/{codex_ancestor_pid}/cmdline").read_bytes()
+            cmdline_args = cmdline_raw.split(b"\x00")
+            is_noninteractive = any(
+                arg in (b"-q", b"--quiet") for arg in cmdline_args
+            )
+            if is_noninteractive:
+                logger.debug(
+                    "Skipping session_map update: codex ancestor (pid=%d) is "
+                    "running in non-interactive mode (-q/--quiet)",
+                    codex_ancestor_pid,
                 )
                 return
     except OSError:

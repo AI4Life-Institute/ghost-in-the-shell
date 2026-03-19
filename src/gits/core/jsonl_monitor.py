@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -214,13 +213,12 @@ class JsonlMonitor:
         poll_interval: float = 2.0,
         projects_path: Path | None = None,
         launcher: Any = None,
-        tmux: Any = None,
+        tmux: Any = None,  # kept for API compatibility; no longer used
     ):
         self._session_mgr = session_mgr
         self._poll_interval = poll_interval
         self._projects_path = projects_path or Path.home() / ".claude" / "projects"
         self._launcher = launcher  # optional; used to resolve alias session paths
-        self._tmux = tmux  # optional; used for pane-based session detection
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -287,160 +285,22 @@ class JsonlMonitor:
     async def _poll_once(self) -> None:
         """Single poll iteration: check all bindings for new JSONL content.
 
-        Session detection order (most authoritative first):
-        1. Pane-based: walk the tmux pane's process tree to find the foreground
-           claude process, read its cwd, and pick the most recently modified
-           JSONL in that project directory.  Works even when the hook never fires
-           (e.g. plain-text conversations with no tool calls).
-        2. session_map.json: hook-written fallback for bindings without a
-           window_id or when tmux is not available.
+        Session assignment uses session_map.json as the sole authoritative
+        source.  The gits hook writes to this file on each SessionStart event,
+        filtering out non-interactive (one-shot) invocations via ancestor walk.
         """
         bindings = self._session_mgr.list_bindings()
-
-        # Read session_map once up front so pane detection can consult it.
         session_map = self._read_session_map()
 
-        # Track bindings whose session was confirmed by pane detection this
-        # cycle.  These must be excluded from the session_map fallback so the
-        # two steps do not fight each other in a ping-pong loop.
-        pane_resolved: set[str] = set()  # channel_ids resolved by pane
-
-        # Bindings where pane detection returned a session that is unknown to
-        # session_map while session_map has an explicit entry for this window.
-        # This typically means the mtime fallback grabbed a neighbour window's
-        # open session (both windows share the same project dir).  These
-        # channels must NOT be added to pane_resolved so that the session_map
-        # fallback can correct them, and the file-existence guard is bypassed
-        # for them because the "current" file may belong to the other window.
-        mtime_uncertain: set[str] = set()
-
-        # ── Step 1: pane-based session detection (authoritative) ─────────────
-        if self._tmux is not None:
-            for binding in bindings:
-                if not binding.window_id:
-                    continue
-                if getattr(binding, "suspended", False):
-                    continue
-                cli = getattr(binding, "coding_cli", "claude")
-                if cli != "claude":
-                    continue
-                try:
-                    detected, strategy = await self._detect_session_via_pane(binding)
-                except Exception:
-                    logger.debug(
-                        "Pane session detection failed for ch=%s window=%s",
-                        binding.channel_id, binding.window_id, exc_info=True,
-                    )
-                    detected, strategy = None, None
-
-                if detected is None:
-                    continue
-
-                # mtime is unreliable when multiple windows share a project dir:
-                # the most-recently-modified JSONL may belong to a *different*
-                # window's Claude process.  Only apply this guard when there IS
-                # at least one other active (non-suspended) channel using the
-                # same work_dir — that's the only scenario where mtime can pick
-                # the wrong window's file.  If this window's work_dir is unique,
-                # mtime is unambiguous and should be trusted even when session_map
-                # disagrees (session_map can be stale, e.g. after --resume with a
-                # session that lives in a different project directory).
-                if strategy == "mtime" and session_map:
-                    other_channels_same_dir = any(
-                        other.channel_id != binding.channel_id
-                        and not getattr(other, "suspended", False)
-                        and getattr(other, "work_dir", None) == getattr(binding, "work_dir", None)
-                        for other in bindings
-                    )
-                    if other_channels_same_dir:
-                        our_key_suffix = f":{binding.window_id}"
-                        this_window_sm_sid = next(
-                            (
-                                v.get("session_id", "")
-                                for k, v in session_map.items()
-                                if k.endswith(our_key_suffix) and isinstance(v, dict)
-                            ),
-                            None,
-                        )
-                        if this_window_sm_sid and this_window_sm_sid != detected:
-                            detected_in_map = any(
-                                isinstance(v, dict) and v.get("session_id") == detected
-                                for v in session_map.values()
-                            )
-                            if not detected_in_map:
-                                logger.warning(
-                                    "Pane detection (mtime) for ch=%s (window %s): "
-                                    "detected %s not in session_map "
-                                    "(session_map assigns this window → %s) — "
-                                    "shared project dir, likely cross-window mtime collision; "
-                                    "deferring to session_map",
-                                    binding.channel_id, binding.window_id, detected, this_window_sm_sid,
-                                )
-                                mtime_uncertain.add(binding.channel_id)
-                                continue  # skip pane_resolved.add too
-
-                if detected != binding.cli_session_id:
-                    # Guard 1: don't steal a session owned by a channel on a DIFFERENT window
-                    already_owned = any(
-                        other.channel_id != binding.channel_id
-                        and other.window_id != binding.window_id
-                        and other.cli_session_id == detected
-                        for other in bindings
-                    )
-                    if already_owned:
-                        logger.warning(
-                            "Pane detection skipped for ch=%s (window %s): "
-                            "detected session %s already owned by another channel",
-                            binding.channel_id, binding.window_id, detected,
-                        )
-                        continue
-                    # Guard 2: don't let mtime override a session assigned to a DIFFERENT window
-                    # in session_map. (Complementary to the mtime_uncertain check above, but
-                    # also applies to open_fd which can theoretically read a shared fd.)
-                    if session_map:
-                        our_key_suffix = f":{binding.window_id}"
-                        for k, v in session_map.items():
-                            if not isinstance(v, dict):
-                                continue
-                            if v.get("session_id") == detected and not k.endswith(our_key_suffix):
-                                logger.warning(
-                                    "Pane detection skipped for ch=%s (window %s): "
-                                    "detected session %s belongs to a different window "
-                                    "(%s) per session_map",
-                                    binding.channel_id, binding.window_id, detected, k,
-                                )
-                                detected = None
-                                break
-                    if not detected:
-                        continue
-                    logger.info(
-                        "Pane detection updated session for ch=%s (window %s): %s -> %s [strategy=%s]",
-                        binding.channel_id, binding.window_id,
-                        binding.cli_session_id, detected, strategy,
-                    )
-                    await self._session_mgr.update_cli_session_id(
-                        binding.channel_id, detected
-                    )
-                    binding.cli_session_id = detected
-
-                # Pane detection resolved this binding (high or low confidence accepted)
-                pane_resolved.add(binding.channel_id)
-
-        # ── Step 2: session_map.json fallback ─────────────────────────────────
-        # Try to pick up session IDs from session_map.json.
+        # ── Step 1: session_map.json — assign / update session IDs ───────────
         # The hook writes keys as "{tmux_session_name}:{window_id}".
-        # Rather than guessing the session name we search all keys for
-        # a suffix matching ":{window_id}".
-        if not session_map:
-            session_map = self._read_session_map()
+        # Search all keys for a suffix matching ":{window_id}".
         if session_map:
             for binding in bindings:
-                # Skip bindings already resolved by pane detection this cycle.
-                if binding.channel_id in pane_resolved:
+                if getattr(binding, "suspended", False):
                     continue
                 if not binding.window_id:
                     continue
-                # Find matching entry by window_id suffix
                 entry = None
                 for key, val in session_map.items():
                     if key.endswith(f":{binding.window_id}"):
@@ -449,54 +309,53 @@ class JsonlMonitor:
                 if not entry or not isinstance(entry, dict):
                     continue
                 new_sid = entry.get("session_id", "")
-                if new_sid and new_sid != binding.cli_session_id:
-                    # Only follow a new session if the current session file is
-                    # truly gone.  A file that still exists on disk means the
-                    # session is still valid (possibly just idle), or a background
-                    # process (e.g. an orchestrator job that inherited TMUX_PANE)
-                    # wrote a competing entry into session_map.
-                    # Pane-resolved bindings are already skipped above so this
-                    # guard only applies when tmux/pane detection is unavailable.
-                    # Exception: mtime_uncertain bindings may have been wrongly
-                    # assigned a neighbour window's session via mtime fallback.
-                    # For those, bypass the file-existence guard so session_map
-                    # can correct the binding regardless of the stale file.
-                    if binding.cli_session_id and binding.channel_id not in mtime_uncertain:
-                        current_path = self._find_jsonl_file(binding)
-                        if current_path is not None:
-                            logger.info(
-                                "Skipping session_id update for channel %s "
-                                "(window %s): current session %s file still exists "
-                                "[file=%s, proposed_new=%s]",
-                                binding.channel_id,
-                                binding.window_id,
-                                binding.cli_session_id,
-                                current_path.name,
-                                new_sid,
-                            )
-                            continue
+                if not new_sid or new_sid == binding.cli_session_id:
+                    continue
 
-                    old_path = self._find_jsonl_file(binding)
-                    try:
-                        old_age = round(time.time() - old_path.stat().st_mtime, 1) if old_path else None
-                    except OSError:
-                        old_age = None
-                    logger.info(
-                        "Updating cli_session_id for channel %s "
-                        "(window %s): %s -> %s "
-                        "[old_file=%s, old_age=%ss, reason=%s]",
-                        binding.channel_id,
-                        binding.window_id,
-                        binding.cli_session_id,
-                        new_sid,
-                        old_path.name if old_path else "NOT_FOUND",
-                        old_age if old_age is not None else "N/A",
-                        "no_existing_session" if not binding.cli_session_id else "session_stale",
+                old_path = self._find_jsonl_file(binding)
+                try:
+                    old_age = round(time.time() - old_path.stat().st_mtime, 1) if old_path else None
+                except OSError:
+                    old_age = None
+                logger.info(
+                    "Updating cli_session_id for channel %s "
+                    "(window %s): %s -> %s "
+                    "[old_file=%s, old_age=%ss, reason=%s]",
+                    binding.channel_id,
+                    binding.window_id,
+                    binding.cli_session_id,
+                    new_sid,
+                    old_path.name if old_path else "NOT_FOUND",
+                    old_age if old_age is not None else "N/A",
+                    "no_existing_session" if not binding.cli_session_id else "session_switch",
+                )
+                await self._session_mgr.update_cli_session_id(
+                    binding.channel_id, new_sid
+                )
+                binding.cli_session_id = new_sid
+
+                # Missing-session warning: emit Discord alert when the assigned
+                # session's output file does not exist.  Most likely cause:
+                # `claude --resume X` run in a directory that doesn't contain
+                # session X, so Claude started a new session Y but the hook
+                # reported X.
+                new_path = self._find_jsonl_file(binding)
+                if new_path is None:
+                    work_dir = getattr(binding, "work_dir", "unknown")
+                    msg = (
+                        f"⚠️ Session {new_sid} not found in {work_dir}. "
+                        "Possible --resume from wrong directory."
                     )
-                    await self._session_mgr.update_cli_session_id(
-                        binding.channel_id, new_sid
+                    logger.warning(
+                        "Session %s not found in %s after assignment. "
+                        "Possible --resume from wrong directory.",
+                        new_sid, work_dir,
                     )
-                    binding.cli_session_id = new_sid
+                    if self._on_message:
+                        try:
+                            await self._on_message(binding.channel_id, msg)
+                        except Exception:
+                            logger.exception("JsonlMonitor warning callback error")
 
         for binding in bindings:
             cli = getattr(binding, "coding_cli", "claude")
@@ -552,223 +411,6 @@ class JsonlMonitor:
             self._offsets_last_save = now
         except Exception:
             logger.warning("Failed to save jsonl_offsets.json", exc_info=True)
-
-    async def _detect_session_via_pane(self, binding: Any) -> tuple[str | None, str | None]:
-        """Detect the active Claude session by inspecting the tmux pane process tree.
-
-        Algorithm:
-        1. Ask TmuxController for the pane's shell PID.
-        2. Walk /proc/<pid>/task/<pid>/children recursively to find claude
-           descendant processes.  Only direct descendants of the pane shell are
-           considered — background jobs that merely inherited TMUX_PANE are not
-           in this tree.
-        3. Read /proc/<claude_pid>/cwd to get the working directory.
-        4. Hash the cwd to a Claude projects dir name and scan for the most
-           recently modified *.jsonl file.  The filename stem IS the session_id.
-
-        Returns (session_id, strategy) where strategy is one of "pane_file",
-        "open_fd", "mtime", or (None, None) if detection fails.
-        """
-        if self._tmux is None:
-            return None, None
-        pane_pid = await self._tmux.pane_pid(binding.window_id)
-        if not pane_pid:
-            return None, None
-        return await asyncio.to_thread(
-            self._detect_session_from_pid, pane_pid
-        )
-
-    def _detect_session_from_pid(self, pane_pid: int) -> tuple[str | None, str | None]:
-        """Synchronous worker for _detect_session_via_pane (runs in thread).
-
-        Detection strategies (most to least authoritative):
-        1. Per-pane session file: read TMUX_PANE from claude's environ, look up
-           ~/.gits/pane_sessions/<TMUX_PANE>.json written by the hook.  This is
-           the definitive source — one file per pane, no cross-window races.
-        2. Open fd scan: check /proc/<pid>/fd for an open .jsonl file in the
-           project dir.  Reliable but Claude doesn't keep the fd open in practice.
-        3. mtime with process-age filter: scan the project dir for JSONL files
-           modified AFTER the claude process started.  Far fewer false positives
-           than plain mtime since old sessions are excluded.
-
-        Returns (session_id, strategy) where strategy ∈ {"pane_file", "open_fd",
-        "mtime"}, or (None, None) if no session could be detected.
-        """
-        claude_pid = self._find_claude_descendant(pane_pid)
-        if claude_pid is None:
-            return None, None
-
-        # Read the claude process's working directory
-        try:
-            cwd = os.readlink(f"/proc/{claude_pid}/cwd")
-        except OSError:
-            return None, None
-
-        # ── Strategy 1: per-pane session file (most authoritative) ───────────
-        # Read TMUX_PANE from the claude process's environment, then look up
-        # ~/.gits/pane_sessions/<TMUX_PANE>.json written by the hook.
-        # This is pane-specific and immune to cross-window contamination.
-        try:
-            environ_raw = Path(f"/proc/{claude_pid}/environ").read_bytes()
-            environ = dict(
-                entry.split(b"=", 1)
-                for entry in environ_raw.split(b"\x00")
-                if b"=" in entry
-            )
-            tmux_pane = environ.get(b"TMUX_PANE", b"").decode("utf-8", errors="replace")
-            if tmux_pane:
-                pane_file = Path.home() / ".gits" / "pane_sessions" / f"{tmux_pane}.json"
-                if pane_file.exists():
-                    data = json.loads(pane_file.read_text())
-                    sid = data.get("session_id", "")
-                    if sid:
-                        logger.debug(
-                            "Pane detection via pane-file for pid=%d pane=%s: %s",
-                            claude_pid, tmux_pane, sid,
-                        )
-                        return sid, "pane_file"
-        except OSError:
-            pass
-        except Exception:
-            logger.debug("Pane session file lookup failed for pid=%d", claude_pid, exc_info=True)
-
-        # ── Strategy 2: open fd scan ──────────────────────────────────────────
-        dir_hash = cwd.replace("/", "-")
-        for variant in (dir_hash, dir_hash.lstrip("-")):
-            project_dir = self._projects_path / variant
-            if not project_dir.is_dir():
-                continue
-            project_dir_str = str(project_dir.resolve())
-            fd_dir = Path(f"/proc/{claude_pid}/fd")
-            try:
-                for fd_entry in fd_dir.iterdir():
-                    try:
-                        target = os.readlink(str(fd_entry))
-                    except OSError:
-                        continue
-                    if not target.endswith(".jsonl"):
-                        continue
-                    target_path = Path(target)
-                    if str(target_path.parent.resolve()) == project_dir_str:
-                        return target_path.stem, "open_fd"
-            except OSError:
-                pass
-
-        # ── Strategy 3: mtime with process-age filter ─────────────────────────
-        # Only consider JSONL files modified AFTER the claude process started.
-        # This eliminates sessions from previous invocations and other windows
-        # that happen to share the same project directory.
-        process_start_time = self._get_process_start_time(claude_pid)
-
-        for variant in (dir_hash, dir_hash.lstrip("-")):
-            project_dir = self._projects_path / variant
-            if not project_dir.is_dir():
-                continue
-            best: Path | None = None
-            best_mtime: float = 0.0
-            try:
-                for f in project_dir.iterdir():
-                    if f.suffix != ".jsonl":
-                        continue
-                    try:
-                        mtime = f.stat().st_mtime
-                    except OSError:
-                        continue
-                    # Skip files that predate this claude process — they belong
-                    # to earlier sessions or other windows.
-                    if process_start_time and mtime < process_start_time:
-                        continue
-                    if mtime > best_mtime:
-                        best_mtime = mtime
-                        best = f
-            except OSError:
-                continue
-            if best is not None:
-                logger.debug(
-                    "Pane detection via mtime-filtered for pid=%d "
-                    "(start=%.0f): %s",
-                    claude_pid, process_start_time or 0, best.name,
-                )
-                return best.stem, "mtime"
-
-        return None, None
-
-    @staticmethod
-    def _get_process_start_time(pid: int) -> float | None:
-        """Return the wall-clock start time of a process (seconds since epoch).
-
-        Reads /proc/<pid>/stat field 22 (starttime in clock ticks since boot)
-        and combines it with /proc/stat btime (boot time).
-        Returns None if the information is unavailable.
-        """
-        try:
-            stat_line = Path(f"/proc/{pid}/stat").read_text()
-            # Field 22 is starttime; field 2 is comm (may contain spaces/parens)
-            # Strip the comm field "(name)" to safely split the rest.
-            after_comm = stat_line[stat_line.rfind(")") + 2:]
-            fields = after_comm.split()
-            starttime_ticks = int(fields[19])  # 0-indexed after comm strip
-
-            btime: int | None = None
-            for line in Path("/proc/stat").read_text().splitlines():
-                if line.startswith("btime "):
-                    btime = int(line.split()[1])
-                    break
-            if btime is None:
-                return None
-
-            hz = os.sysconf("SC_CLK_TCK")
-            return btime + starttime_ticks / hz
-        except Exception:
-            return None
-
-    @staticmethod
-    def _find_claude_descendant(root_pid: int) -> int | None:
-        """Walk the /proc process tree from root_pid and return the first
-        descendant whose executable name is 'claude'.
-
-        Uses /proc/<pid>/task/<pid>/children for breadth-first traversal.
-        Returns None if no claude process is found.
-        """
-        visited: set[int] = set()
-        queue: list[int] = [root_pid]
-        while queue:
-            pid = queue.pop(0)
-            if pid in visited:
-                continue
-            visited.add(pid)
-            # Check if this process is claude (skip root pane shell itself)
-            if pid != root_pid:
-                try:
-                    comm = Path(f"/proc/{pid}/comm").read_text().strip()
-                    if comm == "claude":
-                        # Skip non-interactive claude -p / --print invocations.
-                        # These are one-shot jobs (e.g. spawned by an orchestrator
-                        # script in the same window) and must not be mistaken for
-                        # the user's interactive session.
-                        try:
-                            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\x00")
-                            if b"-p" in cmdline or b"--print" in cmdline:
-                                # Non-interactive — keep searching
-                                pass
-                            else:
-                                return pid
-                        except OSError:
-                            return pid  # Can't read cmdline; assume interactive
-                except OSError:
-                    continue
-            # Enqueue children
-            try:
-                children_text = Path(
-                    f"/proc/{pid}/task/{pid}/children"
-                ).read_text()
-                for child in children_text.split():
-                    child_pid = int(child)
-                    if child_pid not in visited:
-                        queue.append(child_pid)
-            except (OSError, ValueError):
-                pass
-        return None
 
     @staticmethod
     def _read_session_map() -> dict:
