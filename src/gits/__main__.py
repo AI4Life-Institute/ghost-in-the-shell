@@ -230,6 +230,7 @@ def _cmd_hook(args: argparse.Namespace) -> None:
     import re
     import shutil
     import subprocess
+    from pathlib import Path
 
     # Configure logging for the hook subprocess
     logging.basicConfig(
@@ -395,8 +396,6 @@ def _cmd_hook(args: argparse.Namespace) -> None:
     )
 
     # Read-modify-write with file locking to prevent concurrent hook races
-    from pathlib import Path
-
     gits_dir = Path.home() / ".gits"
     map_file = gits_dir / "session_map.json"
     map_file.parent.mkdir(parents=True, exist_ok=True)
