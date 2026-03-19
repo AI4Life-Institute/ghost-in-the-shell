@@ -238,6 +238,10 @@ class JsonlMonitor:
         # OpenCode tracking (SQLite timestamp-based)
         self._oc_timestamps: dict[str, int] = {}  # session_id -> last part timestamp
 
+        # Pending missing-session warnings: channel_id -> (session_id, work_dir, assigned_at)
+        # Checked on each poll; warning fires when file still absent after 10 s.
+        self._pending_warn: dict[str, tuple[str, str, float]] = {}
+
         # Callback: (channel_id, text) -> None
         self._on_message: Callable[[str, str], Awaitable[None]] | None = None
 
@@ -292,6 +296,41 @@ class JsonlMonitor:
         bindings = self._session_mgr.list_bindings()
         session_map = self._read_session_map()
 
+        # ── Step 0: fire deferred missing-session warnings ────────────────────
+        # Warnings are queued when a new session is assigned; we only emit them
+        # if the JSONL file is still absent after a 10-second grace period
+        # (Claude creates its JSONL file lazily, so an immediate check would
+        # always fire on fresh sessions).
+        if self._pending_warn:
+            now = time.time()
+            expired = [
+                ch for ch, (sid, _, assigned_at) in self._pending_warn.items()
+                if now - assigned_at >= 10
+            ]
+            for ch in expired:
+                sid, work_dir, _ = self._pending_warn.pop(ch)
+                binding = next(
+                    (b for b in bindings if b.channel_id == ch), None
+                )
+                if binding is None or binding.cli_session_id != sid:
+                    continue  # session changed — skip
+                if self._find_jsonl_file(binding) is not None:
+                    continue  # file appeared — no warning needed
+                msg = (
+                    f"⚠️ Session {sid} not found in {work_dir}. "
+                    "Possible --resume from wrong directory."
+                )
+                logger.warning(
+                    "Session %s not found in %s (10 s after assignment). "
+                    "Possible --resume from wrong directory.",
+                    sid, work_dir,
+                )
+                if self._on_message:
+                    try:
+                        await self._on_message(ch, msg)
+                    except Exception:
+                        logger.exception("JsonlMonitor warning callback error")
+
         # ── Step 1: session_map.json — assign / update session IDs ───────────
         # The hook writes keys as "{tmux_session_name}:{window_id}".
         # Search all keys for a suffix matching ":{window_id}".
@@ -334,28 +373,14 @@ class JsonlMonitor:
                 )
                 binding.cli_session_id = new_sid
 
-                # Missing-session warning: emit Discord alert when the assigned
-                # session's output file does not exist.  Most likely cause:
-                # `claude --resume X` run in a directory that doesn't contain
-                # session X, so Claude started a new session Y but the hook
-                # reported X.
-                new_path = self._find_jsonl_file(binding)
-                if new_path is None:
-                    work_dir = getattr(binding, "work_dir", "unknown")
-                    msg = (
-                        f"⚠️ Session {new_sid} not found in {work_dir}. "
-                        "Possible --resume from wrong directory."
-                    )
-                    logger.warning(
-                        "Session %s not found in %s after assignment. "
-                        "Possible --resume from wrong directory.",
-                        new_sid, work_dir,
-                    )
-                    if self._on_message:
-                        try:
-                            await self._on_message(binding.channel_id, msg)
-                        except Exception:
-                            logger.exception("JsonlMonitor warning callback error")
+                # Missing-session warning: Claude creates the JSONL file lazily
+                # (it may not exist immediately at SessionStart).  Queue a
+                # deferred check so we don't false-positive on fresh sessions.
+                self._pending_warn[binding.channel_id] = (
+                    new_sid,
+                    getattr(binding, "work_dir", "unknown"),
+                    time.time(),
+                )
 
         for binding in bindings:
             cli = getattr(binding, "coding_cli", "claude")

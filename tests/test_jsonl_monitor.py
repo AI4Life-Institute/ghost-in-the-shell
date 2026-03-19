@@ -1,9 +1,11 @@
 """Tests for JsonlMonitor — JSONL polling, parsing, and callback firing."""
 
+import asyncio
 import json
 import os
+import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1213,11 +1215,20 @@ class TestMissingSessionWarning:
         # session_map assigns sess-missing, but no JSONL file exists
         monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-missing"}}
 
+        # First poll: assigns session, queues pending warn (no immediate alert)
         await monitor._poll_once()
-
-        # session was assigned
         assert binding.cli_session_id == "sess-missing"
-        # Discord alert was sent
+        callback.assert_not_called()
+
+        # Advance clock past 10-second grace period
+        monitor._pending_warn["ch1"] = (
+            "sess-missing",
+            "/tmp/proj",
+            time.time() - 11,
+        )
+
+        # Second poll: grace expired, file still absent → warning fires
+        await monitor._poll_once()
         callback.assert_called_once()
         alert_text = callback.call_args[0][1]
         assert "sess-missing" in alert_text
