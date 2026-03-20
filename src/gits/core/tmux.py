@@ -95,9 +95,11 @@ class TmuxController:
 
     async def window_exists(self, window_id: str) -> bool:
         """Check if a specific window exists."""
-        try:
-            session = await asyncio.to_thread(self._get_or_create_session)
+        def _sync() -> bool:
+            session = self._get_or_create_session()
             return any(w.id == window_id for w in session.windows)
+        try:
+            return await asyncio.to_thread(_sync)
         except Exception:
             return False
 
@@ -274,7 +276,7 @@ class TmuxController:
         Supports multi-key sequences like "Escape Enter" (space-separated).
         """
         for key in submit_keys.split():
-            pane.send_keys(key, literal=False)
+            pane.send_keys(key, literal=False, enter=False)
             time.sleep(0.2)
 
     async def send_keys(self, window_id: str, keys: str) -> None:

@@ -917,18 +917,12 @@ class Engine:
         await self._auto_screenshot(channel_id, binding, interaction)
 
     async def handle_enter(self, channel_id: str, interaction: Any) -> None:
-        """Handle /enter — submit the current Claude input.
-
-        Sends Escape then Enter so that multi-line input mode is exited before
-        submission.  In normal single-line mode Escape is a no-op for Claude,
-        so this is safe in both cases.
-        """
+        """Handle /enter — send a single Enter key."""
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound.")
             return
 
-        await self.tmux.send_keys(binding.window_id, "Escape")
         await self.tmux.send_keys(binding.window_id, "Enter")
         await self._reply(interaction, "Sent `Enter`.")
         await self._auto_screenshot(channel_id, binding, interaction)
