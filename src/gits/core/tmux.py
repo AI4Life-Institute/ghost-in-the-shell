@@ -294,15 +294,24 @@ class TmuxController:
     # ------------------------------------------------------------------
 
     async def capture_pane_text(self, window_id: str) -> str:
-        """Capture pane content as plain text."""
-        return await asyncio.to_thread(self._capture_text_sync, window_id)
+        """Capture pane content as plain text.
 
-    def _capture_text_sync(self, window_id: str) -> str:
-        pane = self._find_pane(window_id)
-        if pane is None:
-            return ""
-        lines = pane.capture_pane()
-        return "\n".join(lines) if isinstance(lines, list) else str(lines)
+        Uses a direct subprocess call to avoid libtmux enumerating all
+        session windows (which runs a heavy ``tmux list-panes`` with every
+        format variable for each window).
+        """
+        def _sync() -> str:
+            try:
+                result = subprocess.run(
+                    ["tmux", "capture-pane", "-p", "-t", window_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                return result.stdout
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return ""
+        return await asyncio.to_thread(_sync)
 
     async def capture_pane_ansi(self, window_id: str) -> str:
         """Capture pane content with ANSI escape codes.

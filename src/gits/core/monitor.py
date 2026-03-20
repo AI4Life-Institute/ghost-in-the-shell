@@ -36,7 +36,7 @@ class PaneMonitor:
         self,
         tmux: TmuxController,
         session_mgr: Any,
-        interval: float = 2.0,
+        interval: float = 5.0,
     ):
         self._tmux = tmux
         self._session_mgr = session_mgr

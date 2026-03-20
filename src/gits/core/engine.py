@@ -104,9 +104,10 @@ class Engine:
         # Register pane monitor callbacks
         self.monitor.on_prompt(self._on_pane_prompt)
 
-        # Resume polling for existing bindings
+        # Resume polling for active (non-suspended) bindings only
         for binding in self.session_mgr.list_bindings():
-            self.monitor.start_polling(binding.channel_id, binding.window_id)
+            if not binding.suspended:
+                self.monitor.start_polling(binding.channel_id, binding.window_id)
 
         # Start JSONL output monitoring
         self.jsonl_monitor.on_message(self._on_jsonl_message)
@@ -1085,6 +1086,7 @@ class Engine:
                         logger.debug("Sent SIGKILL to claude pid %d (still alive)", child_pid)
                     except ProcessLookupError:
                         pass  # already dead
+        self.monitor.stop_polling(channel_id)
         await self.session_mgr.mark_suspended(channel_id)
 
     async def _ensure_window_alive(self, binding: Any) -> bool:
@@ -1137,6 +1139,7 @@ class Engine:
         except Exception:
             logger.exception("Failed to resume binding %s", binding.channel_id)
         await self.session_mgr.touch_active(binding.channel_id)
+        self.monitor.start_polling(binding.channel_id, binding.window_id)
 
     async def handle_new(
         self, channel_id: str, interaction: Any, message: str | None = None
