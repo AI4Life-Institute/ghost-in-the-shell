@@ -917,12 +917,18 @@ class Engine:
         await self._auto_screenshot(channel_id, binding, interaction)
 
     async def handle_enter(self, channel_id: str, interaction: Any) -> None:
-        """Handle /enter — send a single Enter key."""
+        """Handle /enter — submit the current Claude input.
+
+        Sends Escape then Enter so that multi-line input mode is exited before
+        submission.  In normal single-line mode Escape is a no-op for Claude,
+        so this is safe in both cases.
+        """
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound.")
             return
 
+        await self.tmux.send_keys(binding.window_id, "Escape")
         await self.tmux.send_keys(binding.window_id, "Enter")
         await self._reply(interaction, "Sent `Enter`.")
         await self._auto_screenshot(channel_id, binding, interaction)
@@ -1037,6 +1043,9 @@ class Engine:
 
     async def _suspend_binding(self, channel_id: str) -> None:
         """Kill the claude process in a tmux window but keep the window alive."""
+        import os
+        import signal
+
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None or binding.suspended:
             return
@@ -1046,12 +1055,42 @@ class Engine:
             binding.window_id,
             (time.time() - binding.last_active_at) / 60,
         )
+        # Send C-c to interrupt any running tool, then try to find and kill the
+        # Claude child process directly so it actually exits.
         try:
             await self.tmux.send_keys(binding.window_id, "C-c")
             await asyncio.sleep(0.5)
-            await self.tmux.send_text(binding.window_id, "exit")
         except Exception:
-            logger.debug("Could not send exit to window %s", binding.window_id)
+            logger.debug("Could not send C-c to window %s", binding.window_id)
+
+        # Find the Claude child process under the pane and kill it.
+        pane_pid = await self.tmux.pane_pid(binding.window_id)
+        if pane_pid:
+            try:
+                children = await asyncio.to_thread(
+                    lambda: [
+                        int(p)
+                        for p in __import__("subprocess")
+                        .check_output(["pgrep", "-P", str(pane_pid)], text=True)
+                        .split()
+                    ]
+                )
+            except Exception:
+                children = []
+            for child_pid in children:
+                try:
+                    os.kill(child_pid, signal.SIGTERM)
+                    logger.debug("Sent SIGTERM to claude pid %d", child_pid)
+                except ProcessLookupError:
+                    pass
+            if children:
+                await asyncio.sleep(2)
+                for child_pid in children:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                        logger.debug("Sent SIGKILL to claude pid %d (still alive)", child_pid)
+                    except ProcessLookupError:
+                        pass  # already dead
         await self.session_mgr.mark_suspended(channel_id)
 
     async def _ensure_window_alive(self, binding: Any) -> bool:

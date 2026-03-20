@@ -434,6 +434,37 @@ class DiscordAdapter(PlatformAdapter):
         """Register all slash commands with the bot's command tree."""
         tree = self.bot.tree
 
+        # Global app-command error handler: suppress expired-interaction errors
+        # (10062 "Unknown interaction") that occur when the bot restarts while a
+        # slash command is in-flight.  Discord shows "application did not respond"
+        # to the user in these cases; there is nothing we can do server-side, but
+        # we should log a warning rather than a full traceback.
+        @tree.error
+        async def on_app_command_error(
+            interaction: discord.Interaction,
+            error: app_commands.AppCommandError,
+        ) -> None:
+            import discord as _discord
+            original = getattr(error, "original", error)
+            if (
+                isinstance(original, _discord.errors.NotFound)
+                and getattr(original, "code", None) == 10062
+            ):
+                cmd_name = interaction.command.name if interaction.command else "unknown"
+                logger.warning(
+                    "Interaction expired (10062) for /%s — "
+                    "bot was likely restarting when the command arrived",
+                    cmd_name,
+                )
+                return
+            # Re-raise all other errors so discord.py logs them normally
+            logger.error(
+                "App command error in /%s: %s",
+                interaction.command.name if interaction.command else "unknown",
+                error,
+                exc_info=error,
+            )
+
         # ── A. Native Commands ────────────────────────────────────────
 
         @tree.command(name="bind", description="Bind this channel to a project directory")
