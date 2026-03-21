@@ -238,9 +238,11 @@ class JsonlMonitor:
         # OpenCode tracking (SQLite timestamp-based)
         self._oc_timestamps: dict[str, int] = {}  # session_id -> last part timestamp
 
-        # Pending missing-session warnings: channel_id -> (session_id, work_dir, assigned_at)
-        # Checked on each poll; warning fires when file still absent after 10 s.
-        self._pending_warn: dict[str, tuple[str, str, float]] = {}
+        # Pending missing-session warnings:
+        #   channel_id -> (session_id, work_dir, assigned_at, attempt)
+        # Retried up to _WARN_MAX_ATTEMPTS times every _WARN_RETRY_INTERVAL s;
+        # warning only fires after all retries are exhausted.
+        self._pending_warn: dict[str, tuple[str, str, float, int]] = {}
 
         # Callback: (channel_id, text) -> None
         self._on_message: Callable[[str, str], Awaitable[None]] | None = None
@@ -297,18 +299,21 @@ class JsonlMonitor:
         session_map = self._read_session_map()
 
         # ── Step 0: fire deferred missing-session warnings ────────────────────
-        # Warnings are queued when a new session is assigned; we only emit them
-        # if the JSONL file is still absent after a 10-second grace period
-        # (Claude creates its JSONL file lazily, so an immediate check would
-        # always fire on fresh sessions).
+        # Checked at _WARN_RETRY_INTERVAL-second intervals up to
+        # _WARN_MAX_ATTEMPTS times (15 s, 30 s, 45 s from assignment).
+        # Warning only fires if the JSONL file is still absent after the final
+        # attempt, avoiding false positives on slow-starting fresh sessions.
+        _WARN_RETRY_INTERVAL = 15
+        _WARN_MAX_ATTEMPTS = 3
         if self._pending_warn:
             now = time.time()
-            expired = [
-                ch for ch, (sid, _, assigned_at) in self._pending_warn.items()
-                if now - assigned_at >= 10
+            due = [
+                ch
+                for ch, (sid, _, assigned_at, attempt) in self._pending_warn.items()
+                if now - assigned_at >= (attempt + 1) * _WARN_RETRY_INTERVAL
             ]
-            for ch in expired:
-                sid, work_dir, _ = self._pending_warn.pop(ch)
+            for ch in due:
+                sid, work_dir, assigned_at, attempt = self._pending_warn.pop(ch)
                 binding = next(
                     (b for b in bindings if b.channel_id == ch), None
                 )
@@ -316,14 +321,20 @@ class JsonlMonitor:
                     continue  # session changed — skip
                 if self._find_jsonl_file(binding) is not None:
                     continue  # file appeared — no warning needed
+                if attempt + 1 < _WARN_MAX_ATTEMPTS:
+                    # Re-queue for next retry, keeping original assigned_at
+                    self._pending_warn[ch] = (sid, work_dir, assigned_at, attempt + 1)
+                    continue
+                # All retries exhausted — emit warning
                 msg = (
                     f"⚠️ Session {sid} not found in {work_dir}. "
                     "Possible --resume from wrong directory."
                 )
                 logger.warning(
-                    "Session %s not found in %s (10 s after assignment). "
+                    "Session %s not found in %s (after %d retries, %.0f s). "
                     "Possible --resume from wrong directory.",
-                    sid, work_dir,
+                    sid, work_dir, _WARN_MAX_ATTEMPTS,
+                    now - assigned_at,
                 )
                 if self._on_message:
                     try:
@@ -380,6 +391,7 @@ class JsonlMonitor:
                     new_sid,
                     getattr(binding, "work_dir", "unknown"),
                     time.time(),
+                    0,  # attempt
                 )
 
         for binding in bindings:
