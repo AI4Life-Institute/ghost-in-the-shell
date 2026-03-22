@@ -20,6 +20,8 @@ dependencies = [
     "croniter>=2.0",
     "aiohttp>=3.9",
     "cryptography>=46.0.5",
+    "qrcode>=8.2",
+    "questionary>=2.1.1",
 ]
 
 [project.optional-dependencies]

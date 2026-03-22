@@ -10,7 +10,10 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings loaded from environment variables / .env file."""
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": [Path("~/.gits/config.env").expanduser(), ".env"],
+        "env_file_encoding": "utf-8",
+    }
 
     # ── Platform ──────────────────────────────────────────────────────
     gits_discord_token: str = ""

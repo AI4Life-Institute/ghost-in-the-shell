@@ -66,6 +66,33 @@ def main() -> None:
     # gits info
     sub.add_parser("info", help="Show current bindings")
 
+    # gits weixin
+    weixin_p = sub.add_parser("weixin", help="WeChat setup wizard")
+    weixin_p.add_argument(
+        "--relogin",
+        action="store_true",
+        help="Re-run openclaw-weixin install even if account already exists",
+    )
+    weixin_p.add_argument(
+        "--path",
+        default=None,
+        help="Default project path to auto-bind (saved to ~/.gits/config.env)",
+    )
+    weixin_p.add_argument(
+        "--no-start",
+        action="store_true",
+        help="Skip starting the bot after setup",
+    )
+
+    # gits discord
+    discord_p = sub.add_parser("discord", help="Discord setup wizard")
+    discord_p.add_argument("--token", default=None, help="Discord bot token")
+    discord_p.add_argument("--no-start", action="store_true", help="Skip restart after setup")
+
+    # gits setup
+    setup_p = sub.add_parser("setup", help="Interactive setup wizard (select platforms)")
+    setup_p.add_argument("--no-start", action="store_true", help="Skip restart after setup")
+
     # gits desktop  (launched by the Electron shell)
     desktop_p = sub.add_parser("desktop", help="Desktop app backend (IPC over stdio)")
     desktop_p.add_argument(
@@ -76,16 +103,22 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "start" or args.command is None:
-        if args.command is None:
-            # Default: inject start defaults
-            args.log_level = None
-            args.dev = False
+    if args.command == "start":
         _cmd_start(args)
+    elif args.command is None:
+        # Default: run setup wizard
+        args.no_start = False
+        _cmd_setup(args)
     elif args.command == "hook":
         _cmd_hook(args)
     elif args.command == "info":
         _cmd_status(args)
+    elif args.command == "weixin":
+        _cmd_weixin(args)
+    elif args.command == "discord":
+        _cmd_discord(args)
+    elif args.command == "setup":
+        _cmd_setup(args)
     elif args.command == "desktop":
         _cmd_desktop(args)
 
@@ -171,6 +204,10 @@ def _cmd_start_normal(args: argparse.Namespace) -> None:
         ],
     )
 
+    # Suppress noisy third-party DEBUG logs
+    for _noisy in ("libtmux", "discord", "asyncio", "aiohttp", "urllib3", "httpx", "httpcore"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+
     logger = logging.getLogger("gits")
     logger.info("Starting Ghost in the Shell v%s", _get_version())
 
@@ -240,6 +277,402 @@ def _cmd_start_normal(args: argparse.Namespace) -> None:
         asyncio.run(_run())
     except KeyboardInterrupt:
         logger.info("Shutting down...")
+
+
+def _ensure_launchd_service() -> None:
+    """Install and/or (re)start the ai.ghost.gits launchd service."""
+    import os
+    import shutil
+    import subprocess as _sp
+    from pathlib import Path
+
+    home = Path.home()
+    uid = os.getuid()
+    label = "ai.ghost.gits"
+    ghost_bin = shutil.which("ghost") or f"{home}/.local/bin/ghost"
+
+    # ── run script ───────────────────────────────────────────────────
+    run_sh = home / ".gits" / "run-gits.sh"
+    run_sh.parent.mkdir(parents=True, exist_ok=True)
+    run_sh.write_text(f"""\
+#!/bin/bash
+set -a
+[ -f "$HOME/.gits/config.env" ] && source "$HOME/.gits/config.env"
+set +a
+exec "{ghost_bin}" start
+""")
+    run_sh.chmod(0o755)
+
+    # ── plist ────────────────────────────────────────────────────────
+    log_dir = home / ".gits" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = home / "Library" / "LaunchAgents" / f"{label}.plist"
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key><string>{label}</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>5</integer>
+    <key>WorkingDirectory</key><string>{home}</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>{run_sh}</string>
+    </array>
+    <key>StandardOutPath</key><string>{log_dir}/gits.log</string>
+    <key>StandardErrorPath</key><string>{log_dir}/gits.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>HOME</key><string>{home}</string>
+      <key>PATH</key><string>{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+  </dict>
+</plist>
+""")
+
+    # ── load or kickstart ────────────────────────────────────────────
+    check = _sp.run(["launchctl", "list", label], capture_output=True)
+    if check.returncode != 0:
+        # Not loaded yet — bootstrap
+        r = _sp.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            print(f"✓  Ghost 已安装并启动 (开机自动运行)")
+        else:
+            print(f"   launchd 安装失败: {r.stderr.strip()}")
+    else:
+        # Already loaded — kickstart
+        r = _sp.run(
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            print("✓  Ghost 已在后台重启")
+        else:
+            print(f"   launchd 重启失败: {r.stderr.strip()}")
+
+
+def _cmd_setup(args: argparse.Namespace) -> None:
+    """Interactive setup wizard — select platforms, configure each, then restart."""
+    import os
+    import subprocess as _sp
+    from pathlib import Path
+
+    import questionary
+    from questionary import Style
+
+    from .openclaw import accounts as _accounts
+
+    _WEIXIN_CHANNEL = "openclaw-weixin"
+
+    _style = Style([
+        ("qmark", "fg:#00bfff bold"),
+        ("question", "bold"),
+        ("answer", "fg:#00ff7f bold"),
+        ("pointer", "fg:#00bfff bold"),
+        ("highlighted", "fg:#00bfff bold"),
+        ("selected", "fg:#00ff7f"),
+    ])
+
+    print()
+    print("  Ghost — 初始化向导")
+    print()
+
+    config_env = Path("~/.gits/config.env").expanduser()
+    existing_discord = ""
+    if config_env.exists():
+        for line in config_env.read_text().splitlines():
+            if line.startswith("GITS_DISCORD_TOKEN="):
+                existing_discord = line.split("=", 1)[1].strip()
+    existing_weixin = _accounts.discover(_WEIXIN_CHANNEL)
+
+    configured = []
+
+    # ── Discord ──────────────────────────────────────────────────────
+    print("─── Discord ──────────────────────────────────")
+    if existing_discord:
+        print(f"  当前 token: {existing_discord[:20]}...")
+    token = questionary.password(
+        "Discord Bot Token（留空跳过）:" if not existing_discord else "Discord Bot Token（留空保持不变）:",
+        style=_style,
+    ).ask() or ""
+    if token:
+        config_env.parent.mkdir(parents=True, exist_ok=True)
+        lines = config_env.read_text().splitlines() if config_env.exists() else []
+        new_lines = [l for l in lines if not l.startswith("GITS_DISCORD_TOKEN=")]
+        new_lines.append(f"GITS_DISCORD_TOKEN={token}")
+        config_env.write_text("\n".join(new_lines) + "\n")
+        print("  ✓ Token 已保存")
+        configured.append("Discord")
+    elif existing_discord:
+        configured.append("Discord")
+
+    # ── WeChat ───────────────────────────────────────────────────────
+    print("\n─── 微信 WeChat ──────────────────────────────")
+    if existing_weixin:
+        print(f"  当前账号: {existing_weixin['account_id']}")
+    do_weixin = questionary.confirm(
+        "重新登录微信?" if existing_weixin else "配置微信登录?",
+        default=not bool(existing_weixin),
+        style=_style,
+    ).ask()
+    if do_weixin:
+        try:
+            acct = _weixin_direct_login()
+            _accounts.save(_WEIXIN_CHANNEL, acct)
+            print(f"  ✓ 账号已保存: {acct['account_id']}")
+            configured.append("微信")
+        except Exception as exc:
+            print(f"  ✗ 微信登录失败: {exc}")
+    elif existing_weixin:
+        configured.append("微信")
+
+    if not configured:
+        print("\n未完成任何配置。")
+        return
+
+    print(f"\n✅ 已配置: {', '.join(configured)}")
+
+    if args.no_start:
+        print("运行 `ghost start` 启动 bot")
+        return
+
+    _ensure_launchd_service()
+    print("日志: ~/.gits/logs/gits.err.log")
+
+
+def _cmd_discord(args: argparse.Namespace) -> None:
+    """Discord setup wizard: save bot token to ~/.gits/config.env and restart."""
+    import os
+    import subprocess as _sp
+    from pathlib import Path
+
+    print("=" * 60)
+    print("Ghost — Discord 设置向导")
+    print("=" * 60)
+
+    config_env = Path("~/.gits/config.env").expanduser()
+    existing_token = ""
+    if config_env.exists():
+        for line in config_env.read_text().splitlines():
+            if line.startswith("GITS_DISCORD_TOKEN="):
+                existing_token = line.split("=", 1)[1].strip()
+
+    # Show current status
+    if existing_token:
+        print(f"\n当前 token: {existing_token[:20]}...")
+    else:
+        print("\n当前未配置 Discord token")
+
+    # Get token
+    token = args.token
+    if not token:
+        prompt = "输入 Discord Bot Token（留空保持不变）: " if existing_token else "输入 Discord Bot Token: "
+        token = input(prompt).strip()
+
+    if not token and not existing_token:
+        print("✗  未输入 token，退出")
+        sys.exit(1)
+
+    if token:
+        # Write to config.env
+        config_env.parent.mkdir(parents=True, exist_ok=True)
+        lines = config_env.read_text().splitlines() if config_env.exists() else []
+        new_lines = [l for l in lines if not l.startswith("GITS_DISCORD_TOKEN=")]
+        new_lines.append(f"GITS_DISCORD_TOKEN={token}")
+        config_env.write_text("\n".join(new_lines) + "\n")
+        print(f"✓  已写入 {config_env}")
+
+    if args.no_start:
+        print("\n✅ 配置完成。运行 `ghost start` 启动 bot")
+        return
+
+    # Restart via launchd
+    r = _sp.run(
+        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/ai.ghost.gits"],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        print("✓  Ghost 已在后台重启 (ai.ghost.gits)")
+    else:
+        print(f"      launchd 重启失败: {r.stderr.strip()}")
+        print("      请手动运行: ghost start")
+
+    print("\n✅ 完成！日志: ~/.gits/logs/gits.err.log")
+
+
+def _weixin_direct_login() -> dict:
+    """Login to WeChat via ilinkai QR code — no openclaw required.
+
+    Returns the account dict on success, raises RuntimeError on failure.
+    """
+    import json
+    import time
+    import urllib.request
+
+    _BASE = "https://ilinkai.weixin.qq.com"
+
+    # 1. Get QR code
+    print("\n      正在获取微信二维码...")
+    with urllib.request.urlopen(f"{_BASE}/ilink/bot/get_bot_qrcode?bot_type=3") as r:
+        resp = json.loads(r.read())
+    qrcode_id: str = resp.get("qrcode") or ""
+    qrcode_url: str = resp.get("qrcode_img_content") or resp.get("qrcode_url") or ""
+    if not qrcode_id:
+        raise RuntimeError(f"get_bot_qrcode 未返回 qrcode: {resp}")
+
+    # 2. Display QR code in terminal
+    print(f"\n      用微信扫描二维码登录:\n")
+    try:
+        import qrcode as _qr  # type: ignore
+        qr = _qr.QRCode(border=1)
+        qr.add_data(qrcode_url)
+        qr.make(fit=True)
+        qr.print_ascii(invert=True)
+    except ImportError:
+        # fallback: print URL prominently
+        print(f"      {qrcode_url}")
+        print()
+        print("      ↑ 复制上面的链接在浏览器打开，用微信扫码")
+        print("      (或: uv add qrcode  可在终端直接显示二维码)")
+
+    # 3. Long-poll for scan result
+    print("\n      等待扫码...")
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        time.sleep(2)
+        try:
+            with urllib.request.urlopen(
+                f"{_BASE}/ilink/bot/get_qrcode_status?qrcode={qrcode_id}"
+            ) as r:
+                status_resp = json.loads(r.read())
+        except Exception as e:
+            raise RuntimeError(f"轮询登录状态失败: {e}")
+
+        status = status_resp.get("status", "")
+        if status in ("confirmed", "success", "2"):
+            break
+        if status in ("expired", "cancelled", "-1"):
+            raise RuntimeError(f"二维码已失效: {status}")
+        print(".", end="", flush=True)
+    else:
+        raise RuntimeError("等待扫码超时（120s）")
+
+    print("\n✓  扫码成功")
+
+    # 4. Extract credentials
+    token: str = status_resp.get("bot_token") or status_resp.get("token") or ""
+    base_url: str = (status_resp.get("baseurl") or status_resp.get("base_url") or _BASE).rstrip("/")
+    user_id: str = status_resp.get("ilink_user_id") or status_resp.get("user_id") or ""
+    account_id: str = status_resp.get("ilink_bot_id") or status_resp.get("bot_id") or user_id
+
+    if not token:
+        raise RuntimeError(f"登录成功但未收到 token: {status_resp}")
+
+    return {
+        "account_id": account_id,
+        "token": token,
+        "base_url": base_url,
+        "user_id": user_id,
+        "saved_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _enable_openclaw_weixin_plugin() -> None:
+    """Ensure openclaw-weixin plugin is enabled in ~/.openclaw/openclaw.json."""
+    import json
+    from pathlib import Path
+
+    config_path = Path("~/.openclaw/openclaw.json").expanduser()
+    if not config_path.exists():
+        return
+    try:
+        config = json.loads(config_path.read_text())
+        plugins = config.setdefault("plugins", {})
+        entries = plugins.setdefault("entries", {})
+        if not entries.get("openclaw-weixin", {}).get("enabled", False):
+            entries["openclaw-weixin"] = {"enabled": True}
+            config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+            print("✓  已启用 openclaw-weixin 插件")
+    except Exception as e:
+        print(f"      (无法更新 openclaw 配置: {e})")
+
+
+def _cmd_weixin(args: argparse.Namespace) -> None:
+    """WeChat setup wizard: QR login via ilinkai, configure, and start."""
+    from pathlib import Path
+
+    from .openclaw import accounts as _accounts
+
+    _CHANNEL = "openclaw-weixin"
+
+    print("=" * 60)
+    print("Ghost — WeChat 设置向导")
+    print("=" * 60)
+
+    # Step 1: Check existing account
+    existing = _accounts.discover(_CHANNEL)
+    if existing and not args.relogin:
+        print(f"\n[2/4] 已找到账号，跳过登录")
+        print(f"      account_id : {existing['account_id']}")
+        print(f"      user_id    : {existing['user_id']}")
+        print(f"      base_url   : {existing['base_url']}")
+        account = existing
+    else:
+        if args.relogin:
+            print("\n[2/4] --relogin 指定，重新登录...")
+        else:
+            print("\n[2/4] 未找到账号，开始登录...")
+        try:
+            acct = _weixin_direct_login()
+        except Exception as exc:
+            print(f"\n✗  登录失败: {exc}")
+            sys.exit(1)
+        _accounts.save(_CHANNEL, acct)
+        account = acct
+        print(f"✓  账号已就绪: {account['account_id']}")
+
+    # Step 3: Default path
+    print("\n[3/4] 配置默认项目路径")
+    default_path = args.path
+    if not default_path:
+        default_path = input("      输入默认绑定路径（留空跳过）: ").strip() or None
+
+    if default_path:
+        config_env = Path("~/.gits/config.env").expanduser()
+        config_env.parent.mkdir(parents=True, exist_ok=True)
+        # Update or append GITS_DEFAULT_PATH
+        lines = config_env.read_text().splitlines() if config_env.exists() else []
+        new_lines = [l for l in lines if not l.startswith("GITS_DEFAULT_PATH=")]
+        new_lines.append(f"GITS_DEFAULT_PATH={default_path}")
+        config_env.write_text("\n".join(new_lines) + "\n")
+        print(f"✓  已写入 {config_env}: GITS_DEFAULT_PATH={default_path}")
+
+    # Step 4: Start bot via launchd (background, silent)
+    print("\n[4/4] 启动 Ghost...")
+    if args.no_start:
+        print("      --no-start 指定，跳过启动")
+        print("\n✅ 配置完成。运行 `ghost start` 启动 bot")
+        return
+
+    import subprocess as _sp
+    r = _sp.run(
+        ["launchctl", "kickstart", "-k", f"gui/{__import__('os').getuid()}/ai.ghost.gits"],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        print("✓  Ghost 已在后台启动 (ai.ghost.gits)")
+    else:
+        print(f"      launchd 启动失败: {r.stderr.strip()}")
+        print("      请手动运行: ghost start")
+
+    print("\n✅ 完成！日志: ~/.gits/logs/gits.err.log")
 
 
 def _cmd_hook(args: argparse.Namespace) -> None:

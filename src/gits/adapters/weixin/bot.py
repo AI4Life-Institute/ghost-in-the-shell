@@ -29,12 +29,11 @@ from ..base import (
     OutgoingMessage,
     PlatformAdapter,
 )
+from ...openclaw import accounts as _accounts
 
 logger = logging.getLogger("gits.weixin")
 
-# ── openclaw-weixin account paths ──────────────────────────────────────────────
-_OPENCLAW_WEIXIN_DIR = Path("~/.openclaw/openclaw-weixin").expanduser()
-_ACCOUNTS_DIR = _OPENCLAW_WEIXIN_DIR / "accounts"
+_WEIXIN_CHANNEL = "openclaw-weixin"
 
 # ── API constants ──────────────────────────────────────────────────────────────
 _LONG_POLL_TIMEOUT_S = 35
@@ -73,51 +72,11 @@ def _base_info() -> dict:
     return {"channel_version": _CHANNEL_VERSION}
 
 
-# ── Account discovery ──────────────────────────────────────────────────────────
+# ── Account discovery (delegates to openclaw.accounts) ─────────────────────────
 
 def discover_account() -> dict | None:
     """Return the first available openclaw-weixin account, or None."""
-    accounts_json = _OPENCLAW_WEIXIN_DIR / "accounts.json"
-    if not accounts_json.exists():
-        return None
-    try:
-        account_ids: list[str] = json.loads(accounts_json.read_text())
-    except Exception:
-        return None
-    for account_id in account_ids:
-        acct_file = _ACCOUNTS_DIR / f"{account_id}.json"
-        if not acct_file.exists():
-            continue
-        try:
-            data = json.loads(acct_file.read_text())
-            return {
-                "account_id": account_id,
-                "token": data["token"],
-                "base_url": data["baseUrl"].rstrip("/"),
-                "user_id": data.get("userId", ""),
-            }
-        except Exception:
-            continue
-    return None
-
-
-def _load_sync_buf(account_id: str) -> str:
-    sync_file = _ACCOUNTS_DIR / f"{account_id}.sync.json"
-    if sync_file.exists():
-        try:
-            data = json.loads(sync_file.read_text())
-            return data.get("get_updates_buf", "")
-        except Exception:
-            pass
-    return ""
-
-
-def _save_sync_buf(account_id: str, buf: str) -> None:
-    try:
-        sync_file = _ACCOUNTS_DIR / f"{account_id}.sync.json"
-        sync_file.write_text(json.dumps({"get_updates_buf": buf}))
-    except Exception:
-        pass
+    return _accounts.discover(_WEIXIN_CHANNEL)
 
 
 # ── Fake interaction object for engine compatibility ───────────────────────────
@@ -168,7 +127,7 @@ class WeixinAdapter(PlatformAdapter):
         self._bot_user_id: str = account["user_id"]
 
         # Persist get_updates cursor across restarts
-        self._sync_buf: str = _load_sync_buf(self._account_id)
+        self._sync_buf: str = _accounts.load_sync_buf(_WEIXIN_CHANNEL, self._account_id)
 
         # context_token cache: user_id → context_token (required for replies)
         self._context_tokens: dict[str, str] = {}
@@ -279,7 +238,7 @@ class WeixinAdapter(PlatformAdapter):
         new_buf: str = data.get("get_updates_buf", "")
         if new_buf:
             self._sync_buf = new_buf
-            _save_sync_buf(self._account_id, new_buf)
+            _accounts.save_sync_buf(_WEIXIN_CHANNEL, self._account_id, new_buf)
 
         msgs: list[dict] = data.get("msgs") or []
         for raw_msg in msgs:
@@ -569,7 +528,7 @@ class WeixinAdapter(PlatformAdapter):
     @staticmethod
     def is_available() -> bool:
         """Return True if an openclaw-weixin account exists."""
-        return (_OPENCLAW_WEIXIN_DIR / "accounts.json").exists()
+        return _accounts.discover(_WEIXIN_CHANNEL) is not None
 
 
 # ── Module-level helpers ───────────────────────────────────────────────────────
