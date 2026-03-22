@@ -58,7 +58,8 @@ curl -fsSL https://raw.githubusercontent.com/AI4Life-Institute/ghost-in-the-shel
 Or via Homebrew:
 
 ```bash
-brew install ai4life/tap/ghost
+brew tap ai4life-institute/tap
+brew install ai4life-institute/tap/ghost
 ```
 
 > The install script handles uv and tmux automatically. Python >= 3.12 is required.
@@ -98,7 +99,7 @@ Run the setup wizard and scan the QR code with WeChat:
 ghost wechat
 ```
 
-This logs in via QR code (no API key, no third-party account — uses your existing WeChat app). Your account credentials are saved locally at `~/.openclaw/openclaw-weixin/`. You can optionally set a default project path to auto-bind when you first message Ghost:
+This logs in via QR code (no API key, no third-party account — uses your existing WeChat app). Your account credentials are saved locally at `~/.gits/weixin/`. You can optionally set a default project path to auto-bind when you first message Ghost:
 
 ```bash
 ghost wechat --path /path/to/your/project
