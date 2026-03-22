@@ -46,14 +46,9 @@ class Ghost < Formula
     (bin/"gits").chmod 0755
   end
 
-  def post_install
-    # Launch setup wizard immediately after install
-    system bin/"ghost"
-  end
-
   def caveats
     <<~EOS
-      Run the setup wizard anytime to reconfigure:
+      Run the setup wizard to configure Ghost:
 
         ghost
 
