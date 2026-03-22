@@ -175,7 +175,7 @@ class WeixinAdapter(PlatformAdapter):
                 await self._send_image(user_id, msg.image, ctx)
             except Exception:
                 logger.exception("WeixinAdapter: image send failed, falling back to text")
-                await self._send_text(user_id, "[Screenshot failed — check the terminal]", ctx)
+                await self._send_text(user_id, "[截图发送失败，请查看终端]", ctx)
             return ""
 
         # Convert select_options to numbered text list (WeChat has no dropdowns)
@@ -189,7 +189,7 @@ class WeixinAdapter(PlatformAdapter):
             for i, opt in enumerate(msg.select_options):
                 desc = f" — {opt.description}" if opt.description else ""
                 lines.append(f"{i}. {opt.label}{desc}")
-            lines.append("\nReply with a number to select")
+            lines.append("\n回复数字选择")
             await self._send_text(user_id, "\n".join(lines), ctx)
             # Store the options so _dispatch can map number → callback_data
             self._pending_select[user_id] = [opt.value for opt in msg.select_options]
@@ -294,7 +294,7 @@ class WeixinAdapter(PlatformAdapter):
                     await cb(from_user, from_user, callback_data)
             else:
                 ctx = self._context_tokens.get(from_user)
-                await self._send_text(from_user, f"Invalid option. Reply with a number 0~{len(opts)-1}", ctx)
+                await self._send_text(from_user, f"无效选项，请回复 0~{len(opts)-1}", ctx)
             return
 
         # Command handling (takes priority)
@@ -310,7 +310,7 @@ class WeixinAdapter(PlatformAdapter):
                 return
 
         # Immediately acknowledge receipt so the user knows the message landed
-        _ACKS = ["Got it 👌", "Received", "On it", "Got it, let me check", "Received!", "OK"]
+        _ACKS = ["好的👌", "收到", "嗯嗯", "好的，我看看", "收到了", "好"]
         ctx = self._context_tokens.get(from_user)
         await self._send_text(from_user, random.choice(_ACKS), ctx)
 
@@ -367,7 +367,7 @@ class WeixinAdapter(PlatformAdapter):
         # No default path — reply with guidance
         await self._send_text(
             user_id,
-            "👋 Ghost is ready!\n\nSend /bind <project path> to bind a directory\nSend /ss for a screenshot\nSend /help to see all commands",
+            "👋 Ghost 已就绪！\n\n发送 /bind <项目路径> 绑定目录\n发送 /help 查看所有命令",
             self._context_tokens.get(user_id),
         )
 
@@ -626,15 +626,15 @@ def _split_text(text: str, limit: int) -> list[str]:
 
 
 _HELP_TEXT = """\
-Ghost commands:
-/bind <path>   Bind directory
-/s             Screenshot
-/i             Status
-/e             Enter
-/x             Escape
-/keys <keys>   Send key sequence
-/bash <cmd>    Run shell command
-/new           New session
-/done          End session
-/model <name>  Switch model
-Plain text → forwarded to terminal"""
+Ghost 命令:
+/bind <路径>  绑定目录
+/s            截图
+/i            状态
+/e            回车
+/x            Esc
+/keys <按键>  发送按键
+/bash <命令>  执行命令
+/new          新建会话
+/done         结束会话
+/model <名称> 切换模型
+直接发文字 → 转发到终端"""
