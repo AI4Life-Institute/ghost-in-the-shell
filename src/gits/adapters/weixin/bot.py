@@ -198,7 +198,11 @@ class WeixinAdapter(PlatformAdapter):
             return ""
 
         if msg.text:
-            for chunk in _split_text(msg.text, 3800):
+            # Suppress Discord-style bind confirmations (screenshot replaces them)
+            text = msg.text
+            if "tmux:" in text and ("Bound " in text or "Resuming session" in text):
+                return ""
+            for chunk in _split_text(text, 3800):
                 await self._send_text(user_id, chunk, ctx)
 
         return ""
@@ -350,26 +354,46 @@ class WeixinAdapter(PlatformAdapter):
                     _last_sid = _json.loads(_sessions_file.read_text()).get(user_id)
                 except Exception:
                     pass
-            await self._engine.handle_bind(
-                user_id, default_path, iact,
-                fresh=True, mode="bypassPermissions",
-                session_id=_last_sid,
-            )
+            if _last_sid:
+                await self._send_text(user_id, "⏳ 找到上次的会话，正在恢复…", ctx)
+                await self._engine.handle_bind(
+                    user_id, default_path, iact,
+                    fresh=True, mode="bypassPermissions",
+                    session_id=_last_sid,
+                )
+                # Wait and check if resume actually succeeded
+                await asyncio.sleep(4)
+                binding = self._engine.session_mgr.get_binding(user_id)
+                if binding:
+                    current_cmd = await self._engine.tmux.pane_current_command(
+                        binding.window_id
+                    )
+                    if current_cmd and current_cmd.lower() in {"zsh", "bash", "sh", "fish"}:
+                        logger.info(
+                            "WeChat: resume failed for %s (CLI exited), retrying fresh",
+                            user_id,
+                        )
+                        await self._send_text(user_id, "⚠️ 会话已过期，正在启动新会话…", ctx)
+                        await self._engine.handle_bind(
+                            user_id, default_path, iact,
+                            fresh=True, mode="bypassPermissions",
+                            session_id=None,
+                        )
+                    else:
+                        await self._send_text(user_id, "✅ 已恢复上次会话", ctx)
+            else:
+                await self._send_text(user_id, "⏳ 正在启动新会话…", ctx)
+                await self._engine.handle_bind(
+                    user_id, default_path, iact,
+                    fresh=True, mode="bypassPermissions",
+                    session_id=None,
+                )
+
             # Send help text so user knows what commands are available
             ctx = self._context_tokens.get(user_id)
             await self._send_text(user_id, _HELP_TEXT, ctx)
-            # After binding, forward the original message if it was plain text
-            if text and not text.startswith("/"):
-                binding = self._engine.session_mgr.get_binding(user_id)
-                if binding:
-                    incoming = IncomingMessage(
-                        platform="weixin",
-                        channel_id=user_id,
-                        user_id=user_id,
-                        text=text,
-                    )
-                    for cb in self._message_callbacks:
-                        await cb(incoming)
+            # Don't forward the first message — it triggered onboarding,
+            # not a task. Let the user send their task after seeing the screenshot.
             return
 
         # No default path — reply with guidance

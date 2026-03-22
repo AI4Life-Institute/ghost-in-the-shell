@@ -1128,7 +1128,11 @@ class Engine:
 
     async def _resume_suspended(self, binding: Any) -> None:
         """Resume a suspended binding by relaunching the CLI."""
-        logger.info("Auto-resuming suspended binding %s", binding.channel_id)
+        if binding.cli_session_id:
+            logger.info("Auto-resuming suspended binding %s (session %s)",
+                        binding.channel_id, binding.cli_session_id[:8])
+        else:
+            logger.info("Auto-restarting CLI for binding %s (fresh)", binding.channel_id)
         await self._ensure_window_alive(binding)
         cmd = self.launcher.build_launch_command(
             cli=binding.coding_cli,

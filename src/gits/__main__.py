@@ -172,14 +172,13 @@ def _cmd_reset_weixin() -> None:
     bindings = state.get("bindings", {})
     before = len(bindings)
 
-    # Save session IDs before removing so auto-bind can resume them
+    # Save session IDs so auto-bind can try to resume them
     sessions_file = Path("~/.gits/weixin_sessions.json").expanduser()
     saved = json.loads(sessions_file.read_text()) if sessions_file.exists() else {}
     for cid, b in bindings.items():
         if "@im.wechat" in cid and b.get("cli_session_id"):
             saved[cid] = b["cli_session_id"]
-    if saved:
-        sessions_file.write_text(json.dumps(saved, indent=2))
+    sessions_file.write_text(json.dumps(saved, indent=2))
 
     state["bindings"] = {
         cid: b for cid, b in bindings.items()

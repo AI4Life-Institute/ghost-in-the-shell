@@ -12,5 +12,14 @@ module.exports = {
         PYTHONUNBUFFERED: '1',
       },
     },
+    {
+      name: 'ghost-site',
+      cwd: '/Volumes/Crucial_8T/src/src/ai4life/ghost-in-the-shell/site',
+      script: 'python3',
+      args: '-m http.server 9191',
+      interpreter: 'none',
+      autorestart: true,
+      restart_delay: 3000,
+    },
   ],
 };

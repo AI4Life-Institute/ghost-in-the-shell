@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>使用说明 — Ghost</title>
+  <style>
+    :root {
+      --bg: #0a0a0f; --surface: #13131a; --border: #2a2a3a;
+      --accent: #7c6bff; --ghost: #c4b5fd; --text: #e8e8f0;
+      --muted: #8888a0; --green: #34d399;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, 'PingFang SC', sans-serif;
+      line-height: 1.7;
+    }
+    html[lang="zh"] .en { display: none !important; }
+    html[lang="en"] .zh { display: none !important; }
+
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 2rem; height: 54px;
+      background: rgba(10,10,15,0.92); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo { display: flex; align-items: center; gap: 0.5rem; text-decoration: none; }
+    .nav-logo img { height: 26px; width: 26px; object-fit: contain; }
+    .nav-logo span { font-size: 0.95rem; font-weight: 700; color: var(--ghost); }
+    .nav-right { display: flex; align-items: center; gap: 0.75rem; }
+    .lang-switch {
+      display: flex; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 6px; overflow: hidden; font-size: 0.78rem;
+    }
+    .lang-btn { padding: 0.25rem 0.6rem; cursor: pointer; border: none; background: transparent; color: var(--muted); }
+    .lang-btn.active { background: var(--accent); color: #fff; }
+    .back-link { color: var(--muted); text-decoration: none; font-size: 0.84rem; }
+    .back-link:hover { color: var(--text); }
+
+    .content { max-width: 640px; margin: 0 auto; padding: 3rem 2rem 5rem; }
+
+    h2 {
+      font-size: 1.1rem; font-weight: 700;
+      color: var(--ghost); margin: 2.5rem 0 1rem;
+    }
+    h2:first-child { margin-top: 0; }
+    p { color: var(--muted); font-size: 0.9rem; margin-bottom: 0.75rem; }
+    pre {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.9rem 1.1rem;
+      overflow-x: auto; margin-bottom: 1rem;
+    }
+    pre code { color: var(--green); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem; }
+    code {
+      background: rgba(124,107,255,0.12); color: var(--ghost);
+      border-radius: 4px; padding: 0.1em 0.4em;
+      font-family: 'SF Mono', monospace; font-size: 0.85em;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; margin-bottom: 1rem; }
+    th, td { padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border); text-align: left; }
+    th { color: var(--text); font-weight: 600; }
+    td { color: var(--muted); }
+    td:first-child { color: var(--ghost); font-family: 'SF Mono', monospace; font-size: 0.8rem; white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-logo" href="index.html">
+    <img src="logo.png" alt="Ghost">
+    <span>Ghost</span>
+  </a>
+  <div class="nav-right">
+    <a class="back-link" href="index.html">
+      <span class="zh">← 返回</span><span class="en">← Back</span>
+    </a>
+    <div class="lang-switch">
+      <button class="lang-btn active" onclick="setLang('zh')">中文</button>
+      <button class="lang-btn" onclick="setLang('en')">EN</button>
+    </div>
+  </div>
+</nav>
+
+<div class="content">
+
+  <h2><span class="zh">安装</span><span class="en">Install</span></h2>
+  <pre><code>brew install ai4life-institute/tap/ghost</code></pre>
+
+  <h2><span class="zh">初始化</span><span class="en">Setup</span></h2>
+  <p class="zh">运行向导，按提示配置微信或 Discord：</p>
+  <p class="en">Run the wizard to configure WeChat or Discord:</p>
+  <pre><code>ghost</code></pre>
+
+
+</div>
+
+<script>
+  function setLang(lang) {
+    document.documentElement.lang = lang;
+    document.querySelectorAll('.lang-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector(`.lang-btn[onclick="setLang('${lang}')"]`).classList.add('active');
+  }
+</script>
+</body>
+</html>
