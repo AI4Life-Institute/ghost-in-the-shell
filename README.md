@@ -5,12 +5,16 @@
 <h1 align="center">Ghost in the Shell</h1>
 
 <p align="center">
-  Control AI coding agents on your machine — from Discord or WeChat, on any device.
+  用 Discord 或微信，在手机上远程控制你电脑上的 AI 编程助手。
+</p>
+
+<p align="center">
+  <a href="README.en.md">English</a>
 </p>
 
 ---
 
-Watch your AI write code, review its terminal output, and approve permission prompts — all from your phone via Discord or WeChat.
+在外出时用手机看 AI 写代码、查看终端输出、批准权限提示——不需要开电脑，不需要 VPN。
 
 <p align="center">
   <img src="docs/demo.gif" width="300" alt="Ghost in the Shell demo">
@@ -18,186 +22,167 @@ Watch your AI write code, review its terminal output, and approve permission pro
 
 ---
 
-## Key Features
+## 主要特性
 
-- **Desktop ↔ mobile continuity** — start a session on your Mac, walk away, and pick it up on your phone; the AI keeps working while you switch devices
-- **Remote control from anywhere** — bind a project directory to a Discord channel or WeChat chat; every message you type is forwarded to the coding CLI running on your machine
-- **WeChat support** — no Discord account needed; control Ghost directly from WeChat using the same commands (`/bind`, `/bash`, `/s`, etc.)
-- **Terminal screenshots** — `/screenshot` (Discord) or `/s` (WeChat) sends a live snapshot of the terminal directly to your phone
-- **Interactive prompts as buttons** — when the CLI asks for permission, it becomes a Discord button you tap to approve or deny
-- **Multi-CLI support** — works with Claude Code, Codex CLI, and OpenCode; switch between them per channel
-- **Threads & isolated worktrees** — `/fork` spins up a sub-task thread backed by a fresh git worktree, keeping parallel work cleanly separated
-- **Session resume** — reconnecting to a directory shows a session picker so you can continue where you left off
-- **Cross-CLI session import** — when resuming, sessions from other CLIs appear in the picker (marked `↗[codex]`); selecting one extracts the full conversation to `.gits-import.md` and injects it into a fresh session of your target CLI, so you can pick up a Codex conversation in Claude Code (or vice versa) without losing context
-- **tmux-backed sessions** — each project runs in a real tmux window; developers get full terminal access locally while Ghost handles the Discord bridge
-- **Automatic memory management** — idle CLI processes are automatically suspended after inactivity (threshold adapts to available system RAM: 2 h normally, down to 10 min under memory pressure) and transparently resumed the moment a new message arrives, keeping memory usage in check without losing conversation history
-- **Subscription-safe** — Ghost drives the official CLI tools (Claude Code, Codex) exactly as a human would; no API key required, no terms-of-service gray area — your existing Pro/Max subscription just works
+- **桌面 ↔ 手机无缝切换** — 在 Mac 上启动任务，出门后用手机接着看；AI 持续工作，你随时介入
+- **随时随地远程控制** — 绑定一个项目目录到 Discord 频道或微信对话，直接发消息就能操控 CLI
+- **微信支持** — 不需要 Discord 账号，用你日常的微信直接操控 Ghost（`/bind`、`/bash`、`/s` 等）
+- **终端截图** — 发 `/s` 立刻把当前终端画面截图发到手机
+- **权限确认变按钮** — CLI 弹出权限提示时，Discord 显示可点击的按钮，手机上一键批准或拒绝
+- **多 CLI 支持** — 支持 Claude Code、Codex CLI、OpenCode，每个频道可独立切换
+- **会话恢复** — 重新绑定时显示历史会话列表，可续接之前的对话
+- **tmux 实体终端** — 每个项目运行在真实的 tmux 窗口里，本地开发者仍可直接操作终端
+- **自动内存管理** — 空闲进程自动挂起（空闲阈值随可用内存动态调整：内存充足时 2 小时，内存紧张时最短 10 分钟），收到消息后自动恢复
+- **订阅安全** — 直接驱动官方 CLI 工具，和人工操作完全一样，无需 API Key，无 ToS 风险
 
-## Why Ghost?
+## 为什么选 Ghost？
 
-| | Ghost | OpenClaw | Native CLI |
+| | Ghost | OpenClaw | 本地 CLI |
 |---|:---:|:---:|:---:|
-| Remote control via Discord | ✅ | ✅ | ❌ |
-| Remote control via WeChat | ✅ | ❌ | ❌ |
-| Team collaboration | ✅ | ✅ | ❌ |
-| Works with Pro/Max subscription — no API key needed | ✅ | ⚠️ API key required for stable use | ✅ |
-| Account-safe — no ToS gray area | ✅ | ⚠️ Documented account suspensions | ✅ |
-| Real local terminal (tmux) | ✅ | ❌ | ✅ |
-| Cross-CLI session import (e.g. Codex → Claude) | ✅ | ❌ | ❌ |
+| Discord 远程控制 | ✅ | ✅ | ❌ |
+| 微信远程控制 | ✅ | ❌ | ❌ |
+| 团队协作 | ✅ | ✅ | ❌ |
+| 支持 Pro/Max 订阅，无需 API Key | ✅ | ⚠️ 稳定使用需要 API Key | ✅ |
+| 账号安全，无 ToS 风险 | ✅ | ⚠️ 有封号记录 | ✅ |
+| 真实本地终端（tmux） | ✅ | ❌ | ✅ |
+| 跨 CLI 会话导入（如 Codex → Claude） | ✅ | ❌ | ❌ |
 
 ---
 
-## Quick Start
+## 快速上手
 
-**1. Install**
+**1. 安装**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AI4Life-Institute/ghost-in-the-shell/master/install.sh | bash
 ```
 
-Or via Homebrew:
+或通过 Homebrew：
 
 ```bash
 brew tap ai4life-institute/tap
 brew install ai4life-institute/tap/ghost
 ```
 
-> The install script handles uv and tmux automatically. Python >= 3.12 is required.
+> 安装脚本会自动处理 uv 和 tmux 的安装。需要 Python >= 3.12。
 
-**2. Install a coding CLI (at least one)**
+**2. 安装至少一个编程 CLI**
 
-| CLI | Install |
+| CLI | 安装命令 |
 |---|---|
 | Claude Code | `npm i -g @anthropic-ai/claude-code` |
 | Codex | `npm i -g @openai/codex` |
 | OpenCode | `curl -fsSL opencode.ai/install \| bash` |
 
-**3. Configure a platform (Discord or WeChat — or both)**
+**3. 配置平台（Discord 或微信，或两者都用）**
 
-**Option A — Discord**
-
-Run the setup wizard:
+运行设置向导：
 
 ```bash
-ghost discord
+ghost
 ```
 
-Or set manually in `~/.gits/config.env`:
+**Discord 手动配置**
+
+在 `~/.gits/config.env` 中设置：
 
 ```bash
 GITS_DISCORD_TOKEN=your-bot-token
 ALLOWED_GUILDS=["your-server-id"]
 ```
 
-The bot needs **Message Content Intent** enabled and must be invited with permissions to send messages and create threads.
+Bot 需要开启 **Message Content Intent**，并授权发送消息和创建线程的权限。
 
-**Option B — WeChat**
+**微信配置**
 
-Run the setup wizard and scan the QR code with WeChat:
-
-```bash
-ghost wechat
-```
-
-This logs in via QR code (no API key, no third-party account — uses your existing WeChat app). Your account credentials are saved locally at `~/.gits/weixin/`. You can optionally set a default project path to auto-bind when you first message Ghost:
+运行向导后扫描二维码登录（不需要 API Key，直接使用你的微信账号）。可选设置默认项目路径，首次发消息自动绑定：
 
 ```bash
 ghost wechat --path /path/to/your/project
 ```
 
-To re-authenticate later:
+重新登录（扫码）：
 
 ```bash
 ghost wechat --relogin
 ```
 
-Both platforms can run simultaneously — Ghost routes messages from each independently.
-
-**4. Start**
+**4. 启动**
 
 ```bash
 ghost start
 ```
 
-Hooks are auto-installed on first start. For dev mode with auto-restart on file changes:
-
-```bash
-ghost start --dev
-```
+Ghost 会作为后台服务通过 launchd 运行，开机自启，无需手动维护。
 
 ---
 
-## Usage
+## 使用方式
 
-### Discord workflow
+### Discord 工作流
 
-1. Create a Discord channel (e.g. `#my-feature`)
-2. `/bind /path/to/project` — launches the CLI in a tmux window
-3. Type in the channel — messages are forwarded to the CLI
-4. CLI responses stream back to Discord automatically
-5. Permission prompts appear as buttons — tap to approve or deny
-6. `/screenshot` to see the terminal at any time
-7. `/done` when done
+1. 创建一个 Discord 频道（如 `#my-feature`）
+2. `/bind /path/to/project` — 在 tmux 窗口中启动 CLI
+3. 直接发消息 — 消息转发给 CLI
+4. CLI 响应自动回流到 Discord
+5. 权限提示以按钮形式出现，点击批准或拒绝
+6. `/screenshot` 随时查看终端截图
+7. `/done` 结束任务
 
-### WeChat workflow
+### 微信工作流
 
-1. Run `ghost wechat --path /path/to/project` to set a default project (one-time setup)
-2. Send Ghost any message on WeChat — it auto-binds to your default project on first contact
-3. Type naturally — messages are forwarded to the CLI running on your Mac
-4. Send `/s` at any time to get a terminal screenshot
-5. Send `/bind /other/path` to switch to a different project
-6. Send `/help` to see all available commands
+1. 运行 `ghost wechat --path /path/to/project` 设置默认项目（一次性）
+2. 在微信向 Ghost 发任意消息 — 自动绑定到默认项目
+3. 直接发文字 — 转发到 Mac 上运行的 CLI
+4. 随时发 `/s` 获取终端截图
+5. 发 `/bind /other/path` 切换项目
+6. 发 `/help` 查看所有命令
 
-No need to keep a desktop open — Ghost runs as a background service via launchd and responds whenever you message it.
+Ghost 作为后台服务运行，不需要开着桌面，随时发消息随时响应。
 
-### Discord commands
+### Discord 命令
 
-| Command | Description |
+| 命令 | 说明 |
 |---|---|
-| `/bind <path> [mode] [cli]` | Bind channel to a project, launch CLI. `mode`: `default` (confirm) or `bypassPermissions` (YOLO) |
-| `/unbind` | Unbind and close the window |
-| `/info` | Show binding info, session file path, and imported context file |
-| `/screenshot` | Send a terminal screenshot |
-| `/esc` | Send Escape key (interrupt current operation) |
-| `/done` | Close window and archive thread |
-| `/new [message]` | Reset CLI session |
-| `/bash <command>` | Run a shell command in the project directory |
-| `/keys <keys>` | Send keystrokes (Enter, Escape, Ctrl-C, Up, Down…) |
-| `/model [name]` | Switch model (sonnet, opus, haiku, o3, gpt-4o…) |
-| `/mode <mode>` | Switch permission mode without restarting. Supports all four: `default`, `bypassPermissions`, `auto`, `acceptEdits` |
-| `/thread <message>` | Create a sub-thread sharing the same directory |
-| `/fork <title>` | Create a sub-thread with an isolated git worktree |
-| `/browse <goal>` | Run a browser agent task |
-| `/compact` `/clear` `/cost` `/diff` `/memory` `/context` `/usage` | Forwarded directly to the CLI |
-| `/cc <command>` | Forward any slash command to the CLI |
+| `/bind <路径> [mode] [cli]` | 绑定频道到项目，启动 CLI。`mode`: `default`（需确认）或 `bypassPermissions`（直接执行） |
+| `/unbind` | 解除绑定，关闭窗口 |
+| `/info` | 查看绑定信息、会话文件路径 |
+| `/screenshot` | 发送终端截图 |
+| `/esc` | 发送 Escape 键 |
+| `/done` | 关闭窗口并归档线程 |
+| `/new [消息]` | 重置 CLI 会话 |
+| `/bash <命令>` | 在项目目录执行 shell 命令 |
+| `/keys <按键>` | 发送按键（Enter、Escape、Ctrl-C、Up、Down…） |
+| `/model [名称]` | 切换模型（sonnet、opus、haiku、o3、gpt-4o…） |
+| `/mode <模式>` | 切换权限模式（`default`、`bypassPermissions`、`auto`、`acceptEdits`） |
+| `/fork <标题>` | 创建独立 git worktree 的子线程 |
+| `/cc <命令>` | 直接转发斜杠命令给 CLI |
 
-### WeChat commands
+### 微信命令
 
-Send these as plain-text messages to Ghost on WeChat:
-
-| Command | Description |
+| 命令 | 说明 |
 |---|---|
-| `/bind <path>` | Bind to a project directory and launch the CLI |
-| `/s` | Terminal screenshot |
-| `/i` | Show binding status |
-| `/e` | Send Enter key |
-| `/x` | Send Escape key |
-| `/keys <keys>` | Send a key sequence |
-| `/bash <command>` | Run a shell command |
-| `/new` | Reset CLI session |
-| `/done` | End session |
-| `/model <name>` | Switch model |
-| `/help` | Show all commands |
-| (plain text) | Forwarded directly to the terminal |
+| `/bind <路径>` | 绑定项目目录，启动 CLI |
+| `/s` | 终端截图 |
+| `/i` | 查看绑定状态 |
+| `/e` | 发送回车 |
+| `/x` | 发送 Escape |
+| `/keys <按键>` | 发送按键序列 |
+| `/bash <命令>` | 执行 shell 命令 |
+| `/new` | 新建会话 |
+| `/done` | 结束会话 |
+| `/model <名称>` | 切换模型 |
+| `/help` | 查看所有命令 |
+| （普通文字） | 直接转发到终端 |
 
 ---
 
-## Docs
+## 文档
 
-See [docs/architecture.md](docs/architecture.md) for architecture, internals, and configuration reference.
+架构说明、内部机制和配置参考见 [docs/architecture.md](docs/architecture.md)。
 
 ---
 
-## License
+## 许可证
 
-AI4Life Community License — free for individuals and organizations with annual revenue under $1M. Commercial use above that threshold requires a separate license — contact admins@ai4life.com. © 2026 [AI4Life Institute](https://github.com/AI4Life-Institute)
+AI4Life 社区许可证 — 个人及年收入低于 $100 万的组织免费使用。超出此范围的商业使用需要单独授权，请联系 admins@ai4life.com。© 2026 [AI4Life Institute](https://github.com/AI4Life-Institute)
