@@ -940,13 +940,13 @@ class Engine:
         await self._auto_screenshot(channel_id, binding, interaction)
 
 
-    async def handle_kill(
+    async def handle_done(
         self,
         channel_id: str,
         interaction: Any,
         force_worktree: bool = False,
     ) -> None:
-        """Handle /kill — kill tmux window, archive thread, clean worktree.
+        """Handle /done — end work session, archive and lock thread, clean worktree.
 
         If the session uses a git worktree and it has uncommitted changes,
         a confirmation prompt is shown (unless *force_worktree* is True).
@@ -993,20 +993,21 @@ class Engine:
                     )
                 return
 
-        # Kill child sessions first (threads and forks)
+        # Reply before archiving — followup cannot post to a locked thread
+        status_parts = [f"Window `{binding.window_name}` done. Binding removed."]
         children = self.session_mgr.list_channel_threads(channel_id)
-        for child in children:
-            await self._kill_single(child.channel_id, archive_thread=True)
-
-        # Kill this session
-        await self._kill_single(channel_id, archive_thread=True, remove_worktree=is_wt)
-
-        status_parts = [f"Window `{binding.window_name}` killed. Binding removed."]
         if children:
-            status_parts.append(f"Also killed {len(children)} child session(s).")
+            status_parts.append(f"Also closed {len(children)} child session(s).")
         if is_wt:
             status_parts.append("Worktree removed.")
         await self._reply(interaction, " ".join(status_parts))
+
+        # Close child sessions first (threads and forks)
+        for child in children:
+            await self._kill_single(child.channel_id, archive_thread=True)
+
+        # Close this session
+        await self._kill_single(channel_id, archive_thread=True, remove_worktree=is_wt)
 
     async def _kill_single(
         self,
@@ -1030,11 +1031,11 @@ class Engine:
             await asyncio.to_thread(_remove_worktree, binding.work_dir)
 
         # Archive thread
-        if archive_thread and binding.parent_channel_id and self._adapter:
+        if archive_thread and self._adapter:
             try:
                 await self._adapter.archive_thread(channel_id)
             except Exception:
-                logger.debug("Could not archive thread %s", channel_id)
+                logger.warning("Could not archive thread %s", channel_id, exc_info=True)
 
     async def _suspend_binding(self, channel_id: str) -> None:
         """Kill the claude process in a tmux window but keep the window alive."""
@@ -1369,11 +1370,11 @@ class Engine:
 
         elif action == "kill_wt_yes" and len(parts) >= 2:
             target_channel = parts[1]
-            await self.handle_kill(target_channel, interaction=None, force_worktree=True)
+            await self.handle_done(target_channel, interaction=None, force_worktree=True)
             if self._adapter:
                 await self._adapter.send_message(
                     channel_id,
-                    OutgoingMessage(text="Session killed and worktree removed."),
+                    OutgoingMessage(text="Session closed and worktree removed."),
                 )
 
         elif action == "kill_wt_no" and len(parts) >= 2:

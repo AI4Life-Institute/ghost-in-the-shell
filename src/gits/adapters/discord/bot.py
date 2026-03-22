@@ -224,7 +224,7 @@ class DiscordAdapter(PlatformAdapter):
         if thread is None:
             thread = await self.bot.fetch_channel(int(thread_id))
         if isinstance(thread, discord.Thread):
-            await thread.edit(archived=True)
+            await thread.edit(archived=True, locked=True)
 
     # ------------------------------------------------------------------
     # Access control
@@ -644,8 +644,8 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), interaction
                 )
 
-        @tree.command(name="kill", description="Kill the tmux window and archive thread")
-        async def cmd_kill(interaction: discord.Interaction):
+        @tree.command(name="done", description="End the work session and close this thread")
+        async def cmd_done(interaction: discord.Interaction):
             if not self._check_interaction_access(interaction):
                 await interaction.response.send_message(
                     "Access denied.", ephemeral=True
@@ -653,7 +653,7 @@ class DiscordAdapter(PlatformAdapter):
                 return
             await interaction.response.defer()
             if self._engine:
-                await self._engine.handle_kill(
+                await self._engine.handle_done(
                     str(interaction.channel_id), interaction
                 )
 

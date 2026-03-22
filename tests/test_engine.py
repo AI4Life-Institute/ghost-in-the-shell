@@ -211,8 +211,8 @@ class TestHandleStop:
         asyncio.run(_test())
 
 
-class TestHandleKill:
-    def test_kill_removes_binding(self, engine, tmp_path):
+class TestHandleDone:
+    def test_done_removes_binding(self, engine, tmp_path):
         async def _test():
             project_dir = tmp_path / "proj"
             project_dir.mkdir()
@@ -220,10 +220,64 @@ class TestHandleKill:
             assert engine.session_mgr.get_binding("ch-1") is not None
 
             interaction = FakeInteraction()
-            await engine.handle_kill("ch-1", interaction)
+            await engine.handle_done("ch-1", interaction)
 
             engine.tmux.kill_window.assert_called_once()
             assert engine.session_mgr.get_binding("ch-1") is None
+
+        asyncio.run(_test())
+
+    def test_done_reply_before_archive(self, engine, tmp_path):
+        """Reply to interaction must happen before archive_thread is called."""
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            call_order = []
+
+            async def _archive(channel_id):
+                call_order.append("archive")
+
+            adapter = MagicMock()
+            adapter.send_message = AsyncMock(return_value="msg-1")
+            adapter.archive_thread = _archive
+            engine.set_adapter(adapter)
+
+            # Bind parent directly to bypass handle_bind
+            await engine.session_mgr.bind(
+                platform="discord",
+                channel_id="ch-1",
+                window_id="@1",
+                window_name="parent",
+                work_dir=str(project_dir),
+                coding_cli="claude",
+            )
+            # Bind child thread so archive_thread gets called
+            await engine.session_mgr.bind(
+                platform="discord",
+                channel_id="thread-1",
+                window_id="@2",
+                window_name="child",
+                work_dir=str(project_dir),
+                coding_cli="claude",
+                parent_channel_id="ch-1",
+            )
+
+            interaction = FakeInteraction()
+            orig_send = interaction.followup.send
+
+            async def _reply(*args, **kwargs):
+                call_order.append("reply")
+                return await orig_send(*args, **kwargs)
+
+            interaction.followup.send = _reply
+
+            with patch("gits.core.engine._is_worktree", return_value=False):
+                await engine.handle_done("ch-1", interaction)
+
+            assert "reply" in call_order
+            assert "archive" in call_order
+            assert call_order.index("reply") < call_order.index("archive")
 
         asyncio.run(_test())
 
@@ -920,22 +974,27 @@ class TestWorktreeUtils:
 # ------------------------------------------------------------------
 
 
-class TestHandleKillWithChildren:
-    def test_kill_parent_kills_children(self, engine, tmp_path):
+class TestHandleDoneWithChildren:
+    def test_done_parent_closes_children(self, engine, tmp_path):
         async def _test():
             project_dir = tmp_path / "proj"
             project_dir.mkdir()
 
             adapter = MagicMock()
             adapter.send_message = AsyncMock(return_value="msg-1")
-            adapter.create_thread = AsyncMock(return_value="thread-1")
             adapter.archive_thread = AsyncMock()
             engine.set_adapter(adapter)
 
-            # Bind parent
-            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
-
-            # Manually create child binding
+            # Bind parent directly
+            await engine.session_mgr.bind(
+                platform="discord",
+                channel_id="ch-1",
+                window_id="@1",
+                window_name="parent",
+                work_dir=str(project_dir),
+                coding_cli="claude",
+            )
+            # Bind child thread
             await engine.session_mgr.bind(
                 platform="discord",
                 channel_id="thread-1",
@@ -948,7 +1007,7 @@ class TestHandleKillWithChildren:
 
             interaction = FakeInteraction()
             with patch("gits.core.engine._is_worktree", return_value=False):
-                await engine.handle_kill("ch-1", interaction)
+                await engine.handle_done("ch-1", interaction)
 
             # Both parent and child should be unbound
             assert engine.session_mgr.get_binding("ch-1") is None
@@ -1103,7 +1162,7 @@ class TestE2EThread:
 
 
 class TestE2EForkWorktree:
-    """E2E: /fork creates worktree → session in isolated dir → kill cleans up."""
+    """E2E: /fork creates worktree → session in isolated dir → done cleans up."""
 
     def test_fork_full_flow(self, settings, tmp_path):
         async def _test():
@@ -1136,10 +1195,10 @@ class TestE2EForkWorktree:
             reply = interaction.followup.send.call_args[0][0]
             assert "worktree" in reply.lower()
 
-            # Step 2: Kill the fork — should clean up worktree
+            # Step 2: Done — should clean up worktree
             wt_path = child.work_dir
             kill_interaction = FakeInteraction()
-            await engine.handle_kill("fork-thread-1", kill_interaction)
+            await engine.handle_done("fork-thread-1", kill_interaction)
 
             # Worktree should be gone
             assert not Path(wt_path).exists()
@@ -1165,9 +1224,9 @@ class TestE2EForkWorktree:
             # Make worktree dirty
             (Path(child.work_dir) / "dirty.txt").write_text("uncommitted")
 
-            # Try to kill — should show confirmation, NOT delete yet
+            # Try to done — should show confirmation, NOT delete yet
             kill_interaction = FakeInteraction()
-            await engine.handle_kill("fork-thread-2", kill_interaction)
+            await engine.handle_done("fork-thread-2", kill_interaction)
 
             # Binding should still exist (waiting for confirmation)
             assert engine.session_mgr.get_binding("fork-thread-2") is not None
@@ -1191,7 +1250,7 @@ class TestE2EForkWorktree:
 
         asyncio.run(_test())
 
-    def test_kill_parent_cascades_to_fork_children(self, settings, tmp_path):
+    def test_done_parent_cascades_to_fork_children(self, settings, tmp_path):
         async def _test():
             repo_dir = tmp_path / "repo"
             _make_git_repo(repo_dir)
@@ -1209,9 +1268,9 @@ class TestE2EForkWorktree:
             assert child is not None
             wt_path = child.work_dir
 
-            # Kill parent — should cascade
+            # Done on parent — should cascade
             kill_interaction = FakeInteraction()
-            await engine.handle_kill("ch-1", kill_interaction)
+            await engine.handle_done("ch-1", kill_interaction)
 
             # Both gone
             assert engine.session_mgr.get_binding("ch-1") is None
