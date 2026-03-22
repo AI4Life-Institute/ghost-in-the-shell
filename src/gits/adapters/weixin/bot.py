@@ -332,11 +332,20 @@ class WeixinAdapter(PlatformAdapter):
         if ctx_token:
             self._context_tokens[from_user] = ctx_token
 
-        # Reject voice messages explicitly
+        # Handle voice messages
         if _is_voice_message(raw):
             ctx = self._context_tokens.get(from_user)
-            await self._send_text(from_user, "小鬼暂不支持语音消息，发文字吧～", ctx)
-            return
+            voice_text = _extract_voice_text(raw)
+            if voice_text:
+                # WeChat provided transcription — echo it and fall through as text
+                await self._send_text(from_user, f"🎙️ 识别到语音：「{voice_text}」", ctx)
+            else:
+                await self._send_text(
+                    from_user,
+                    "小鬼暂时无法识别语音内容，建议在手机上用语音转文字后再发过来～",
+                    ctx,
+                )
+                return
 
         # Handle incoming images — download, save, forward to Claude as @path
         image_item = _extract_image_item(raw)
@@ -1045,6 +1054,14 @@ def _is_voice_message(raw: dict) -> bool:
         if item.get("type") == _ITEM_TYPE_VOICE:
             return True
     return False
+
+
+def _extract_voice_text(raw: dict) -> str | None:
+    """Return transcribed text from a voice item, or None if unavailable."""
+    for item in raw.get("item_list") or []:
+        if item.get("type") == _ITEM_TYPE_VOICE:
+            return item.get("voice_item", {}).get("text") or None
+    return None
 
 
 def _aes_ecb_padded_size(plaintext_size: int) -> int:
