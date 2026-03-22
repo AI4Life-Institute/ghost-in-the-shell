@@ -14,7 +14,7 @@ module.exports = {
     },
     {
       name: 'ghost-site',
-      cwd: '/Volumes/Crucial_8T/src/src/ai4life/ghost-in-the-shell/site',
+      cwd: `${__dirname}/site`,
       script: 'python3',
       args: '-m http.server 9191',
       interpreter: 'none',
