@@ -5,12 +5,12 @@
 <h1 align="center">Ghost in the Shell</h1>
 
 <p align="center">
-  Control AI coding agents on your machine — from Discord, on any device.
+  Control AI coding agents on your machine — from Discord or WeChat, on any device.
 </p>
 
 ---
 
-Watch your AI write code, review its terminal output, and approve permission prompts — all from your phone via Discord.
+Watch your AI write code, review its terminal output, and approve permission prompts — all from your phone via Discord or WeChat.
 
 <p align="center">
   <img src="docs/demo.gif" width="300" alt="Ghost in the Shell demo">
@@ -21,8 +21,9 @@ Watch your AI write code, review its terminal output, and approve permission pro
 ## Key Features
 
 - **Desktop ↔ mobile continuity** — start a session on your Mac, walk away, and pick it up on your phone; the AI keeps working while you switch devices
-- **Remote control from anywhere** — bind a project directory to a Discord channel; every message you type is forwarded to the coding CLI running on your machine
-- **Terminal screenshots** — `/screenshot` sends a live snapshot of the terminal directly into Discord
+- **Remote control from anywhere** — bind a project directory to a Discord channel or WeChat chat; every message you type is forwarded to the coding CLI running on your machine
+- **WeChat support** — no Discord account needed; control Ghost directly from WeChat using the same commands (`/bind`, `/bash`, `/s`, etc.)
+- **Terminal screenshots** — `/screenshot` (Discord) or `/s` (WeChat) sends a live snapshot of the terminal directly to your phone
 - **Interactive prompts as buttons** — when the CLI asks for permission, it becomes a Discord button you tap to approve or deny
 - **Multi-CLI support** — works with Claude Code, Codex CLI, and OpenCode; switch between them per channel
 - **Threads & isolated worktrees** — `/fork` spins up a sub-task thread backed by a fresh git worktree, keeping parallel work cleanly separated
@@ -37,6 +38,7 @@ Watch your AI write code, review its terminal output, and approve permission pro
 | | Ghost | OpenClaw | Native CLI |
 |---|:---:|:---:|:---:|
 | Remote control via Discord | ✅ | ✅ | ❌ |
+| Remote control via WeChat | ✅ | ❌ | ❌ |
 | Team collaboration | ✅ | ✅ | ❌ |
 | Works with Pro/Max subscription — no API key needed | ✅ | ⚠️ API key required for stable use | ✅ |
 | Account-safe — no ToS gray area | ✅ | ⚠️ Documented account suspensions | ✅ |
@@ -69,21 +71,46 @@ brew install ai4life/tap/ghost
 | Codex | `npm i -g @openai/codex` |
 | OpenCode | `curl -fsSL opencode.ai/install \| bash` |
 
-**3. Configure**
+**3. Configure a platform (Discord or WeChat — or both)**
 
-Create `.env` in the project root:
+**Option A — Discord**
+
+Run the setup wizard:
 
 ```bash
-# Required
-GITS_DISCORD_TOKEN=your-bot-token
-ALLOWED_GUILDS=["your-server-id"]
-
-# Optional
-ALLOWED_USERS=["restrict-to-user-id"]
-LOG_LEVEL=INFO
+ghost discord
 ```
 
-The Discord bot needs **Message Content Intent** enabled and must be invited with permissions to send messages and create threads.
+Or set manually in `~/.gits/config.env`:
+
+```bash
+GITS_DISCORD_TOKEN=your-bot-token
+ALLOWED_GUILDS=["your-server-id"]
+```
+
+The bot needs **Message Content Intent** enabled and must be invited with permissions to send messages and create threads.
+
+**Option B — WeChat**
+
+Run the setup wizard and scan the QR code with WeChat:
+
+```bash
+ghost wechat
+```
+
+This logs in via QR code (no API key, no third-party account — uses your existing WeChat app). Your account credentials are saved locally at `~/.openclaw/openclaw-weixin/`. You can optionally set a default project path to auto-bind when you first message Ghost:
+
+```bash
+ghost wechat --path /path/to/your/project
+```
+
+To re-authenticate later:
+
+```bash
+ghost wechat --relogin
+```
+
+Both platforms can run simultaneously — Ghost routes messages from each independently.
 
 **4. Start**
 
@@ -101,7 +128,7 @@ ghost start --dev
 
 ## Usage
 
-### Basic workflow
+### Discord workflow
 
 1. Create a Discord channel (e.g. `#my-feature`)
 2. `/bind /path/to/project` — launches the CLI in a tmux window
@@ -109,9 +136,20 @@ ghost start --dev
 4. CLI responses stream back to Discord automatically
 5. Permission prompts appear as buttons — tap to approve or deny
 6. `/screenshot` to see the terminal at any time
-7. `/kill` when done
+7. `/done` when done
 
-### Commands
+### WeChat workflow
+
+1. Run `ghost wechat --path /path/to/project` to set a default project (one-time setup)
+2. Send Ghost any message on WeChat — it auto-binds to your default project on first contact
+3. Type naturally — messages are forwarded to the CLI running on your Mac
+4. Send `/s` at any time to get a terminal screenshot
+5. Send `/bind /other/path` to switch to a different project
+6. Send `/help` to see all available commands
+
+No need to keep a desktop open — Ghost runs as a background service via launchd and responds whenever you message it.
+
+### Discord commands
 
 | Command | Description |
 |---|---|
@@ -120,7 +158,7 @@ ghost start --dev
 | `/info` | Show binding info, session file path, and imported context file |
 | `/screenshot` | Send a terminal screenshot |
 | `/esc` | Send Escape key (interrupt current operation) |
-| `/kill` | Close window and archive thread |
+| `/done` | Close window and archive thread |
 | `/new [message]` | Reset CLI session |
 | `/bash <command>` | Run a shell command in the project directory |
 | `/keys <keys>` | Send keystrokes (Enter, Escape, Ctrl-C, Up, Down…) |
@@ -131,6 +169,25 @@ ghost start --dev
 | `/browse <goal>` | Run a browser agent task |
 | `/compact` `/clear` `/cost` `/diff` `/memory` `/context` `/usage` | Forwarded directly to the CLI |
 | `/cc <command>` | Forward any slash command to the CLI |
+
+### WeChat commands
+
+Send these as plain-text messages to Ghost on WeChat:
+
+| Command | Description |
+|---|---|
+| `/bind <path>` | Bind to a project directory and launch the CLI |
+| `/s` | Terminal screenshot |
+| `/i` | Show binding status |
+| `/e` | Send Enter key |
+| `/x` | Send Escape key |
+| `/keys <keys>` | Send a key sequence |
+| `/bash <command>` | Run a shell command |
+| `/new` | Reset CLI session |
+| `/done` | End session |
+| `/model <name>` | Switch model |
+| `/help` | Show all commands |
+| (plain text) | Forwarded directly to the terminal |
 
 ---
 

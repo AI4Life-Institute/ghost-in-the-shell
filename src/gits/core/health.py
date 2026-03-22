@@ -197,9 +197,11 @@ class HealthMonitor:
             await self._recover_all()
             return
 
-        # Check individual windows
+        # Check individual windows (skip suspended — they have no tmux window by design)
         bindings = self.session_mgr.list_bindings()
         for binding in bindings:
+            if binding.suspended:
+                continue
             if not await self.tmux.window_exists(binding.window_id):
                 logger.warning(
                     "tmux window '%s' (%s) is gone",

@@ -220,12 +220,15 @@ class Engine:
         interaction: Any,
         mode: str | None = None,
         cli: str | None = None,
+        fresh: bool = False,
+        session_id: str | None = None,
     ) -> None:
         """Handle /bind — bind channel to a project directory.
 
         When existing CLI sessions are found in the directory, shows a
         session picker with buttons.  Otherwise starts a fresh session
-        immediately.
+        immediately.  Pass ``fresh=True`` to skip session discovery entirely.
+        Pass ``session_id`` to resume a specific session directly.
         """
         if path:
             # Direct path specified — validate and bind
@@ -249,7 +252,7 @@ class Engine:
             cli = cli or self.settings.coding_cli_command
 
             # Discover existing sessions (all CLIs, target first)
-            sessions = self.launcher.discover_all_sessions(str(p), target_cli=cli)
+            sessions = [] if fresh else self.launcher.discover_all_sessions(str(p), target_cli=cli)
 
             if sessions:
                 # Store pending bind info and show session picker
@@ -285,10 +288,10 @@ class Engine:
                     )
                 return
             else:
-                # No sessions found — start fresh directly
+                # No sessions found — start fresh (or resume if session_id provided)
                 await self._create_bind(
                     channel_id, str(p), window_name, cli, interaction,
-                    mode=mode,
+                    mode=mode, session_id=session_id,
                 )
         else:
             await self._reply(
@@ -1211,10 +1214,10 @@ class Engine:
         await self.session_mgr._save()
 
         mode_label = {
-            "bypassPermissions": "YOLO (全自動)",
+            "bypassPermissions": "YOLO (fully automatic)",
             "auto": "Auto",
             "acceptEdits": "AcceptEdits",
-            "default": "普通 (需要確認)",
+            "default": "Normal (requires confirmation)",
         }.get(mode, mode)
         resume_note = f" (resuming `{session_id[:16]}…`)" if session_id else " (fresh)"
         await self._reply(

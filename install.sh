@@ -47,22 +47,20 @@ fi
 
 ok "ghost installed → $(command -v ghost)"
 
-# ── 4. next steps ──────────────────────────────────────────────────────────────
-cat <<'EOF'
+# ── 4. shell rc — ensure ghost is on PATH permanently ──────────────────────────
+_add_to_path() {
+  local dir="$1" rc="$2"
+  if [ -f "$rc" ] && ! grep -q "$dir" "$rc" 2>/dev/null; then
+    printf '\n# Ghost / uv tools\nexport PATH="%s:$PATH"\n' "$dir" >> "$rc"
+  fi
+}
+_UV_BIN="$(uv tool bin-dir 2>/dev/null || echo "$HOME/.local/bin")"
+_add_to_path "$_UV_BIN" "$HOME/.zshrc"
+_add_to_path "$_UV_BIN" "$HOME/.bashrc"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Ghost in the Shell — installed!
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ── 5. launch setup wizard ─────────────────────────────────────────────────────
+printf '\033[1;32m\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+printf '  Ghost installed ✓  Starting setup…\n'
+printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n'
 
-Next: create a .env file with your Discord bot token:
-
-  GITS_DISCORD_TOKEN=your-bot-token
-  ALLOWED_GUILDS=["your-server-id"]
-
-Then start:
-
-  ghost start
-
-Docs: https://github.com/AI4Life-Institute/ghost-in-the-shell
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EOF
+exec "$_UV_BIN/ghost"

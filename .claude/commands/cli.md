@@ -107,6 +107,13 @@ sqlite3 ~/.gits/gits.db "PRAGMA integrity_check;"
 
 5. **Keep responses short**: show the command you ran, then the key result. Skip boilerplate output that doesn't add information.
 
+## Platform support
+
+Ghost supports two messaging platforms:
+
+- **Discord** — slash commands (`/bind`, `/info`, `/bash`, etc.) in any channel or thread. Configure with `ghost discord` or set `GITS_DISCORD_TOKEN` in `~/.gits/config.env`.
+- **WeChat** — plain-text commands (`/bind`, `/s`, `/bash`, etc.) via WeChat messages. Configure with `ghost wechat` (QR-code login via ilinkai). Both platforms can run simultaneously.
+
 ## Common issues
 
 | Symptom | Likely cause | Fix |
@@ -115,5 +122,7 @@ sqlite3 ~/.gits/gits.db "PRAGMA integrity_check;"
 | `tmux: no server running` | tmux not started | `tmux new -s gits-main` |
 | `openclaw: command not found` | Not installed | Check `which openclaw`; install from bundle |
 | `sqlite3: no such table` | DB not initialized | `uv run gits init-db` |
-| Discord bot not connecting | Token missing/wrong | Check `.env` for `DISCORD_BOT_TOKEN` |
+| Discord bot not connecting | Token missing/wrong | Check `~/.gits/config.env` for `GITS_DISCORD_TOKEN` |
+| WeChat not connecting | Not logged in | Run `ghost wechat` to re-authenticate via QR code |
+| WeChat QR code expired | Scan timeout (120s) | Run `ghost wechat --relogin` to get a new QR code |
 | `address already in use` | Port conflict | `lsof -i :PORT` then kill the process |

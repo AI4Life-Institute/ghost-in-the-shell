@@ -497,8 +497,8 @@ class DiscordAdapter(PlatformAdapter):
                 perms = channel.permissions_for(interaction.guild.me)
                 if not perms.send_messages:
                     await interaction.response.send_message(
-                        "⚠️ Bot 在此频道没有 **Send Messages** 权限，无法绑定。\n"
-                        "请到 Discord 频道/Category 设置 → Permissions → 给 bot 角色勾上 **Send Messages**。",
+                        "⚠️ Bot does not have **Send Messages** permission in this channel and cannot bind.\n"
+                        "Go to the channel/category Settings → Permissions → enable **Send Messages** for the bot role.",
                         ephemeral=True,
                     )
                     return

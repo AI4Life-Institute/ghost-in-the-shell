@@ -94,7 +94,10 @@ class _WeixinInteraction:
         self.name = f"wx-{channel_id[:8]}"
 
     async def send(self, text: str = "", **kwargs: Any) -> None:
-        if text:
+        # Suppress generic English confirmations from the engine (WeChat gets a
+        # Chinese confirmation + screenshot from _handle_unbound / _handle_command)
+        _SKIP = {"Bound successfully.", "Unbound.", "Done."}
+        if text and str(text).strip() not in _SKIP:
             await self._adapter.send_message(
                 self.channel_id, OutgoingMessage(text=str(text))
             )
@@ -137,6 +140,8 @@ class WeixinAdapter(PlatformAdapter):
         self._engine: Any = None
         self._running = False
         self._session: aiohttp.ClientSession | None = None
+        # Pending numbered select: user_id → list of callback_data values
+        self._pending_select: dict[str, list[str]] = {}
 
         logger.info(
             "WeixinAdapter: account=%s base_url=%s", self._account_id, self._base_url
@@ -170,7 +175,24 @@ class WeixinAdapter(PlatformAdapter):
                 await self._send_image(user_id, msg.image, ctx)
             except Exception:
                 logger.exception("WeixinAdapter: image send failed, falling back to text")
-                await self._send_text(user_id, "[截图发送失败，请查看终端]", ctx)
+                await self._send_text(user_id, "[Screenshot failed — check the terminal]", ctx)
+            return ""
+
+        # Convert select_options to numbered text list (WeChat has no dropdowns)
+        if msg.select_options:
+            lines = []
+            if msg.text:
+                # Strip markdown, keep first line only as header
+                header = msg.text.splitlines()[0].replace("**", "").replace("`", "")
+                lines.append(header)
+                lines.append("")
+            for i, opt in enumerate(msg.select_options):
+                desc = f" — {opt.description}" if opt.description else ""
+                lines.append(f"{i}. {opt.label}{desc}")
+            lines.append("\nReply with a number to select")
+            await self._send_text(user_id, "\n".join(lines), ctx)
+            # Store the options so _dispatch can map number → callback_data
+            self._pending_select[user_id] = [opt.value for opt in msg.select_options]
             return ""
 
         if msg.text:
@@ -262,6 +284,19 @@ class WeixinAdapter(PlatformAdapter):
         text = _extract_text(raw)
         logger.info("WeChat msg from=%s text=%r", from_user, text)
 
+        # Numbered select reply (e.g. user replies "1" to a session picker)
+        if text and text.strip().isdigit() and from_user in self._pending_select:
+            opts = self._pending_select.pop(from_user)
+            idx = int(text.strip())
+            if 0 <= idx < len(opts):
+                callback_data = opts[idx]
+                for cb in self._button_callbacks:
+                    await cb(from_user, from_user, callback_data)
+            else:
+                ctx = self._context_tokens.get(from_user)
+                await self._send_text(from_user, f"Invalid option. Reply with a number 0~{len(opts)-1}", ctx)
+            return
+
         # Command handling (takes priority)
         if text and text.lstrip().startswith("/") and self._engine:
             await self._handle_command(from_user, text.strip())
@@ -275,7 +310,7 @@ class WeixinAdapter(PlatformAdapter):
                 return
 
         # Immediately acknowledge receipt so the user knows the message landed
-        _ACKS = ["好的👌", "收到", "嗯嗯", "好的，我看看", "收到了", "好"]
+        _ACKS = ["Got it 👌", "Received", "On it", "Got it, let me check", "Received!", "OK"]
         ctx = self._context_tokens.get(from_user)
         await self._send_text(from_user, random.choice(_ACKS), ctx)
 
@@ -297,7 +332,24 @@ class WeixinAdapter(PlatformAdapter):
         if default_path:
             logger.info("WeChat: auto-binding %s to default path %s", user_id, default_path)
             iact = _WeixinInteraction(self, user_id)
-            await self._engine.handle_bind(user_id, default_path, iact)
+            # Restore last session_id if saved by ghost reset-weixin
+            import json as _json
+            from pathlib import Path as _Path
+            _sessions_file = _Path("~/.gits/weixin_sessions.json").expanduser()
+            _last_sid: str | None = None
+            if _sessions_file.exists():
+                try:
+                    _last_sid = _json.loads(_sessions_file.read_text()).get(user_id)
+                except Exception:
+                    pass
+            await self._engine.handle_bind(
+                user_id, default_path, iact,
+                fresh=True, mode="bypassPermissions",
+                session_id=_last_sid,
+            )
+            # Send help text so user knows what commands are available
+            ctx = self._context_tokens.get(user_id)
+            await self._send_text(user_id, _HELP_TEXT, ctx)
             # After binding, forward the original message if it was plain text
             if text and not text.startswith("/"):
                 binding = self._engine.session_mgr.get_binding(user_id)
@@ -315,7 +367,7 @@ class WeixinAdapter(PlatformAdapter):
         # No default path — reply with guidance
         await self._send_text(
             user_id,
-            "👋 Ghost 已就绪！\n\n发送 /bind <项目路径> 绑定目录\n发送 /ss 截图终端\n发送 /help 查看所有命令",
+            "👋 Ghost is ready!\n\nSend /bind <project path> to bind a directory\nSend /ss for a screenshot\nSend /help to see all commands",
             self._context_tokens.get(user_id),
         )
 
@@ -341,15 +393,15 @@ class WeixinAdapter(PlatformAdapter):
                 await eng.handle_bind(user_id, arg or None, iact)
             elif cmd == "/unbind":
                 await eng.handle_unbind(user_id, iact)
-            elif cmd in ("/ss", "/screenshot"):
+            elif cmd in ("/ss", "/screenshot", "/s"):
                 await eng.handle_screenshot(user_id, iact)
-            elif cmd == "/info":
+            elif cmd in ("/info", "/i"):
                 await eng.handle_status(user_id, iact)
             elif cmd == "/keys":
                 await eng.handle_keys(user_id, arg, iact)
-            elif cmd == "/enter":
+            elif cmd in ("/enter", "/e"):
                 await eng.handle_enter(user_id, iact)
-            elif cmd == "/esc":
+            elif cmd in ("/esc", "/x"):
                 await eng.handle_esc(user_id, iact)
             elif cmd == "/new":
                 await eng.handle_new(user_id, iact)
@@ -362,10 +414,10 @@ class WeixinAdapter(PlatformAdapter):
             elif cmd in ("/help", "/?"):
                 await iact.send(_HELP_TEXT)
             else:
-                await iact.send(f"未知命令: {cmd}\n发送 /help 查看可用命令")
+                await iact.send(f"Unknown command: {cmd}\nSend /help to see available commands")
         except Exception:
             logger.exception("WeixinAdapter: command %s failed", cmd)
-            await iact.send(f"命令执行失败: {cmd}")
+            await iact.send(f"Command failed: {cmd}")
 
     # ── HTTP send ──────────────────────────────────────────────────────────────
 
@@ -574,16 +626,15 @@ def _split_text(text: str, limit: int) -> list[str]:
 
 
 _HELP_TEXT = """\
-Ghost 微信命令:
-/bind <路径>  绑定项目目录
-/unbind       解除绑定
-/ss           截图终端
-/enter        发送 Enter
-/esc          发送 Escape
-/keys <按键>  发送按键
-/bash <命令>  执行 bash 命令
-/new          新建会话
-/done         结束会话
-/model <名称> 切换模型
-/info         查看状态
-直接发文字    转发到终端"""
+Ghost commands:
+/bind <path>   Bind directory
+/s             Screenshot
+/i             Status
+/e             Enter
+/x             Escape
+/keys <keys>   Send key sequence
+/bash <cmd>    Run shell command
+/new           New session
+/done          End session
+/model <name>  Switch model
+Plain text → forwarded to terminal"""
