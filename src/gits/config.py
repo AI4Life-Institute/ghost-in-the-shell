@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # ── Thread ────────────────────────────────────────────────────────
     thread_auto_archive_minutes: int = 10080  # 7 days
 
+    # ── WeChat ────────────────────────────────────────────────────────
+    gits_default_path: Path | None = None  # auto-bind path for WeChat
+
     @property
     def state_dir(self) -> Path:
         """Expanded state directory path."""

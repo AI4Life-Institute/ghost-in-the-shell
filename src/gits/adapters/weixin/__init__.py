@@ -1,0 +1,1 @@
+# WeChat IM Bot adapter

@@ -1,3 +1,3 @@
 #!/bin/bash
-cd /data/ai4life/projects/ghost-in-the-shell
-exec /data/ai4life/projects/ghost-in-the-shell/.venv/bin/python -m gits start
+cd /Volumes/Crucial_8T/src/src/ai4life/ghost-in-the-shell
+exec uv run python -m gits start

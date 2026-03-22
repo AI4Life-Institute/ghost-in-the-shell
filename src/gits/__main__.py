@@ -174,38 +174,65 @@ def _cmd_start_normal(args: argparse.Namespace) -> None:
     logger = logging.getLogger("gits")
     logger.info("Starting Ghost in the Shell v%s", _get_version())
 
-    # Validate token
-    if not settings.gits_discord_token:
-        logger.error("GITS_DISCORD_TOKEN not set. Check your .env file.")
+    from .adapters.weixin.bot import WeixinAdapter
+    from .core.engine import Engine
+
+    has_discord = bool(settings.gits_discord_token)
+    has_weixin = WeixinAdapter.is_available()
+
+    if not has_discord and not has_weixin:
+        logger.error(
+            "No platform configured. Set GITS_DISCORD_TOKEN or install openclaw-weixin."
+        )
         sys.exit(1)
 
     # Ensure state directory
     settings.state_dir.mkdir(parents=True, exist_ok=True)
 
-    # Import and wire modules
-    from .adapters.discord.bot import DiscordAdapter
-    from .core.engine import Engine
-
     engine = Engine(settings)
-    adapter = DiscordAdapter(
-        token=settings.gits_discord_token,
-        allowed_users=settings.allowed_users,
-        allowed_guilds=settings.allowed_guilds,
-        bind_root=settings.bind_root,
-    )
+    adapters = []
 
-    # Wire adapter <-> engine
-    engine.set_adapter(adapter)
-    adapter.set_engine(engine)
+    if has_discord:
+        from .adapters.discord.bot import DiscordAdapter
 
-    # Register message forwarding and button click handling
-    adapter.on_message(engine.handle_message)
-    adapter.on_button_click(engine.handle_button_click)
+        discord_adapter = DiscordAdapter(
+            token=settings.gits_discord_token,
+            allowed_users=settings.allowed_users,
+            allowed_guilds=settings.allowed_guilds,
+            bind_root=settings.bind_root,
+        )
+        adapters.append(discord_adapter)
+        logger.info("Discord adapter enabled")
+
+    if has_weixin:
+        try:
+            default_path = str(settings.gits_default_path) if settings.gits_default_path else None
+            weixin_adapter = WeixinAdapter(default_path=default_path)
+            adapters.append(weixin_adapter)
+            logger.info("WeChat adapter enabled (account auto-discovered)")
+        except Exception as exc:
+            logger.warning("WeChat adapter failed to init: %s", exc)
+
+    # Build a routing adapter when multiple platforms are active
+    if len(adapters) == 1:
+        primary = adapters[0]
+    else:
+        from .adapters.base import MultiAdapter
+        primary = MultiAdapter(adapters)
+
+    engine.set_adapter(primary)
+    for a in adapters:
+        a.set_engine(engine)
+        a.on_message(engine.handle_message)
+        a.on_button_click(engine.handle_button_click)
 
     async def _run() -> None:
         await engine.start()
         try:
-            await adapter.start()
+            if len(adapters) == 1:
+                await adapters[0].start()
+            else:
+                await asyncio.gather(*(a.start() for a in adapters))
         finally:
             await engine.stop()
 

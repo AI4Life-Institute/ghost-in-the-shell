@@ -771,12 +771,11 @@ class Engine:
             png_bytes = await self.screenshot.capture(ansi_text)
 
             # Reply to the deferred interaction with the screenshot
-            if interaction and hasattr(interaction, "followup"):
+            import discord as _discord
+            if interaction and isinstance(interaction, _discord.Interaction):
                 import io
 
-                import discord
-
-                file = discord.File(io.BytesIO(png_bytes), filename="screenshot.png")
+                file = _discord.File(io.BytesIO(png_bytes), filename="screenshot.png")
                 await interaction.followup.send(file=file)
             elif self._adapter:
                 await self._adapter.send_message(

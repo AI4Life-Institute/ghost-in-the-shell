@@ -119,3 +119,58 @@ class PlatformAdapter(ABC):
     async def archive_thread(self, thread_id: str) -> None:
         """Archive / close a thread."""
         ...
+
+
+class MultiAdapter(PlatformAdapter):
+    """Routes send_message/edit_message/delete_message to the right adapter
+    based on channel_id.  Each adapter registers its own on_message callbacks
+    directly — this class is only used as engine._adapter for outbound routing.
+
+    Routing rule: channel_id containing '@im.wechat' → WeChat adapter;
+    everything else → first non-WeChat adapter.
+    """
+
+    def __init__(self, adapters: list[PlatformAdapter]) -> None:
+        self._adapters = adapters
+
+    def _route(self, channel_id: str) -> PlatformAdapter:
+        if "@im.wechat" in channel_id:
+            for a in self._adapters:
+                if type(a).__name__ == "WeixinAdapter":
+                    return a
+        for a in self._adapters:
+            if type(a).__name__ != "WeixinAdapter":
+                return a
+        return self._adapters[0]
+
+    async def start(self) -> None:
+        pass  # individual adapters are started by the caller
+
+    async def stop(self) -> None:
+        pass
+
+    async def send_message(self, channel_id: str, msg: OutgoingMessage) -> str:
+        return await self._route(channel_id).send_message(channel_id, msg)
+
+    async def edit_message(self, channel_id: str, message_id: str, msg: OutgoingMessage) -> None:
+        await self._route(channel_id).edit_message(channel_id, message_id, msg)
+
+    async def delete_message(self, channel_id: str, message_id: str) -> None:
+        await self._route(channel_id).delete_message(channel_id, message_id)
+
+    def on_message(self, callback: MessageCallback) -> None:
+        pass  # callbacks registered directly on each adapter
+
+    def on_button_click(self, callback: ButtonCallback) -> None:
+        pass
+
+    async def create_thread(self, channel_id: str, title: str, auto_archive_minutes: int = 10080) -> str:
+        return await self._route(channel_id).create_thread(channel_id, title, auto_archive_minutes)
+
+    async def archive_thread(self, thread_id: str) -> None:
+        for a in self._adapters:
+            try:
+                await a.archive_thread(thread_id)
+                return
+            except Exception:
+                pass
