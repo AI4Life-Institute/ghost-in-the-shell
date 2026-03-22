@@ -21,20 +21,29 @@ class Ghost < Formula
   depends_on "tmux"
   depends_on "uv" => :build
 
-  depends_on "rust" => :build  # needed to compile cryptography from source
-
   def install
-    # Create isolated virtualenv and install ghost + all pip dependencies via uv.
-    # cryptography must be built from source so Homebrew can relink its dylibs.
-    system Formula["uv"].opt_bin/"uv", "venv", libexec.to_s,
-           "--python", Formula["python@3.12"].opt_bin/"python3.12"
+    # Install ghost via uv tool into ~/.local/share/uv/tools (user space),
+    # which avoids Homebrew's dylib relinking that breaks Rust-compiled .so files.
+    uv = Formula["uv"].opt_bin/"uv"
+    repo_url = "https://github.com/AI4Life-Institute/ghost-in-the-shell.git"
+    tag = "v#{version}"
 
-    system Formula["uv"].opt_bin/"uv", "pip", "install", buildpath.to_s,
-           "--python", (libexec/"bin/python3").to_s,
-           "--no-binary", "cryptography"
+    # Write shim scripts that delegate to the uv-managed install
+    ghost_shim = <<~SH
+      #!/bin/bash
+      set -euo pipefail
+      UV="#{uv}"
+      if ! "$UV" tool list 2>/dev/null | grep -q '^ghost-in-the-shell'; then
+        echo "Installing ghost (first run)..."
+        "$UV" tool install "git+#{repo_url}@#{tag}"
+      fi
+      exec "$("$UV" tool dir)/ghost-in-the-shell/bin/ghost" "$@"
+    SH
 
-    bin.install_symlink libexec/"bin/ghost"
-    bin.install_symlink libexec/"bin/gits"
+    (bin/"ghost").write ghost_shim
+    (bin/"ghost").chmod 0755
+    (bin/"gits").write ghost_shim.sub("/ghost\" \"$@\"", "/gits\" \"$@\"")
+    (bin/"gits").chmod 0755
   end
 
   def post_install
