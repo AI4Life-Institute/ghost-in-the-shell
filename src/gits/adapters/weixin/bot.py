@@ -142,6 +142,8 @@ class WeixinAdapter(PlatformAdapter):
         self._session: aiohttp.ClientSession | None = None
         # Pending numbered select: user_id → list of callback_data values
         self._pending_select: dict[str, list[str]] = {}
+        # Track users who have already received the welcome message
+        self._greeted_users: set[str] = set()
 
         logger.info(
             "WeixinAdapter: account=%s base_url=%s", self._account_id, self._base_url
@@ -327,6 +329,12 @@ class WeixinAdapter(PlatformAdapter):
 
     async def _handle_unbound(self, user_id: str, text: str | None) -> None:
         """Called when a message arrives but the channel has no binding."""
+        ctx = self._context_tokens.get(user_id)
+        # Send welcome message on first contact
+        if user_id not in self._greeted_users:
+            self._greeted_users.add(user_id)
+            await self._send_text(user_id, _WELCOME_TEXT, ctx)
+
         # Auto-bind to default path if configured
         default_path = self._default_path()
         if default_path:
@@ -367,7 +375,7 @@ class WeixinAdapter(PlatformAdapter):
         # No default path — reply with guidance
         await self._send_text(
             user_id,
-            "👋 Ghost 已就绪！\n\n发送 /bind <项目路径> 绑定目录\n发送 /help 查看所有命令",
+            "发送 /bind <项目路径> 告诉小鬼去哪里工作～\n例如：/bind /Users/me/myproject",
             self._context_tokens.get(user_id),
         )
 
@@ -414,10 +422,10 @@ class WeixinAdapter(PlatformAdapter):
             elif cmd in ("/help", "/?"):
                 await iact.send(_HELP_TEXT)
             else:
-                await iact.send(f"Unknown command: {cmd}\nSend /help to see available commands")
+                await iact.send(f"小鬼不认识这个命令: {cmd}\n发送 /help 看看能做什么～")
         except Exception:
             logger.exception("WeixinAdapter: command %s failed", cmd)
-            await iact.send(f"Command failed: {cmd}")
+            await iact.send(f"哎呀，{cmd} 执行出错了，看看终端是啥情况？")
 
     # ── HTTP send ──────────────────────────────────────────────────────────────
 
@@ -625,15 +633,27 @@ def _split_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
+_WELCOME_TEXT = """\
+👻 嗨～我是小鬼！
+
+专门帮你盯着 AI 写代码的小精灵 ✨
+
+💰 龙虾按量一直扣
+小鬼靠你订阅走
+Claude 买了不白花
+AI 跑路你喝茶 🧋
+
+发消息就能开始，发 /help 看看我能做什么 🐾"""
+
 _HELP_TEXT = """\
-Ghost 命令:
-/bind <路径>  绑定目录
-/s            截图
-/i            状态
+👻 小鬼命令表:
+/bind <路径>  绑定项目目录
+/s            截图看看终端
+/i            当前状态
 /e            回车
 /x            Esc
-/keys <按键>  发送按键
-/bash <命令>  执行命令
+/keys <按键>  发送按键序列
+/bash <命令>  执行 shell 命令
 /new          新建会话
 /done         结束会话
 /model <名称> 切换模型
