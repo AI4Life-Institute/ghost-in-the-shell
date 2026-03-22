@@ -775,7 +775,7 @@ class Engine:
 
             # Reply to the deferred interaction with the screenshot
             import discord as _discord
-            if interaction and isinstance(interaction, _discord.Interaction):
+            if interaction and hasattr(interaction, "followup"):
                 import io
 
                 file = _discord.File(io.BytesIO(png_bytes), filename="screenshot.png")

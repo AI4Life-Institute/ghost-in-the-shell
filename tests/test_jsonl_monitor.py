@@ -1220,11 +1220,12 @@ class TestMissingSessionWarning:
         assert binding.cli_session_id == "sess-missing"
         callback.assert_not_called()
 
-        # Advance clock past 10-second grace period
+        # Advance clock past grace period, on final attempt so warning fires
         monitor._pending_warn["ch1"] = (
             "sess-missing",
             "/tmp/proj",
-            time.time() - 11,
+            time.time() - 46,
+            2,  # final attempt (attempt + 1 >= _WARN_MAX_ATTEMPTS=3)
         )
 
         # Second poll: grace expired, file still absent → warning fires

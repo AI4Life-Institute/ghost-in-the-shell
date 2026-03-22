@@ -57,6 +57,8 @@ def engine(settings):
     e.tmux.send_keys = AsyncMock()
     e.tmux.window_exists = AsyncMock(return_value=True)
     e.tmux.capture_pane_ansi = AsyncMock(return_value="hello\x1b[31mworld\x1b[0m")
+    e.tmux.capture_pane_text = AsyncMock(return_value="output\n" + "\u2500" * 66 + "\n❯ \n")
+    e.tmux.pane_current_command = AsyncMock(return_value="claude")
     return e
 
 
@@ -1055,6 +1057,8 @@ def _make_e2e_engine(settings, tmp_path):
     e.tmux.send_keys = AsyncMock()
     e.tmux.window_exists = AsyncMock(return_value=True)
     e.tmux.capture_pane_ansi = AsyncMock(return_value="test")
+    e.tmux.capture_pane_text = AsyncMock(return_value="output\n" + "\u2500" * 66 + "\n❯ \n")
+    e.tmux.pane_current_command = AsyncMock(return_value="claude")
 
     adapter = MagicMock()
     adapter.send_message = AsyncMock(return_value="msg-1")
