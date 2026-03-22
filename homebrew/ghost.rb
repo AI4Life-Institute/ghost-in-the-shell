@@ -21,13 +21,17 @@ class Ghost < Formula
   depends_on "tmux"
   depends_on "uv" => :build
 
+  depends_on "rust" => :build  # needed to compile cryptography from source
+
   def install
-    # Create isolated virtualenv and install ghost + all pip dependencies via uv
+    # Create isolated virtualenv and install ghost + all pip dependencies via uv.
+    # cryptography must be built from source so Homebrew can relink its dylibs.
     system Formula["uv"].opt_bin/"uv", "venv", libexec.to_s,
            "--python", Formula["python@3.12"].opt_bin/"python3.12"
 
     system Formula["uv"].opt_bin/"uv", "pip", "install", buildpath.to_s,
-           "--python", (libexec/"bin/python3").to_s
+           "--python", (libexec/"bin/python3").to_s,
+           "--no-binary", "cryptography"
 
     bin.install_symlink libexec/"bin/ghost"
     bin.install_symlink libexec/"bin/gits"
