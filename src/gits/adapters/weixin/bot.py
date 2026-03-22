@@ -332,6 +332,18 @@ class WeixinAdapter(PlatformAdapter):
         if ctx_token:
             self._context_tokens[from_user] = ctx_token
 
+        # Reject voice messages explicitly
+        if _is_voice_message(raw):
+            ctx = self._context_tokens.get(from_user)
+            await self._send_text(from_user, "小鬼暂不支持语音消息，发文字吧～", ctx)
+            return
+
+        # Handle incoming images — download, save, forward to Claude as @path
+        image_item = _extract_image_item(raw)
+        if image_item:
+            asyncio.create_task(self._handle_incoming_image(from_user, image_item))
+            return
+
         text = _extract_text(raw)
         logger.info("WeChat msg from=%s text=%r", from_user, text)
 
@@ -893,6 +905,63 @@ class WeixinAdapter(PlatformAdapter):
 
         return {"download_param": download_param, "aes_key_hex": aes_key.hex()}
 
+    async def _handle_incoming_image(self, user_id: str, image_item: dict) -> None:
+        """Download an incoming image, save to /tmp, forward @path to Claude CLI."""
+        ctx = self._context_tokens.get(user_id)
+        eng = self._engine
+        binding = eng.session_mgr.get_binding(user_id) if eng else None
+        if binding is None:
+            await self._send_text(user_id, "收到图片，但还没绑定会话，先发 /bind <路径>～", ctx)
+            return
+
+        await self._send_text(user_id, "📷 收到图片，下载中…", ctx)
+        try:
+            img_path = await self._download_image(image_item)
+        except Exception as exc:
+            logger.exception("WeixinAdapter: image download failed")
+            await self._send_text(user_id, f"图片下载失败了：{exc}", ctx)
+            return
+
+        # Forward as @path so Claude CLI sees the image
+        from ...core.engine import _submit_keys_for_cli  # type: ignore[attr-defined]
+        submit = _submit_keys_for_cli(binding.coding_cli)
+        await eng.tmux.send_text(binding.window_id, f"@{img_path}", submit_keys=submit)
+        logger.info("WeixinAdapter: forwarded image %s to window %s", img_path, binding.window_id)
+
+    async def _download_image(self, image_item: dict) -> str:
+        """Download and decrypt a WeChat CDN image. Returns local file path."""
+        assert self._session is not None
+        logger.info("WeixinAdapter: incoming image_item=%s", json.dumps(image_item))
+
+        media = image_item.get("media", {})
+        encrypt_param = media.get("encrypt_query_param", "")
+        aes_key_b64 = media.get("aes_key", "")
+
+        if not encrypt_param or not aes_key_b64:
+            raise ValueError(f"image_item missing fields — media keys: {list(media.keys())}")
+
+        # aes_key is b64(hex_string) — decode to raw bytes
+        from base64 import b64decode
+        aes_key = bytes.fromhex(b64decode(aes_key_b64).decode())
+
+        cdn_url = f"{_CDN_BASE_URL}/download?encrypted_query_param={quote(encrypt_param)}"
+        logger.info("WeixinAdapter: downloading image from %s", cdn_url)
+        async with self._session.get(
+            cdn_url,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            logger.info("WeixinAdapter: CDN response status=%s headers=%s", resp.status, dict(resp.headers))
+            resp.raise_for_status()
+            ciphertext = await resp.read()
+        logger.info("WeixinAdapter: downloaded %d bytes, decrypting…", len(ciphertext))
+
+        plaintext = _aes_ecb_decrypt(ciphertext, aes_key)
+
+        img_path = f"/tmp/gits_wx_{uuid.uuid4().hex}.png"
+        Path(img_path).write_bytes(plaintext)
+        logger.info("WeixinAdapter: image saved to %s (%d bytes)", img_path, len(plaintext))
+        return img_path
+
     async def _send_text(
         self, user_id: str, text: str, context_token: str | None
     ) -> None:
@@ -970,6 +1039,14 @@ def _extract_text(raw: dict) -> str | None:
     return None
 
 
+def _is_voice_message(raw: dict) -> bool:
+    """Return True if the message contains a voice item."""
+    for item in raw.get("item_list") or []:
+        if item.get("type") == _ITEM_TYPE_VOICE:
+            return True
+    return False
+
+
 def _aes_ecb_padded_size(plaintext_size: int) -> int:
     """AES-128-ECB ciphertext size with PKCS7 padding (same as JS aesEcbPaddedSize)."""
     return math.ceil((plaintext_size + 1) / 16) * 16
@@ -985,6 +1062,26 @@ def _aes_ecb_encrypt(plaintext: bytes, key: bytes) -> bytes:
     cipher = Cipher(algorithms.AES(key), modes.ECB())
     enc = cipher.encryptor()
     return enc.update(padded) + enc.finalize()
+
+
+def _aes_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
+    """Decrypt AES-128-ECB + PKCS7 padded bytes."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding
+
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    dec = cipher.decryptor()
+    padded = dec.update(ciphertext) + dec.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    return unpadder.update(padded) + unpadder.finalize()
+
+
+def _extract_image_item(raw: dict) -> dict | None:
+    """Return the image_item dict if the message contains an image, else None."""
+    for item in raw.get("item_list") or []:
+        if item.get("type") == _ITEM_TYPE_IMAGE:
+            return item.get("image_item")
+    return None
 
 
 
