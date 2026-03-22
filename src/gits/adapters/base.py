@@ -133,11 +133,19 @@ class MultiAdapter(PlatformAdapter):
     def __init__(self, adapters: list[PlatformAdapter]) -> None:
         self._adapters = adapters
 
+    def add_adapter(self, adapter: PlatformAdapter) -> None:
+        """Dynamically register a new adapter (e.g. a newly logged-in WeChat account)."""
+        self._adapters.append(adapter)
+
     def _route(self, channel_id: str) -> PlatformAdapter:
         if "@im.wechat" in channel_id:
-            for a in self._adapters:
-                if type(a).__name__ == "WeixinAdapter":
+            weixin_adapters = [a for a in self._adapters if type(a).__name__ == "WeixinAdapter"]
+            # Prefer the adapter that already has context for this user
+            for a in weixin_adapters:
+                if a.knows_user(channel_id):  # type: ignore[attr-defined]
                     return a
+            if weixin_adapters:
+                return weixin_adapters[0]
         for a in self._adapters:
             if type(a).__name__ != "WeixinAdapter":
                 return a

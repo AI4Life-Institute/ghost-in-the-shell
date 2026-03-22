@@ -57,6 +57,30 @@ def _sync_file(channel: str, account_id: str) -> Path:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def _load_account(channel: str, raw_id: str) -> dict | None:
+    """Load a single account by raw ID, or None if missing/invalid."""
+    f = _account_file(channel, raw_id)
+    if not f.exists():
+        # also try raw filename (legacy / hand-written accounts)
+        f_raw = _accounts_dir(channel) / f"{raw_id}.json"
+        if f_raw.exists():
+            f = f_raw
+        else:
+            return None
+    try:
+        data = json.loads(f.read_text())
+        return {
+            "account_id": raw_id,
+            "normalized_id": normalize_account_id(raw_id),
+            "token": data.get("token", ""),
+            "base_url": data.get("baseUrl", "").rstrip("/"),
+            "user_id": data.get("userId", ""),
+            "saved_at": data.get("savedAt", ""),
+        }
+    except Exception:
+        return None
+
+
 def discover(channel: str) -> dict | None:
     """Return the first available account for the channel, or None."""
     index = _accounts_index(channel)
@@ -67,27 +91,27 @@ def discover(channel: str) -> dict | None:
     except Exception:
         return None
     for raw_id in ids:
-        f = _account_file(channel, raw_id)
-        if not f.exists():
-            # also try raw filename (legacy / hand-written accounts)
-            f_raw = _accounts_dir(channel) / f"{raw_id}.json"
-            if f_raw.exists():
-                f = f_raw
-            else:
-                continue
-        try:
-            data = json.loads(f.read_text())
-            return {
-                "account_id": raw_id,
-                "normalized_id": normalize_account_id(raw_id),
-                "token": data.get("token", ""),
-                "base_url": data.get("baseUrl", "").rstrip("/"),
-                "user_id": data.get("userId", ""),
-                "saved_at": data.get("savedAt", ""),
-            }
-        except Exception:
-            continue
+        acct = _load_account(channel, raw_id)
+        if acct is not None:
+            return acct
     return None
+
+
+def discover_all(channel: str) -> list[dict]:
+    """Return all available accounts for the channel."""
+    index = _accounts_index(channel)
+    if not index.exists():
+        return []
+    try:
+        ids: list[str] = json.loads(index.read_text())
+    except Exception:
+        return []
+    accounts = []
+    for raw_id in ids:
+        acct = _load_account(channel, raw_id)
+        if acct is not None:
+            accounts.append(acct)
+    return accounts
 
 
 def save(channel: str, account: dict) -> None:

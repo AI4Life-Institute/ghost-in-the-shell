@@ -30,6 +30,7 @@ from ..base import (
     PlatformAdapter,
 )
 from ...openclaw import accounts as _accounts
+from . import whitelist as _whitelist
 
 logger = logging.getLogger("gits.weixin")
 
@@ -79,6 +80,11 @@ def discover_account() -> dict | None:
     return _accounts.discover(_WEIXIN_CHANNEL)
 
 
+def discover_all_accounts() -> list[dict]:
+    """Return all available openclaw-weixin accounts."""
+    return _accounts.discover_all(_WEIXIN_CHANNEL)
+
+
 # ── Fake interaction object for engine compatibility ───────────────────────────
 
 class _WeixinInteraction:
@@ -97,10 +103,20 @@ class _WeixinInteraction:
         # Suppress generic English confirmations from the engine (WeChat gets a
         # Chinese confirmation + screenshot from _handle_unbound / _handle_command)
         _SKIP = {"Bound successfully.", "Unbound.", "Done."}
-        if text and str(text).strip() not in _SKIP:
-            await self._adapter.send_message(
-                self.channel_id, OutgoingMessage(text=str(text))
-            )
+        t = str(text).strip() if text else ""
+        if not t or t in _SKIP:
+            return
+        # Suppress the English session picker confirmation — WeChat already shows
+        # the numbered list from select_options; this trailing text is redundant.
+        if "existing session" in t and "Pick one" in t:
+            return
+        # Suppress the "please provide a path" error — WeChat _handle_bind handles
+        # the no-arg case itself with Chinese guidance.
+        if "Please provide a path" in t:
+            return
+        await self._adapter.send_message(
+            self.channel_id, OutgoingMessage(text=t)
+        )
 
     async def defer(self, **kwargs: Any) -> None:
         pass
@@ -115,9 +131,16 @@ class WeixinAdapter(PlatformAdapter):
     Token + base URL are auto-discovered from ~/.openclaw/openclaw-weixin/.
     """
 
-    def __init__(self, default_path: str | None = None) -> None:
+    def __init__(
+        self,
+        default_path: str | None = None,
+        account: dict | None = None,
+        workspace_root: str | None = None,
+    ) -> None:
         self._default_path_val = default_path
-        account = discover_account()
+        self._workspace_root = workspace_root  # None = no restriction
+        if account is None:
+            account = discover_account()
         if account is None:
             raise RuntimeError(
                 "No openclaw-weixin account found. "
@@ -142,8 +165,12 @@ class WeixinAdapter(PlatformAdapter):
         self._session: aiohttp.ClientSession | None = None
         # Pending numbered select: user_id → list of callback_data values
         self._pending_select: dict[str, list[str]] = {}
+        # Pending /bind fuzzy selection: user_id → list of absolute paths
+        self._pending_bind: dict[str, list[str]] = {}
         # Track users who have already received the welcome message
         self._greeted_users: set[str] = set()
+        # Callback invoked when a new bot account is successfully registered
+        self._new_account_cb: Any = None
 
         logger.info(
             "WeixinAdapter: account=%s base_url=%s", self._account_id, self._base_url
@@ -151,6 +178,10 @@ class WeixinAdapter(PlatformAdapter):
 
     def set_engine(self, engine: Any) -> None:
         self._engine = engine
+
+    def set_new_account_callback(self, cb: Any) -> None:
+        """Register an async callback(account: dict) called when /addbot succeeds."""
+        self._new_account_cb = cb
 
     # ── PlatformAdapter interface ──────────────────────────────────────────────
 
@@ -182,15 +213,29 @@ class WeixinAdapter(PlatformAdapter):
 
         # Convert select_options to numbered text list (WeChat has no dropdowns)
         if msg.select_options:
+            _HEADER_ZH = {
+                "Resume Session?": "选择要恢复的会话",
+                "Select a session to resume…": "选择要恢复的会话",
+            }
             lines = []
             if msg.text:
                 # Strip markdown, keep first line only as header
                 header = msg.text.splitlines()[0].replace("**", "").replace("`", "")
+                header = _HEADER_ZH.get(header, header)
                 lines.append(header)
                 lines.append("")
+            _LABEL_ZH = {
+                "＋ New Session": "＋ 新会话",
+                "+ New Session": "＋ 新会话",
+            }
+            _DESC_ZH = {
+                "Start a fresh session in this directory": "在此目录启动全新会话",
+            }
             for i, opt in enumerate(msg.select_options):
-                desc = f" — {opt.description}" if opt.description else ""
-                lines.append(f"{i}. {opt.label}{desc}")
+                label = _LABEL_ZH.get(opt.label, opt.label)
+                raw_desc = opt.description or ""
+                desc = f" — {_DESC_ZH.get(raw_desc, raw_desc)}" if raw_desc else ""
+                lines.append(f"{i}. {label}{desc}")
             lines.append("\n回复数字选择")
             await self._send_text(user_id, "\n".join(lines), ctx)
             # Store the options so _dispatch can map number → callback_data
@@ -289,6 +334,27 @@ class WeixinAdapter(PlatformAdapter):
 
         text = _extract_text(raw)
         logger.info("WeChat msg from=%s text=%r", from_user, text)
+
+        # ── Admin bootstrap ─────────────────────────────────────────────────
+        # Only auto-promote if this is the initial bot (not locked by /share)
+        if _whitelist.is_empty(self._account_id) and not _whitelist.is_locked(self._account_id):
+            _whitelist.add_admin(self._account_id, from_user)
+            logger.info("WeChat: first user %s set as admin (account=%s)", from_user, self._account_id)
+
+        # /bind fuzzy selection reply
+        if text and text.strip().isdigit() and from_user in self._pending_bind:
+            paths = self._pending_bind.pop(from_user)
+            idx = int(text.strip())
+            if 0 <= idx < len(paths):
+                iact = _WeixinInteraction(self, from_user)
+                if self._engine.session_mgr.get_binding(from_user):
+                    self._engine.monitor.stop_polling(from_user)
+                    await self._engine.session_mgr.unbind(from_user)
+                await self._engine.handle_bind(from_user, paths[idx], iact, mode="bypassPermissions")
+            else:
+                ctx = self._context_tokens.get(from_user)
+                await self._send_text(from_user, f"无效选项，请回复 0~{len(paths)-1}", ctx)
+            return
 
         # Numbered select reply (e.g. user replies "1" to a session picker)
         if text and text.strip().isdigit() and from_user in self._pending_select:
@@ -404,14 +470,114 @@ class WeixinAdapter(PlatformAdapter):
         )
 
     def _default_path(self) -> str | None:
-        """Return the configured default path if it exists."""
+        """Return the auto-bind path: workspace_root takes priority over default_path."""
         from pathlib import Path
-        path = self._default_path_val or ""
-        if path:
-            p = Path(path).expanduser().resolve()
-            if p.is_dir():
-                return str(p)
+        for candidate in (self._workspace_root, self._default_path_val):
+            if candidate:
+                p = Path(candidate).expanduser().resolve()
+                if p.is_dir():
+                    return str(p)
         return None
+
+    async def _handle_bind(self, user_id: str, arg: str, iact: "_WeixinInteraction") -> None:
+        """Handle /bind with fuzzy project search under the default/workspace root."""
+        from pathlib import Path as _P
+
+        eng = self._engine
+
+        # Auto-unbind existing session before rebinding (silent, no reply)
+        if eng.session_mgr.get_binding(user_id):
+            eng.monitor.stop_polling(user_id)
+            await eng.session_mgr.unbind(user_id)
+
+        # No arg → use default/workspace path and let session picker show
+        if not arg:
+            default = self._default_path()
+            if default:
+                await eng.handle_bind(user_id, default, iact, mode="bypassPermissions")
+            else:
+                ctx = self._context_tokens.get(user_id)
+                await self._send_text(
+                    user_id,
+                    "发送 /bind <项目路径> 告诉小鬼去哪里工作～\n例如：/bind /Users/me/myproject",
+                    ctx,
+                )
+            return
+
+        # Absolute path → workspace boundary check then bind
+        if arg.startswith("/") or arg.startswith("~"):
+            if self._workspace_root:
+                req = _P(arg).expanduser().resolve()
+                ws = _P(self._workspace_root).expanduser().resolve()
+                try:
+                    req.relative_to(ws)
+                except ValueError:
+                    await iact.send(
+                        f"只能在你的工作空间内操作 👇\n{self._workspace_root}\n\n"
+                        f"例如：/bind {self._workspace_root}/myproject"
+                    )
+                    return
+            await eng.handle_bind(user_id, arg, iact, mode="bypassPermissions")
+            return
+
+        # Fuzzy search under search root
+        search_root_str = self._workspace_root or self._default_path_val or ""
+        if not search_root_str:
+            await eng.handle_bind(user_id, arg, iact, mode="bypassPermissions")
+            return
+
+        search_root = _P(search_root_str).expanduser().resolve()
+        if not search_root.is_dir():
+            await eng.handle_bind(user_id, arg, iact, mode="bypassPermissions")
+            return
+
+        matches = sorted(
+            [d for d in search_root.iterdir() if d.is_dir() and arg.lower() in d.name.lower()],
+            key=lambda d: d.name.lower(),
+        )
+
+        if not matches:
+            ctx = self._context_tokens.get(user_id)
+            await self._send_text(user_id, f"在 {search_root} 下没找到包含 '{arg}' 的目录", ctx)
+            return
+
+        if len(matches) == 1:
+            await eng.handle_bind(user_id, str(matches[0]), iact, mode="bypassPermissions")
+            return
+
+        # Multiple matches — let user pick
+        lines = [f"找到 {len(matches)} 个目录，回复数字选择：\n"]
+        for i, d in enumerate(matches):
+            lines.append(f"{i}. {d.name}")
+        ctx = self._context_tokens.get(user_id)
+        await self._send_text(user_id, "\n".join(lines), ctx)
+        self._pending_bind[user_id] = [str(d) for d in matches]
+
+    async def _forward_and_screenshot(self, user_id: str, cli_command: str) -> None:
+        """Send a CLI slash command to tmux, wait, press Esc, then screenshot."""
+        eng = self._engine
+        binding = eng.session_mgr.get_binding(user_id)
+        if binding is None:
+            ctx = self._context_tokens.get(user_id)
+            await self._send_text(user_id, "还没绑定会话，先发 /bind <路径>", ctx)
+            return
+
+        cmd = f"/{cli_command}"
+        from ...core.engine import _submit_keys_for_cli  # type: ignore[attr-defined]
+        submit = _submit_keys_for_cli(binding.coding_cli)
+        await eng.tmux.send_text(binding.window_id, cmd, submit_keys=submit)
+        await asyncio.sleep(2)
+
+        iact = _WeixinInteraction(self, user_id)
+        # Screenshot 1: show the command output
+        await eng.handle_screenshot(user_id, iact)
+
+        # Then dismiss and screenshot 2: confirm back to normal
+        ctx = self._context_tokens.get(user_id)
+        await self._send_text(user_id, "看完啦～帮你退出切回正常状态 👻", ctx)
+        await eng.tmux.send_keys(binding.window_id, "Escape")
+        await asyncio.sleep(0.5)
+        await eng.handle_screenshot(user_id, iact)
 
     async def _handle_command(self, user_id: str, text: str) -> None:
         parts = text.split(None, 1)
@@ -422,9 +588,7 @@ class WeixinAdapter(PlatformAdapter):
 
         try:
             if cmd == "/bind":
-                await eng.handle_bind(user_id, arg or None, iact)
-            elif cmd == "/unbind":
-                await eng.handle_unbind(user_id, iact)
+                await self._handle_bind(user_id, arg, iact)
             elif cmd in ("/ss", "/screenshot", "/s"):
                 await eng.handle_screenshot(user_id, iact)
             elif cmd in ("/info", "/i"):
@@ -435,14 +599,35 @@ class WeixinAdapter(PlatformAdapter):
                 await eng.handle_enter(user_id, iact)
             elif cmd in ("/esc", "/x"):
                 await eng.handle_esc(user_id, iact)
-            elif cmd == "/new":
-                await eng.handle_new(user_id, iact)
-            elif cmd == "/done":
-                await eng.handle_done(user_id, iact)
             elif cmd == "/bash":
                 await eng.handle_bash(user_id, arg, iact)
+            elif cmd == "/mode":
+                _mode = arg or "bypassPermissions"
+                if _mode == "yolo":
+                    _mode = "bypassPermissions"
+                await eng.handle_mode(user_id, _mode, iact)
             elif cmd == "/model":
                 await eng.handle_model(user_id, arg, iact)
+            elif cmd == "/share":
+                if not _whitelist.is_admin(self._account_id, user_id):
+                    await iact.send("只有管理员才能共享小鬼～")
+                else:
+                    grant_admin = arg.strip().lower() == "admin"
+                    asyncio.create_task(self._do_addbot_login(user_id, grant_admin=grant_admin))
+            elif cmd in ("/compact", "/c"):
+                await self._forward_and_screenshot(user_id, "compact")
+            elif cmd == "/clear":
+                await self._forward_and_screenshot(user_id, "clear")
+            elif cmd in ("/cost", "/price"):
+                await self._forward_and_screenshot(user_id, "cost")
+            elif cmd in ("/context", "/ctx"):
+                await self._forward_and_screenshot(user_id, "context")
+            elif cmd == "/diff":
+                await self._forward_and_screenshot(user_id, "diff")
+            elif cmd == "/usage":
+                await self._forward_and_screenshot(user_id, "usage")
+            elif cmd in ("/ctrlc", "/q", "/cancel", "/abort"):
+                await eng.handle_keys(user_id, "C-c", iact)
             elif cmd in ("/help", "/?"):
                 await iact.send(_HELP_TEXT)
             else:
@@ -450,6 +635,144 @@ class WeixinAdapter(PlatformAdapter):
         except Exception:
             logger.exception("WeixinAdapter: command %s failed", cmd)
             await iact.send(f"哎呀，{cmd} 执行出错了，看看终端是啥情况？")
+
+    # ── /addbot login flow ─────────────────────────────────────────────────────
+
+    async def _do_addbot_login(self, admin_user_id: str, grant_admin: bool = False) -> None:
+        """Fetch a WeChat login QR code, send it to admin, poll for completion.
+
+        grant_admin: if False (default), the new bot is locked — its first user
+        will NOT be auto-promoted to admin and cannot /share further.
+        If True (/share admin), the first user of the new bot becomes admin.
+        """
+        _ILINKAI = "https://ilinkai.weixin.qq.com"
+        ctx = self._context_tokens.get(admin_user_id)
+
+        try:
+            await self._send_text(
+                admin_user_id,
+                "⚠️ 注意：/share 是团队协作功能。\n"
+                "朋友将在你的机器上运行，可访问文件系统和执行命令。\n"
+                "请只共享给你信任的团队成员。\n\n"
+                "⏳ 正在获取登录二维码…",
+                ctx,
+            )
+
+            # 1. Request QR code
+            login_timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=login_timeout) as s:
+                async with s.get(
+                    f"{_ILINKAI}/ilink/bot/get_bot_qrcode?bot_type=3"
+                ) as resp:
+                    resp.raise_for_status()
+                    qr_resp = await resp.json(content_type=None)
+
+            qrcode_id: str = qr_resp.get("qrcode", "")
+            qrcode_url: str = (
+                qr_resp.get("qrcode_img_content")
+                or qr_resp.get("qrcode_url")
+                or ""
+            )
+            if not qrcode_id or not qrcode_url:
+                await self._send_text(admin_user_id, "❌ 获取二维码失败，请重试", ctx)
+                logger.error("addbot: get_bot_qrcode returned %s", qr_resp)
+                return
+
+            # 2. Send login URL + QR code image
+            await self._send_text(
+                admin_user_id,
+                "📱 把下面的链接或二维码发给朋友，让他登录自己的小鬼（2 分钟内有效）",
+                ctx,
+            )
+            await self._send_text(admin_user_id, qrcode_url, ctx)
+            await self.send_message(admin_user_id, OutgoingMessage(image=_make_login_qr(qrcode_url)))
+            await self._send_text(admin_user_id, "⏳ 等待登录中…", ctx)
+
+            # 3. Long-poll for scan confirmation
+            deadline = asyncio.get_event_loop().time() + 120
+            status_resp: dict = {}
+            confirmed = False
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                while asyncio.get_event_loop().time() < deadline:
+                    await asyncio.sleep(3)
+                    try:
+                        async with s.get(
+                            f"{_ILINKAI}/ilink/bot/get_qrcode_status?qrcode={qrcode_id}"
+                        ) as resp:
+                            status_resp = await resp.json(content_type=None)
+                    except Exception as exc:
+                        logger.warning("addbot: poll error: %s", exc)
+                        continue
+
+                    status = str(status_resp.get("status", ""))
+                    if status in ("confirmed", "success", "2"):
+                        confirmed = True
+                        break
+                    if status in ("expired", "cancelled", "-1"):
+                        await self._send_text(admin_user_id, "❌ 二维码已过期，请重新发送 /share", ctx)
+                        return
+
+            if not confirmed:
+                await self._send_text(admin_user_id, "❌ 等待超时（2 分钟），请重新发送 /share", ctx)
+                return
+
+            # 4. Extract credentials
+            token: str = status_resp.get("bot_token") or status_resp.get("token") or ""
+            new_base_url: str = (
+                status_resp.get("baseurl") or status_resp.get("base_url") or _ILINKAI
+            ).rstrip("/")
+            new_user_id: str = (
+                status_resp.get("ilink_user_id") or status_resp.get("user_id") or ""
+            )
+            account_id: str = (
+                status_resp.get("ilink_bot_id") or status_resp.get("bot_id") or new_user_id
+            )
+
+            if not token:
+                await self._send_text(admin_user_id, "❌ 扫码成功但未获取到 token，请重试", ctx)
+                logger.error("addbot: no token in status_resp %s", status_resp)
+                return
+
+            # 5. Save account
+            import datetime as _dt
+            account = {
+                "account_id": account_id,
+                "token": token,
+                "base_url": new_base_url,
+                "user_id": new_user_id,
+                "saved_at": _dt.datetime.utcnow().isoformat() + "Z",
+            }
+            _accounts.save(_WEIXIN_CHANNEL, account)
+            logger.info("addbot: new account saved: %s (grant_admin=%s)", account_id, grant_admin)
+
+            # Use the same default path as the primary bot (stays within ALLOWED_PATHS)
+            ws_path_str = self._default_path() or ""
+            if ws_path_str:
+                _whitelist.set_workspace(account_id, ws_path_str)
+            logger.info("addbot: workspace set to default path: %s", ws_path_str)
+
+            # Lock the new bot unless admin rights were explicitly granted
+            if not grant_admin:
+                _whitelist.lock(account_id)
+
+            # 6. Notify caller to start new adapter
+            if self._new_account_cb:
+                await self._new_account_cb(account)
+
+            ctx = self._context_tokens.get(admin_user_id)
+            admin_note = "（已授权管理员权限）" if grant_admin else "（普通使用权限）"
+            await self._send_text(
+                admin_user_id,
+                f"✅ 新微信账号已成功注册！{admin_note}\n"
+                f"账号: {account_id}\n"
+                f"朋友的小鬼已启动，他发消息就能用了～",
+                ctx,
+            )
+
+        except Exception:
+            logger.exception("WeixinAdapter: /addbot login failed")
+            ctx = self._context_tokens.get(admin_user_id)
+            await self._send_text(admin_user_id, "❌ 添加账号失败，请查看日志", ctx)
 
     # ── HTTP send ──────────────────────────────────────────────────────────────
 
@@ -604,10 +927,28 @@ class WeixinAdapter(PlatformAdapter):
                 url, data=payload, headers=headers, timeout=send_timeout
             ) as resp:
                 resp.raise_for_status()
+                data = await resp.json(content_type=None)
+                base = data.get("base_resp", {})
+                ret = base.get("ret", 0)
+                if ret != 0:
+                    logger.error(
+                        "WeixinAdapter text send failed: ret=%s err=%s user=%s",
+                        ret, base.get("err_msg", ""), user_id,
+                    )
+                else:
+                    logger.info("WeixinAdapter: text sent to %s", user_id)
         except Exception as exc:
             logger.error("WeixinAdapter send error: %s", exc)
 
     # ── Class utilities ────────────────────────────────────────────────────────
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    def knows_user(self, user_id: str) -> bool:
+        """Return True if this adapter has seen a message from user_id."""
+        return user_id in self._context_tokens
 
     @staticmethod
     def is_available() -> bool:
@@ -646,6 +987,26 @@ def _aes_ecb_encrypt(plaintext: bytes, key: bytes) -> bytes:
     return enc.update(padded) + enc.finalize()
 
 
+
+def _make_login_qr(url: str) -> bytes:
+    """Generate a QR code PNG from a WeChat login URL."""
+    import io
+    import qrcode  # type: ignore[import-untyped]
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _split_text(text: str, limit: int) -> list[str]:
     """Split text into chunks no longer than limit characters."""
     if len(text) <= limit:
@@ -676,9 +1037,17 @@ _HELP_TEXT = """\
 /i            当前状态
 /e            回车
 /x            Esc
+/q            中断（Ctrl-C）
+/c            压缩上下文窗口
+/clear        清除对话历史
+/cost         查看 token 用量
+/ctx          查看上下文使用量
+/diff         查看代码变更
+/usage        查看 API 用量
 /keys <按键>  发送按键序列
 /bash <命令>  执行 shell 命令
-/new          新建会话
-/done         结束会话
+/mode [模式]  切换权限模式（yolo/auto/default），默认 yolo
 /model <名称> 切换模型
+/share        团队协作：共享本机给信任的成员（仅管理员）
+/share admin  同上，并允许对方也能 /share
 直接发文字 → 转发到终端"""

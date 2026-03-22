@@ -287,7 +287,7 @@ class TmuxController:
         pane = self._find_pane(window_id)
         if pane is None:
             raise ValueError(f"Window {window_id} not found")
-        pane.send_keys(keys, literal=False)
+        pane.send_keys(keys, literal=False, enter=False)
 
     # ------------------------------------------------------------------
     # Output Capture

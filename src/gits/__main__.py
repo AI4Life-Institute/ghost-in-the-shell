@@ -300,26 +300,56 @@ def _cmd_start_normal(args: argparse.Namespace) -> None:
         logger.info("Discord adapter enabled")
 
     if has_weixin:
-        try:
-            default_path = str(settings.gits_default_path) if settings.gits_default_path else None
-            weixin_adapter = WeixinAdapter(default_path=default_path)
-            adapters.append(weixin_adapter)
-            logger.info("WeChat adapter enabled (account auto-discovered)")
-        except Exception as exc:
-            logger.warning("WeChat adapter failed to init: %s", exc)
+        from .adapters.weixin.bot import discover_all_accounts
+        default_path = str(settings.gits_default_path) if settings.gits_default_path else None
+        from .adapters.weixin.whitelist import get_workspace
+        wx_accounts = discover_all_accounts()
+        for wx_acct in wx_accounts:
+            try:
+                workspace = get_workspace(wx_acct["account_id"])
+                wx_adapter = WeixinAdapter(
+                    default_path=workspace or default_path,
+                    account=wx_acct,
+                    workspace_root=workspace,
+                )
+                adapters.append(wx_adapter)
+                logger.info("WeChat adapter enabled: account=%s workspace=%s",
+                            wx_acct["account_id"], workspace or "(none)")
+            except Exception as exc:
+                logger.warning("WeChat adapter failed to init (account=%s): %s", wx_acct.get("account_id"), exc)
 
-    # Build a routing adapter when multiple platforms are active
-    if len(adapters) == 1:
-        primary = adapters[0]
-    else:
-        from .adapters.base import MultiAdapter
-        primary = MultiAdapter(adapters)
+    # Always use MultiAdapter so new adapters can be added dynamically at runtime
+    from .adapters.base import MultiAdapter
+    primary = MultiAdapter(adapters)
 
     engine.set_adapter(primary)
+
+    async def _add_new_weixin_account(account: dict) -> None:
+        """Called by /share when a new WeChat account is registered."""
+        from .adapters.weixin.whitelist import get_workspace
+        workspace = get_workspace(account["account_id"])
+        try:
+            new_wx = WeixinAdapter(
+                default_path=workspace,
+                account=account,
+                workspace_root=workspace,
+            )
+            new_wx.set_engine(engine)
+            new_wx.on_message(engine.handle_message)
+            new_wx.on_button_click(engine.handle_button_click)
+            new_wx.set_new_account_callback(_add_new_weixin_account)
+            primary.add_adapter(new_wx)
+            asyncio.create_task(new_wx.start())
+            logger.info("New WeChat adapter started: account=%s", account["account_id"])
+        except Exception as exc:
+            logger.error("Failed to start new WeChat adapter (account=%s): %s", account.get("account_id"), exc)
+
     for a in adapters:
         a.set_engine(engine)
         a.on_message(engine.handle_message)
         a.on_button_click(engine.handle_button_click)
+        if hasattr(a, "set_new_account_callback"):
+            a.set_new_account_callback(_add_new_weixin_account)
 
     async def _run() -> None:
         await engine.start()
