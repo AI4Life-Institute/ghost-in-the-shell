@@ -119,11 +119,15 @@ Both platforms can run simultaneously — Ghost routes messages from each indepe
 
 **4. Start**
 
+The setup wizard automatically starts Ghost as a background service (launchd) when it finishes. No manual start needed.
+
+To restart manually later:
+
 ```bash
-ghost start
+ghost restart
 ```
 
-Hooks are auto-installed on first start. For dev mode with auto-restart on file changes:
+For dev mode with auto-restart on file changes:
 
 ```bash
 ghost start --dev

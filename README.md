@@ -109,11 +109,13 @@ ghost wechat --relogin
 
 **4. 启动**
 
-```bash
-ghost start
-```
+设置向导完成后会自动启动 Ghost 后台服务（launchd），开机自启，无需手动操作。
 
-Ghost 会作为后台服务通过 launchd 运行，开机自启，无需手动维护。
+之后如需手动重启：
+
+```bash
+ghost restart
+```
 
 ---
 
