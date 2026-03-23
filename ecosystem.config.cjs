@@ -2,8 +2,8 @@ module.exports = {
   apps: [
     {
       name: 'ghost-in-the-shell',
-      cwd: '/data/ai4life/projects/ghost-in-the-shell',
-      script: '/data/ai4life/projects/ghost-in-the-shell/start.sh',
+      cwd: __dirname,
+      script: `${__dirname}/start.sh`,
       interpreter: 'none',
       autorestart: true,
       restart_delay: 5000,
