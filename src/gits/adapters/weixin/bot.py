@@ -167,10 +167,16 @@ class WeixinAdapter(PlatformAdapter):
         self._pending_select: dict[str, list[str]] = {}
         # Pending /bind fuzzy selection: user_id → list of absolute paths
         self._pending_bind: dict[str, list[str]] = {}
+        # Pending /revoke selection: user_id → list of account_ids
+        self._pending_revoke: dict[str, list[str]] = {}
+        # Pending /revoke confirmation: user_id → account_id
+        self._pending_revoke_confirm: dict[str, str] = {}
         # Track users who have already received the welcome message
         self._greeted_users: set[str] = set()
         # Callback invoked when a new bot account is successfully registered
         self._new_account_cb: Any = None
+        # Callback invoked when /revoke removes a bot account
+        self._revoke_account_cb: Any = None
 
         logger.info(
             "WeixinAdapter: account=%s base_url=%s", self._account_id, self._base_url
@@ -182,6 +188,10 @@ class WeixinAdapter(PlatformAdapter):
     def set_new_account_callback(self, cb: Any) -> None:
         """Register an async callback(account: dict) called when /addbot succeeds."""
         self._new_account_cb = cb
+
+    def set_revoke_account_callback(self, cb: Any) -> None:
+        """Register an async callback(account_id: str) called when /revoke succeeds."""
+        self._revoke_account_cb = cb
 
     # ── PlatformAdapter interface ──────────────────────────────────────────────
 
@@ -388,6 +398,36 @@ class WeixinAdapter(PlatformAdapter):
             else:
                 ctx = self._context_tokens.get(from_user)
                 await self._send_text(from_user, f"无效选项，请回复 0~{len(opts)-1}", ctx)
+            return
+
+        # /revoke selection reply
+        if text and text.strip().isdigit() and from_user in self._pending_revoke:
+            accts = self._pending_revoke.pop(from_user)
+            idx = int(text.strip())
+            ctx = self._context_tokens.get(from_user)
+            if 0 <= idx < len(accts):
+                target_id = accts[idx]
+                self._pending_revoke_confirm[from_user] = target_id
+                await self._send_text(
+                    from_user,
+                    f"确认要撤销账号 {target_id} 的访问权限吗？\n回复 y 确认，回复其他内容取消。",
+                    ctx,
+                )
+            else:
+                await self._send_text(from_user, f"无效选项，请回复 0~{len(accts)-1}", ctx)
+            return
+
+        # /revoke confirmation reply
+        if text and from_user in self._pending_revoke_confirm:
+            target_id = self._pending_revoke_confirm.pop(from_user)
+            ctx = self._context_tokens.get(from_user)
+            if text.strip().lower() == "y":
+                _accounts.remove(_WEIXIN_CHANNEL, target_id)
+                if self._revoke_account_cb:
+                    asyncio.create_task(self._revoke_account_cb(target_id))
+                await self._send_text(from_user, f"✅ 已撤销账号 {target_id}，朋友的连接已断开。", ctx)
+            else:
+                await self._send_text(from_user, "已取消。", ctx)
             return
 
         # Command handling (takes priority)
@@ -635,6 +675,36 @@ class WeixinAdapter(PlatformAdapter):
                 else:
                     grant_admin = arg.strip().lower() == "admin"
                     asyncio.create_task(self._do_addbot_login(user_id, grant_admin=grant_admin))
+            elif cmd == "/shares":
+                if not _whitelist.is_admin(self._account_id, user_id):
+                    await iact.send("只有管理员才能查看共享账号～")
+                else:
+                    all_accts = _accounts.discover_all(_WEIXIN_CHANNEL)
+                    shared = [a for a in all_accts if a["account_id"] != self._account_id]
+                    if not shared:
+                        await iact.send("当前没有共享账号。")
+                    else:
+                        lines = [f"共享账号（共 {len(shared)} 个）："]
+                        for a in shared:
+                            date = (a.get("saved_at") or "")[:10] or "?"
+                            lines.append(f"• {a['account_id']}\n  user_id={a['user_id']}  创建于 {date}")
+                        lines.append("\n发送 /revoke 撤销某个共享。")
+                        await iact.send("\n".join(lines))
+            elif cmd == "/revoke":
+                if not _whitelist.is_admin(self._account_id, user_id):
+                    await iact.send("只有管理员才能撤销共享～")
+                else:
+                    all_accts = _accounts.discover_all(_WEIXIN_CHANNEL)
+                    shared = [a for a in all_accts if a["account_id"] != self._account_id]
+                    if not shared:
+                        await iact.send("当前没有共享账号。")
+                    else:
+                        lines = [f"选择要撤销的账号，回复数字：\n"]
+                        for i, a in enumerate(shared):
+                            date = (a.get("saved_at") or "")[:10] or "?"
+                            lines.append(f"{i}. {a['account_id']}\n   user_id={a['user_id']}  {date}")
+                        await iact.send("\n".join(lines))
+                        self._pending_revoke[user_id] = [a["account_id"] for a in shared]
             elif cmd in ("/compact", "/c"):
                 await self._forward_and_screenshot(user_id, "compact")
             elif cmd == "/clear":
@@ -1164,4 +1234,6 @@ _HELP_TEXT = """\
 /model <名称> 切换模型
 /share        团队协作：共享本机给信任的成员（仅管理员）
 /share admin  同上，并允许对方也能 /share
+/shares       列出所有共享账号（仅管理员）
+/revoke       撤销某个共享，断开对方连接（仅管理员）
 直接发文字 → 转发到终端"""

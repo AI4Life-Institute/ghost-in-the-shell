@@ -159,6 +159,26 @@ def load_sync_buf(channel: str, account_id: str) -> str:
         return ""
 
 
+def remove(channel: str, account_id: str) -> None:
+    """Remove an account from storage: deletes data/sync files and updates the index."""
+    norm_id = normalize_account_id(account_id)
+    acct_dir = _accounts_dir(channel)
+
+    for fname in [f"{norm_id}.json", f"{account_id}.json",
+                  f"{norm_id}.sync.json", f"{account_id}.sync.json"]:
+        f = acct_dir / fname
+        if f.exists():
+            f.unlink()
+
+    index_file = _accounts_index(channel)
+    try:
+        ids: list[str] = json.loads(index_file.read_text()) if index_file.exists() else []
+    except Exception:
+        ids = []
+    ids = [i for i in ids if i != account_id]
+    index_file.write_text(json.dumps(ids))
+
+
 def save_sync_buf(channel: str, account_id: str, buf: str) -> None:
     """Persist the get_updates cursor."""
     try:

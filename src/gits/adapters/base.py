@@ -137,6 +137,14 @@ class MultiAdapter(PlatformAdapter):
         """Dynamically register a new adapter (e.g. a newly logged-in WeChat account)."""
         self._adapters.append(adapter)
 
+    async def remove_adapter(self, account_id: str) -> None:
+        """Stop and deregister a WeChat adapter by account_id."""
+        for a in list(self._adapters):
+            if type(a).__name__ == "WeixinAdapter" and getattr(a, "account_id", None) == account_id:
+                await a.stop()
+                self._adapters.remove(a)
+                return
+
     def _route(self, channel_id: str) -> PlatformAdapter:
         if "@im.wechat" in channel_id:
             weixin_adapters = [a for a in self._adapters if type(a).__name__ == "WeixinAdapter"]
