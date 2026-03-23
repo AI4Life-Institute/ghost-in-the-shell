@@ -77,3 +77,15 @@ def set_workspace(account_id: str, path: str) -> None:
 def get_workspace(account_id: str) -> str | None:
     """Return the locked workspace path for this account, or None."""
     return _load(account_id).get("workspace")
+
+
+def set_label(account_id: str, label: str) -> None:
+    """Store a human-readable label for this shared account."""
+    data = _load(account_id)
+    data["label"] = label
+    _save(account_id, data)
+
+
+def get_label(account_id: str) -> str | None:
+    """Return the human-readable label for this account, or None."""
+    return _load(account_id).get("label")

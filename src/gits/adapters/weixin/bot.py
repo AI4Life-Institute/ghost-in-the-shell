@@ -171,6 +171,10 @@ class WeixinAdapter(PlatformAdapter):
         self._pending_revoke: dict[str, list[str]] = {}
         # Pending /revoke confirmation: user_id → account_id
         self._pending_revoke_confirm: dict[str, str] = {}
+        # Pending label input: admin_user_id → account_id (waiting for label text)
+        self._pending_share_label: dict[str, str] = {}
+        # Pending /label selection: admin_user_id → list of account_ids
+        self._pending_label_select: dict[str, list[str]] = {}
         # Track users who have already received the welcome message
         self._greeted_users: set[str] = set()
         # Callback invoked when a new bot account is successfully registered
@@ -372,6 +376,28 @@ class WeixinAdapter(PlatformAdapter):
             _whitelist.add_admin(self._account_id, from_user)
             logger.info("WeChat: first user %s set as admin (account=%s)", from_user, self._account_id)
 
+        # /label selection reply
+        if text and text.strip().isdigit() and from_user in self._pending_label_select:
+            accts = self._pending_label_select.pop(from_user)
+            idx = int(text.strip())
+            ctx = self._context_tokens.get(from_user)
+            if 0 <= idx < len(accts):
+                self._pending_share_label[from_user] = accts[idx]
+                current = _whitelist.get_label(accts[idx]) or "未命名"
+                await self._send_text(from_user, f"当前备注：{current}\n回复新名字：", ctx)
+            else:
+                await self._send_text(from_user, f"无效选项，请回复 0~{len(accts)-1}", ctx)
+            return
+
+        # /share label reply
+        if text and from_user in self._pending_share_label:
+            account_id = self._pending_share_label.pop(from_user)
+            label = text.strip()
+            _whitelist.set_label(account_id, label)
+            ctx = self._context_tokens.get(from_user)
+            await self._send_text(from_user, f"👤 已记录：{label}", ctx)
+            return
+
         # /bind fuzzy selection reply
         if text and text.strip().isdigit() and from_user in self._pending_bind:
             paths = self._pending_bind.pop(from_user)
@@ -408,9 +434,10 @@ class WeixinAdapter(PlatformAdapter):
             if 0 <= idx < len(accts):
                 target_id = accts[idx]
                 self._pending_revoke_confirm[from_user] = target_id
+                label = _whitelist.get_label(target_id) or target_id
                 await self._send_text(
                     from_user,
-                    f"确认要撤销账号 {target_id} 的访问权限吗？\n回复 y 确认，回复其他内容取消。",
+                    f"确认要撤销 {label} 的访问权限吗？\n回复 y 确认，回复其他内容取消。",
                     ctx,
                 )
             else:
@@ -422,10 +449,11 @@ class WeixinAdapter(PlatformAdapter):
             target_id = self._pending_revoke_confirm.pop(from_user)
             ctx = self._context_tokens.get(from_user)
             if text.strip().lower() == "y":
+                label = _whitelist.get_label(target_id) or target_id
                 _accounts.remove(_WEIXIN_CHANNEL, target_id)
                 if self._revoke_account_cb:
                     asyncio.create_task(self._revoke_account_cb(target_id))
-                await self._send_text(from_user, f"✅ 已撤销账号 {target_id}，朋友的连接已断开。", ctx)
+                await self._send_text(from_user, f"✅ 已撤销 {label} 的访问权限，连接已断开。", ctx)
             else:
                 await self._send_text(from_user, "已取消。", ctx)
             return
@@ -686,8 +714,9 @@ class WeixinAdapter(PlatformAdapter):
                     else:
                         lines = [f"共享账号（共 {len(shared)} 个）："]
                         for a in shared:
+                            label = _whitelist.get_label(a["account_id"]) or "未命名"
                             date = (a.get("saved_at") or "")[:10] or "?"
-                            lines.append(f"• {a['account_id']}\n  user_id={a['user_id']}  创建于 {date}")
+                            lines.append(f"• {label}  （{date}）")
                         lines.append("\n发送 /revoke 撤销某个共享。")
                         await iact.send("\n".join(lines))
             elif cmd == "/revoke":
@@ -699,12 +728,29 @@ class WeixinAdapter(PlatformAdapter):
                     if not shared:
                         await iact.send("当前没有共享账号。")
                     else:
-                        lines = [f"选择要撤销的账号，回复数字：\n"]
+                        lines = ["选择要撤销的账号，回复数字：\n"]
                         for i, a in enumerate(shared):
+                            label = _whitelist.get_label(a["account_id"]) or "未命名"
                             date = (a.get("saved_at") or "")[:10] or "?"
-                            lines.append(f"{i}. {a['account_id']}\n   user_id={a['user_id']}  {date}")
+                            lines.append(f"{i}. {label}  （{date}）")
                         await iact.send("\n".join(lines))
                         self._pending_revoke[user_id] = [a["account_id"] for a in shared]
+            elif cmd == "/label":
+                if not _whitelist.is_admin(self._account_id, user_id):
+                    await iact.send("只有管理员才能修改备注～")
+                else:
+                    all_accts = _accounts.discover_all(_WEIXIN_CHANNEL)
+                    shared = [a for a in all_accts if a["account_id"] != self._account_id]
+                    if not shared:
+                        await iact.send("当前没有共享账号。")
+                    else:
+                        lines = ["选择要备注的账号，回复数字：\n"]
+                        for i, a in enumerate(shared):
+                            label = _whitelist.get_label(a["account_id"]) or "未命名"
+                            date = (a.get("saved_at") or "")[:10] or "?"
+                            lines.append(f"{i}. {label}  （{date}）")
+                        await iact.send("\n".join(lines))
+                        self._pending_label_select[user_id] = [a["account_id"] for a in shared]
             elif cmd in ("/compact", "/c"):
                 await self._forward_and_screenshot(user_id, "compact")
             elif cmd == "/clear":
@@ -855,10 +901,11 @@ class WeixinAdapter(PlatformAdapter):
             await self._send_text(
                 admin_user_id,
                 f"✅ 新微信账号已成功注册！{admin_note}\n"
-                f"账号: {account_id}\n"
-                f"朋友的小鬼已启动，他发消息就能用了～",
+                f"朋友的小鬼已启动，他发消息就能用了～\n\n"
+                f"这是给谁用的？回复一个名字方便以后管理（比如：小明）",
                 ctx,
             )
+            self._pending_share_label[admin_user_id] = account_id
 
         except Exception:
             logger.exception("WeixinAdapter: /addbot login failed")
@@ -1212,7 +1259,10 @@ _WELCOME_TEXT = """\
 Claude 买了不白花
 AI 跑路你喝茶 🧋
 
-发消息就能开始，发 /help 看看我能做什么 🐾"""
+发消息就能开始，发 /help 看看我能做什么 🐾
+
+🌟 觉得好用的话，欢迎来给个 Star！
+👉 ghost.ai4life.com"""
 
 _HELP_TEXT = """\
 👻 小鬼命令表:
@@ -1235,5 +1285,6 @@ _HELP_TEXT = """\
 /share        团队协作：共享本机给信任的成员（仅管理员）
 /share admin  同上，并允许对方也能 /share
 /shares       列出所有共享账号（仅管理员）
+/label        给共享账号改备注名（仅管理员）
 /revoke       撤销某个共享，断开对方连接（仅管理员）
 直接发文字 → 转发到终端"""
