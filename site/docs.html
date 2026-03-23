@@ -6,9 +6,9 @@
   <title>使用说明 — Ghost</title>
   <style>
     :root {
-      --bg: #0a0a0f; --surface: #13131a; --border: #2a2a3a;
-      --accent: #7c6bff; --ghost: #c4b5fd; --text: #e8e8f0;
-      --muted: #8888a0; --green: #34d399;
+      --bg: #ffffff; --surface: #f5f5f7; --border: #e0e0e8;
+      --accent: #7c6bff; --ghost: #5b4ecc; --text: #1a1a2e;
+      --muted: #666680; --green: #059669;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -94,6 +94,34 @@
   <p class="en">Run the wizard to configure WeChat or Discord:</p>
   <pre><code>ghost</code></pre>
 
+  <h2><span class="zh">多个微信，共享一个 Claude</span><span class="en">Multiple WeChat accounts, one Claude</span></h2>
+  <p class="zh">家人、朋友、团队成员各用自己的微信，同时连到同一台小鬼，共用一个 Claude Pro/Max。发送 <code>/share</code> 生成邀请码，扫码即加入。</p>
+  <p class="en">Family, friends, or teammates each use their own WeChat, all connected to the same Ghost and sharing one Claude Pro/Max subscription. Send <code>/share</code> to get an invite code.</p>
+
+  <h2><span class="zh">语音 · 图片</span><span class="en">Voice · Images</span></h2>
+  <p class="zh">直接发图给小鬼，Claude 会看图回答——截图、拍照都行。发语音也可以，小鬼会把转写内容转给 Claude。建议开启微信的语音转文字效果更好。</p>
+  <p class="en">Send images directly in WeChat and Claude will analyze them — screenshots, photos, anything. Voice messages work too: Ghost forwards the transcription to Claude. Enable WeChat's voice-to-text for best results.</p>
+
+  <h2><span class="zh">常用命令</span><span class="en">Commands</span></h2>
+  <table>
+    <thead>
+      <tr>
+        <th><span class="zh">命令</span><span class="en">Command</span></th>
+        <th><span class="zh">作用</span><span class="en">What it does</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>/clear</td><td><span class="zh">开始新对话</span><span class="en">Start a new conversation</span></td></tr>
+      <tr><td>/c</td><td><span class="zh">压缩对话，继续聊更久</span><span class="en">Compact context to keep going longer</span></td></tr>
+      <tr><td>/q</td><td><span class="zh">停止当前任务</span><span class="en">Stop current task</span></td></tr>
+      <tr><td>/cost</td><td><span class="zh">查看用量</span><span class="en">Check usage</span></td></tr>
+      <tr><td>/share</td><td><span class="zh">邀请朋友</span><span class="en">Invite a friend</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="zh">使用许可</span><span class="en">License</span></h2>
+  <p class="zh">个人使用完全免费。企业用户年收入 100 万美元以下同样免费。超过此规模请联系我们获取商业授权。</p>
+  <p class="en">Free for personal use. Also free for businesses with annual revenue under $1M. For larger organizations, please contact us for a commercial license.</p>
 
 </div>
 

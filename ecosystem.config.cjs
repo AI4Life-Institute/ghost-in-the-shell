@@ -15,8 +15,8 @@ module.exports = {
     {
       name: 'ghost-site',
       cwd: `${__dirname}/site`,
-      script: 'python3',
-      args: '-m http.server 9191',
+      script: 'npx',
+      args: 'serve -l 9191',
       interpreter: 'none',
       autorestart: true,
       restart_delay: 3000,

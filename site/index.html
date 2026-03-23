@@ -6,13 +6,13 @@
   <title>养龙虾不如养小鬼</title>
   <style>
     :root {
-      --bg: #0a0a0f;
-      --surface: #13131a;
-      --border: #2a2a3a;
+      --bg: #ffffff;
+      --surface: #f5f5f7;
+      --border: #e0e0e8;
       --accent: #7c6bff;
-      --ghost: #c4b5fd;
-      --text: #e8e8f0;
-      --muted: #8888a0;
+      --ghost: #5b4ecc;
+      --text: #1a1a2e;
+      --muted: #666680;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -60,9 +60,9 @@
       margin-bottom: 2.5rem;
     }
     .point {
-      background: rgba(255,255,255,0.04);
+      background: var(--surface);
       backdrop-filter: blur(12px);
-      border: 1px solid rgba(255,255,255,0.08);
+      border: 1px solid var(--border);
       border-radius: 12px; padding: 0.85rem 1rem;
       font-size: 0.84rem; color: var(--text);
       text-align: left;
@@ -81,7 +81,7 @@
       border-radius: 8px; padding: 0.65rem 1.1rem;
       display: inline-flex; align-items: center; gap: 0.8rem;
       font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88rem;
-      color: #34d399; margin-bottom: 2rem;
+      color: #059669; margin-bottom: 2rem;
     }
     .prompt { color: var(--muted); user-select: none; }
     .copy-btn {
@@ -96,9 +96,9 @@
       margin-bottom: 2.5rem; align-items: stretch;
     }
     .vs-card {
-      background: rgba(255,255,255,0.04);
+      background: var(--surface);
       backdrop-filter: blur(12px);
-      border: 1px solid rgba(255,255,255,0.08);
+      border: 1px solid var(--border);
       border-radius: 14px; padding: 1.2rem 1rem;
     }
     .vs-card.ghost-card {
@@ -110,7 +110,7 @@
     }
     .vs-card .vs-row {
       font-size: 0.82rem; color: var(--muted);
-      padding: 0.3rem 0; border-bottom: 1px solid rgba(255,255,255,0.05);
+      padding: 0.3rem 0; border-bottom: 1px solid var(--border);
     }
     .vs-card .vs-row:last-child { border-bottom: none; }
     .vs-card.ghost-card .vs-row { color: var(--text); }
@@ -198,7 +198,7 @@
 <img src="logo.png" alt="Ghost" class="logo">
 
 <h1>
-  <span class="zh">来养只<em>小鬼</em>吧</span>
+  <span class="zh">先进团队，先养<em>小鬼</em></span>
   <span class="en">Meet <em>Ghost</em></span>
 </h1>
 
@@ -216,6 +216,14 @@
       <tr>
         <td><span class="zh">官方微信 ClawBot</span><span class="en">Official WeChat ClawBot</span></td>
         <td class="col-ghost">✅</td><td>✅</td><td>❌</td>
+      </tr>
+      <tr>
+        <td><span class="zh">微信语音 · 图片</span><span class="en">WeChat voice · images</span></td>
+        <td class="col-ghost">✅</td><td>✅</td><td>❌</td>
+      </tr>
+      <tr>
+        <td><span class="zh">多微信共享</span><span class="en">Shared across accounts</span></td>
+        <td class="col-ghost">✅</td><td>❌</td><td>❌</td>
       </tr>
       <tr>
         <td><span class="zh">Discord 远程</span><span class="en">Discord remote</span></td>
@@ -257,6 +265,10 @@
   <p style="margin-bottom:0.4rem;">
     <span class="zh">目前仅支持 macOS</span>
     <span class="en">macOS only</span>
+  </p>
+  <p style="margin-bottom:0.4rem;">
+    <span class="zh">个人及年收入 100 万美元以下的企业免费使用</span>
+    <span class="en">Free for personal use and businesses with annual revenue under $1M</span>
   </p>
   Ghost · AI4Life Institute · <a href="https://github.com/AI4Life-Institute/ghost-in-the-shell" style="color:var(--accent);text-decoration:none;">GitHub</a>
 </footer>
