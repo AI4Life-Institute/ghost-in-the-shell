@@ -320,7 +320,11 @@ def _cmd_start_normal(args: argparse.Namespace) -> None:
 
     # Always use MultiAdapter so new adapters can be added dynamically at runtime
     from .adapters.base import MultiAdapter
+    from .telemetry import track
     primary = MultiAdapter(adapters)
+
+    platforms = [*(["discord"] if has_discord else []), *(["weixin"] if has_weixin else [])]
+    track("bot_started", platforms=",".join(platforms))
 
     engine.set_adapter(primary)
 
@@ -338,11 +342,17 @@ def _cmd_start_normal(args: argparse.Namespace) -> None:
             new_wx.on_message(engine.handle_message)
             new_wx.on_button_click(engine.handle_button_click)
             new_wx.set_new_account_callback(_add_new_weixin_account)
+            new_wx.set_revoke_account_callback(_revoke_weixin_account)
             primary.add_adapter(new_wx)
             asyncio.create_task(new_wx.start())
             logger.info("New WeChat adapter started: account=%s", account["account_id"])
         except Exception as exc:
             logger.error("Failed to start new WeChat adapter (account=%s): %s", account.get("account_id"), exc)
+
+    async def _revoke_weixin_account(account_id: str) -> None:
+        """Called by /revoke to stop and deregister a shared WeChat account."""
+        await primary.remove_adapter(account_id)
+        logger.info("WeChat adapter revoked: account=%s", account_id)
 
     for a in adapters:
         a.set_engine(engine)
@@ -350,6 +360,8 @@ def _cmd_start_normal(args: argparse.Namespace) -> None:
         a.on_button_click(engine.handle_button_click)
         if hasattr(a, "set_new_account_callback"):
             a.set_new_account_callback(_add_new_weixin_account)
+        if hasattr(a, "set_revoke_account_callback"):
+            a.set_revoke_account_callback(_revoke_weixin_account)
 
     async def _run() -> None:
         await engine.start()
@@ -472,6 +484,10 @@ def _cmd_setup(args: argparse.Namespace) -> None:
 
     print()
     print("  Ghost — Setup Wizard")
+    print()
+    print("  Ghost collects anonymous usage data (commands used, platform, version).")
+    print("  No message content or file paths are collected.")
+    print("  Opt out: set GITS_TELEMETRY=0 in ~/.gits/config.env")
     print()
 
     config_env = Path("~/.gits/config.env").expanduser()

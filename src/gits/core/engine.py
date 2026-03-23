@@ -15,6 +15,7 @@ from typing import Any
 
 from ..adapters.base import Button, IncomingMessage, OutgoingMessage, SelectOption
 from ..config import Settings
+from ..telemetry import platform_for, track
 from .guard import GuardHandler
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
@@ -201,6 +202,7 @@ class Engine:
                 binding.window_id,
                 msg.text[:80],
             )
+            track("cmd_message", platform=msg.platform)
             try:
                 submit = _submit_keys_for_cli(binding.coding_cli)
                 await self.tmux.send_text(
@@ -230,6 +232,7 @@ class Engine:
         immediately.  Pass ``fresh=True`` to skip session discovery entirely.
         Pass ``session_id`` to resume a specific session directly.
         """
+        track("cmd_bind", platform=platform_for(channel_id), cli=cli or "default")
         if path:
             # Direct path specified — validate and bind
             p = Path(path).expanduser().resolve()
@@ -504,6 +507,7 @@ class Engine:
 
     async def handle_unbind(self, channel_id: str, interaction: Any) -> None:
         """Handle /unbind — unbind channel."""
+        track("cmd_unbind", platform=platform_for(channel_id))
         self.monitor.stop_polling(channel_id)
         binding = await self.session_mgr.unbind(channel_id)
         if binding:
@@ -764,6 +768,7 @@ class Engine:
 
     async def handle_screenshot(self, channel_id: str, interaction: Any) -> None:
         """Handle /screenshot — take a terminal screenshot."""
+        track("cmd_screenshot", platform=platform_for(channel_id))
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound. Use `/bind` first.")
@@ -793,6 +798,7 @@ class Engine:
 
     async def handle_status(self, channel_id: str, interaction: Any) -> None:
         """Handle /info — show binding info."""
+        track("cmd_status", platform=platform_for(channel_id))
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound.")
@@ -1237,6 +1243,7 @@ class Engine:
         Sends the command with a ``!`` prefix which triggers the CLI's
         bash execution mode (Claude Code runs it directly).
         """
+        track("cmd_bash", platform=platform_for(channel_id))
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None:
             await self._reply(interaction, "Not bound.")
