@@ -177,7 +177,7 @@ class Engine:
             )
             return
 
-        if msg.text:
+        if msg.text or msg.image_paths:
             # Ensure the tmux window still exists; recreate it if killed externally
             await self._ensure_window_alive(binding)
 
@@ -197,19 +197,30 @@ class Engine:
 
             await self.session_mgr.touch_active(msg.channel_id)
 
-            logger.info(
-                "Forwarding message to tmux %s: %s",
-                binding.window_id,
-                msg.text[:80],
-            )
-            track("cmd_message", platform=msg.platform)
-            try:
-                submit = _submit_keys_for_cli(binding.coding_cli)
-                await self.tmux.send_text(
-                    binding.window_id, msg.text, submit_keys=submit
+            submit = _submit_keys_for_cli(binding.coding_cli)
+
+            if msg.image_paths:
+                # Forward images as @path references so Claude CLI can read them
+                for img_path in msg.image_paths:
+                    logger.info("Forwarding image to tmux %s: %s", binding.window_id, img_path)
+                    try:
+                        await self.tmux.send_text(binding.window_id, f"@{img_path}", submit_keys=submit)
+                    except Exception:
+                        logger.exception("Failed to send image path to tmux")
+
+            if msg.text:
+                logger.info(
+                    "Forwarding message to tmux %s: %s",
+                    binding.window_id,
+                    msg.text[:80],
                 )
-            except Exception:
-                logger.exception("Failed to send text to tmux")
+                track("cmd_message", platform=msg.platform)
+                try:
+                    await self.tmux.send_text(
+                        binding.window_id, msg.text, submit_keys=submit
+                    )
+                except Exception:
+                    logger.exception("Failed to send text to tmux")
 
     # ------------------------------------------------------------------
     # A. Native Commands

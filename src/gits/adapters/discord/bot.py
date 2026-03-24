@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -299,13 +300,16 @@ class DiscordAdapter(PlatformAdapter):
         except Exception:
             logger.debug("Failed to add 👀 reaction")
 
+        # Download image attachments to /tmp
+        image_paths = await self._download_attachments(message.attachments)
+
         # Convert to IncomingMessage
         incoming = IncomingMessage(
             platform="discord",
             channel_id=channel_id,
             user_id=str(message.author.id),
             text=message.content or None,
-            image_paths=[],  # TODO: handle attachments
+            image_paths=image_paths,
             reply_to=str(message.reference.message_id) if message.reference else None,
             raw=message,
         )
@@ -324,6 +328,23 @@ class DiscordAdapter(PlatformAdapter):
 
         # Let commands.Bot process prefix commands (e.g. !bash)
         await self.bot.process_commands(message)
+
+    async def _download_attachments(self, attachments: list[discord.Attachment]) -> list[str]:
+        """Download image attachments to /tmp and return their local file paths."""
+        paths: list[str] = []
+        for att in attachments:
+            if not att.content_type or not att.content_type.startswith("image/"):
+                continue
+            ext = Path(att.filename).suffix or ".png"
+            tmp_path = f"/tmp/gits_dc_{uuid.uuid4().hex}{ext}"
+            try:
+                data = await att.read()
+                Path(tmp_path).write_bytes(data)
+                paths.append(tmp_path)
+                logger.info("DiscordAdapter: saved attachment %s → %s (%d bytes)", att.filename, tmp_path, len(data))
+            except Exception:
+                logger.exception("DiscordAdapter: failed to download attachment %s", att.filename)
+        return paths
 
     async def _handle_thread_create(self, thread: discord.Thread) -> None:
         """Handle a new thread being created in a bound channel.
