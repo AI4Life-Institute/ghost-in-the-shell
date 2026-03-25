@@ -417,6 +417,9 @@ class DiscordAdapter(PlatformAdapter):
         if interaction.type != discord.InteractionType.component:
             return
 
+        if not self._check_interaction_access(interaction):
+            return
+
         if not interaction.data:
             return
 
@@ -535,6 +538,8 @@ class DiscordAdapter(PlatformAdapter):
             interaction: discord.Interaction, current: str
         ) -> list[app_commands.Choice[str]]:
             """Autocomplete directory paths as the user types."""
+            if not self._check_interaction_access(interaction):
+                return []
             return self._autocomplete_paths(current)
 
         @tree.command(name="unbind", description="Unbind this channel")
