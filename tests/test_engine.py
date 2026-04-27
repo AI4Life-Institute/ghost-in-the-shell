@@ -485,6 +485,7 @@ def _make_sessions(count: int = 3) -> list[CLISession]:
                 file_path=f"/tmp/fake/{i}.jsonl",
                 mtime=now - (3600 * (i + 1)),  # 1h, 2h, 3h ago...
                 last_message=f"Last message for session {i}",
+                first_message=f"First message for session {i}",
             )
         )
     return sessions
@@ -519,8 +520,8 @@ class TestBuildSessionPickerMessage:
         assert msg.select_options is not None
         labels = [opt.label for opt in msg.select_options]
         # index 0 is "New Session", sessions start at index 1
-        assert any("Session 0 summary" in lbl for lbl in labels)
-        assert any("Session 2 summary" in lbl for lbl in labels)
+        assert any("First message for session 0" in lbl for lbl in labels)
+        assert any("First message for session 2" in lbl for lbl in labels)
 
     def test_message_has_select_options(self, engine):
         sessions = _make_sessions(2)
@@ -540,7 +541,7 @@ class TestBuildSessionPickerMessage:
 
         # index 0 = "New Session", index 1 = first session
         resume_opt = msg.select_options[1]
-        assert resume_opt.value == "bind_resume:ch-1:0"
+        assert resume_opt.value == f"bind_resume_id:ch-1:{sessions[0].session_id}"
 
         new_opt = msg.select_options[0]
         assert new_opt.value == "bind_new:ch-1"
@@ -551,7 +552,7 @@ class TestBuildSessionPickerMessage:
 
         # All 8 sessions fit on one page (page_size=24), plus "New Session" = 9 options
         assert msg.select_options is not None
-        resume_opts = [o for o in msg.select_options if o.value.startswith("bind_resume")]
+        resume_opts = [o for o in msg.select_options if o.value.startswith("bind_resume_id")]
         assert len(resume_opts) == 8
 
     def test_callback_data_within_100_chars(self, engine):

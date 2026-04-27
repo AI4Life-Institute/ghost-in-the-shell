@@ -168,6 +168,21 @@ class Engine:
 
     async def handle_message(self, msg: IncomingMessage) -> None:
         """Forward plain text messages to the bound tmux window."""
+        # Intercept search queries for session picker
+        pending = self._pending_binds.get(msg.channel_id)
+        if pending and pending.get("search_pending") and msg.text:
+            pending["search_pending"] = False
+            pending["search_query"] = msg.text.strip()
+            sessions = pending["sessions"]
+            picker_msg = self._build_session_picker_message(
+                sessions, pending["path"], msg.channel_id,
+                target_cli=pending.get("cli", ""),
+                search_query=pending["search_query"],
+            )
+            if self._adapter:
+                await self._adapter.send_message(msg.channel_id, picker_msg)
+            return
+
         binding = self.session_mgr.get_binding(msg.channel_id)
         if binding is None:
             logger.debug(
@@ -413,13 +428,26 @@ class Engine:
         channel_id: str,
         page: int = 0,
         target_cli: str = "",
+        search_query: str = "",
     ) -> OutgoingMessage:
         """Build an OutgoingMessage with a Select Menu for session selection.
 
         Sessions are sorted most-recently-active first (by mtime).
         Shows up to _SESSION_PAGE_SIZE sessions per page via Discord Select Menu.
         Adds a "Next Page" button when more sessions exist beyond this page.
+        When *search_query* is given, sessions are filtered first.
         """
+        # Filter sessions by search query if provided
+        if search_query:
+            q = search_query.lower()
+            sessions = [
+                s for s in sessions
+                if q in s.summary.lower()
+                or q in s.last_message.lower()
+                or q in s.first_message.lower()
+                or q in s.session_id.lower()
+            ]
+
         page_size = self._SESSION_PAGE_SIZE
         start = page * page_size
         end = start + page_size
@@ -435,7 +463,10 @@ class Engine:
             1 for s in sessions if s.source_cli and s.source_cli != target_type
         )
         lines = ["**Resume Session?**\n"]
-        lines.append(f"Found **{total}** session(s) in `{work_dir}` — sorted by most recently active.")
+        if search_query:
+            lines.append(f"Search: `{search_query}` — **{total}** result(s)")
+        else:
+            lines.append(f"Found **{total}** session(s) in `{work_dir}` — sorted by most recently active.")
         if import_count:
             lines.append(f"Includes **{import_count}** importable session(s) from other CLIs (marked ↗).")
         if total > page_size:
@@ -446,27 +477,32 @@ class Engine:
 
         # Build Select Menu options — one per session on this page
         # Use absolute index so callback_data maps correctly even across pages
+        # NOTE: when search is active, we store filtered indices in _pending_binds["filtered_sessions"]
         select_opts: list[SelectOption] = []
-        for abs_i, s in enumerate(page_sessions, start=start):
+        for page_i, s in enumerate(page_sessions):
             age = _format_age(s.mtime)
             s_base = self.launcher.resolve_cli(s.source_cli).base_type if s.source_cli else target_type
             is_import = s_base != target_type
             badge = f"↗[{s.source_cli}] " if is_import else ""
-            label = (badge + s.summary)[:100]
-            # description: last message (truncated) + msg count + age
+            # Use first user message as label; fall back to slug
+            first = s.first_message or s.summary
+            label = (badge + first)[:100]
+            # description: session ID (short) + last message (truncated) + msg count + age
             import_note = " · import" if is_import else ""
-            meta = f" · {s.message_count} msgs · {age}{import_note}"
+            sid_short = s.session_id[:8]
+            meta = f" · {sid_short} · {s.message_count} msgs · {age}{import_note}"
             last = s.last_message
             max_last = 100 - len(meta)
             if last and max_last > 6:
                 last_truncated = (last[:max_last - 1] + "…") if len(last) > max_last else last
                 desc = last_truncated + meta
             else:
-                desc = f"{s.message_count} msgs · {age}{import_note}"
+                desc = f"{sid_short} · {s.message_count} msgs · {age}{import_note}"
+            # Use session_id as the callback value for unambiguous lookup
             select_opts.append(
                 SelectOption(
-                    label=label or f"Session {abs_i + 1}",
-                    value=f"bind_resume:{channel_id}:{abs_i}",
+                    label=label or f"Session {start + page_i + 1}",
+                    value=f"bind_resume_id:{channel_id}:{s.session_id}",
                     description=desc,
                 )
             )
@@ -481,8 +517,22 @@ class Engine:
             ),
         )
 
-        # "Next Page" button when there are more sessions
+        # Buttons: Search + Next Page
         button_rows: list[list[Button]] = []
+        search_row: list[Button] = [
+            Button(
+                label="🔍 Search sessions",
+                callback_data=f"bind_search:{channel_id}",
+            )
+        ]
+        if search_query:
+            search_row.append(
+                Button(
+                    label="✕ Clear search",
+                    callback_data=f"bind_search_clear:{channel_id}",
+                )
+            )
+        button_rows.append(search_row)
         if has_more:
             button_rows.append([
                 Button(
@@ -1429,6 +1479,11 @@ class Engine:
             session_index = int(parts[2])
             await self._handle_bind_resume(pending_channel, session_index, channel_id)
 
+        elif action == "bind_resume_id" and len(parts) >= 3:
+            pending_channel = parts[1]
+            session_id = parts[2]
+            await self._handle_bind_resume_by_id(pending_channel, session_id, channel_id)
+
         elif action == "bind_new" and len(parts) >= 2:
             pending_channel = parts[1]
             await self._handle_bind_new(pending_channel, channel_id)
@@ -1437,6 +1492,14 @@ class Engine:
             pending_channel = parts[1]
             page = int(parts[2])
             await self._handle_bind_page(pending_channel, page, channel_id)
+
+        elif action == "bind_search" and len(parts) >= 2:
+            pending_channel = parts[1]
+            await self._handle_bind_search(pending_channel, channel_id)
+
+        elif action == "bind_search_clear" and len(parts) >= 2:
+            pending_channel = parts[1]
+            await self._handle_bind_search_clear(pending_channel, channel_id)
 
         else:
             logger.warning("Unknown button action: %s", callback_data)
@@ -1767,8 +1830,78 @@ class Engine:
             return
 
         sessions = pending["sessions"]
+        search_query = pending.get("search_query", "")
         msg = self._build_session_picker_message(
-            sessions, pending["path"], pending_channel, page=page, target_cli=pending.get("cli", "")
+            sessions, pending["path"], pending_channel, page=page,
+            target_cli=pending.get("cli", ""), search_query=search_query,
+        )
+        if self._adapter:
+            await self._adapter.send_message(reply_channel, msg)
+
+    async def _handle_bind_resume_by_id(
+        self, pending_channel: str, session_id: str, reply_channel: str
+    ) -> None:
+        """Handle bind_resume_id — resume a session by its ID (search-safe)."""
+        pending = self._pending_binds.get(pending_channel)
+        if pending is None:
+            if self._adapter:
+                await self._adapter.send_message(
+                    reply_channel,
+                    OutgoingMessage(text="Session picker expired. Run `/bind` again."),
+                )
+            return
+
+        # Find the session by ID
+        sessions: list[CLISession] = pending["sessions"]
+        idx = next((i for i, s in enumerate(sessions) if s.session_id == session_id), None)
+        if idx is None:
+            if self._adapter:
+                await self._adapter.send_message(
+                    reply_channel,
+                    OutgoingMessage(text=f"Session `{session_id[:8]}…` not found. Try again."),
+                )
+            return
+
+        await self._handle_bind_resume(pending_channel, idx, reply_channel)
+
+    async def _handle_bind_search(
+        self, pending_channel: str, reply_channel: str
+    ) -> None:
+        """Handle bind_search — prompt user to type a search query."""
+        pending = self._pending_binds.get(pending_channel)
+        if pending is None:
+            if self._adapter:
+                await self._adapter.send_message(
+                    reply_channel,
+                    OutgoingMessage(text="Session picker expired. Run `/bind` again."),
+                )
+            return
+
+        pending["search_pending"] = True
+        if self._adapter:
+            await self._adapter.send_message(
+                reply_channel,
+                OutgoingMessage(text="Type your search query below to filter sessions:"),
+            )
+
+    async def _handle_bind_search_clear(
+        self, pending_channel: str, reply_channel: str
+    ) -> None:
+        """Handle bind_search_clear — clear search and show all sessions."""
+        pending = self._pending_binds.get(pending_channel)
+        if pending is None:
+            if self._adapter:
+                await self._adapter.send_message(
+                    reply_channel,
+                    OutgoingMessage(text="Session picker expired. Run `/bind` again."),
+                )
+            return
+
+        pending.pop("search_query", None)
+        pending.pop("search_pending", None)
+        sessions = pending["sessions"]
+        msg = self._build_session_picker_message(
+            sessions, pending["path"], pending_channel, target_cli=pending.get("cli", ""),
         )
         if self._adapter:
             await self._adapter.send_message(reply_channel, msg)

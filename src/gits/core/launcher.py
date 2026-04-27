@@ -64,6 +64,7 @@ class CLISession:
     file_path: str
     mtime: float
     source_cli: str = ""  # which CLI this session belongs to (set by discover_all_sessions)
+    first_message: str = ""  # first user message text, used as picker label
 
 
 class CodingCLILauncher:
@@ -429,6 +430,7 @@ class CodingCLILauncher:
                 stat = jsonl_file.stat()
                 session_id = jsonl_file.stem
                 slug = ""
+                first_user = ""
                 last_user = ""
                 msg_count = 0
                 with open(jsonl_file) as f:
@@ -439,7 +441,7 @@ class CodingCLILauncher:
                             # Pick up slug from any record that has it
                             if not slug and data.get("slug"):
                                 slug = data["slug"]
-                            # Track last real user message
+                            # Track first and last real user message
                             if data.get("type") == "user" and "message" in data:
                                 content = data["message"].get("content", "")
                                 text = ""
@@ -458,6 +460,8 @@ class CodingCLILauncher:
                                     if t and not t.startswith("<"):
                                         text = t
                                 if text:
+                                    if not first_user:
+                                        first_user = " ".join(text.split())[:80]
                                     last_user = " ".join(text.split())[:80]
                         except json.JSONDecodeError:
                             pass
@@ -470,6 +474,7 @@ class CodingCLILauncher:
                         message_count=msg_count,
                         file_path=str(jsonl_file),
                         mtime=stat.st_mtime,
+                        first_message=first_user,
                     )
                 )
             except (OSError, json.JSONDecodeError):
