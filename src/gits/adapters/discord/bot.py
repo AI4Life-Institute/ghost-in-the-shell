@@ -249,8 +249,21 @@ class DiscordAdapter(PlatformAdapter):
         """Called when the bot is ready."""
         logger.info("Discord bot ready as %s", self.bot.user)
         try:
-            synced = await self.bot.tree.sync()
-            logger.info("Synced %d slash commands", len(synced))
+            if self.allowed_guilds:
+                total = 0
+                for gid in self.allowed_guilds:
+                    guild = discord.Object(id=gid)
+                    self.bot.tree.copy_global_to(guild=guild)
+                    synced = await self.bot.tree.sync(guild=guild)
+                    total += len(synced)
+                logger.info(
+                    "Synced %d slash commands across %d guild(s)",
+                    total,
+                    len(self.allowed_guilds),
+                )
+            else:
+                synced = await self.bot.tree.sync()
+                logger.info("Synced %d slash commands (global)", len(synced))
         except Exception:
             logger.exception("Failed to sync slash commands")
 

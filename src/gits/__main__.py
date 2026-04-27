@@ -458,6 +458,97 @@ exec "{ghost_bin}" start
             print(f"   launchd restart failed: {r.stderr.strip()}")
 
 
+def _detect_discord_guilds(token: str) -> list[tuple[int, str]]:
+    """Connect to Discord and return list of (guild_id, guild_name) the bot is in."""
+    import asyncio
+
+    import discord
+
+    guilds: list[tuple[int, str]] = []
+
+    async def _fetch():
+        intents = discord.Intents.default()
+        intents.guilds = True
+        client = discord.Client(intents=intents)
+
+        @client.event
+        async def on_ready():
+            for g in client.guilds:
+                guilds.append((g.id, g.name))
+            await client.close()
+
+        await client.start(token)
+
+    try:
+        asyncio.run(_fetch())
+    except Exception:
+        pass
+    return guilds
+
+
+def _discord_guild_setup(token: str, config_env: "Path") -> None:
+    """Detect guilds and let user pick which to whitelist."""
+    import base64
+
+    # Build invite URL from token
+    token_prefix = token.split(".")[0]
+    # Pad base64
+    padded = token_prefix + "=" * (-len(token_prefix) % 4)
+    try:
+        client_id = base64.b64decode(padded).decode()
+    except Exception:
+        client_id = None
+
+    if client_id:
+        invite_url = (
+            f"https://discord.com/oauth2/authorize?client_id={client_id}"
+            f"&scope=bot+applications.commands&permissions=274877991936"
+        )
+        print(f"\n  Invite your bot to a server (skip if already done):")
+        print(f"  {invite_url}")
+
+    print("\n  ⚠️  Before continuing, make sure you have:")
+    print("     1. Invited the bot to your server(s) using the link above")
+    print("     2. Enabled 'Message Content Intent' in the Discord Developer Portal")
+    print("        (Bot → Privileged Gateway Intents → Message Content Intent)")
+    input("\n  Press Enter when ready to detect servers...")
+
+    print("  Connecting to Discord...")
+    guilds = _detect_discord_guilds(token)
+
+    if not guilds:
+        print("  ⚠️  Bot is not in any servers. Invite it first, then run setup again.")
+        return
+
+    print(f"  Found {len(guilds)} server(s):")
+    for i, (gid, name) in enumerate(guilds, 1):
+        print(f"    {i}. {name} ({gid})")
+
+    if len(guilds) == 1:
+        confirm = input(f"\n  Whitelist '{guilds[0][1]}'? [Y/n] ").strip().lower()
+        selected = guilds if confirm != "n" else []
+    else:
+        picks = input(
+            f"\n  Which servers to whitelist? (comma-separated numbers, or 'all') [{len(guilds)} found]: "
+        ).strip().lower()
+        if picks == "all" or picks == "":
+            selected = guilds
+        else:
+            indices = [int(x.strip()) - 1 for x in picks.split(",") if x.strip().isdigit()]
+            selected = [guilds[i] for i in indices if 0 <= i < len(guilds)]
+
+    if selected:
+        guild_val = "[" + ",".join(str(gid) for gid, _ in selected) + "]"
+        lines = config_env.read_text().splitlines() if config_env.exists() else []
+        new_lines = [l for l in lines if not l.startswith("ALLOWED_GUILDS=")]
+        new_lines.append(f"ALLOWED_GUILDS={guild_val}")
+        config_env.write_text("\n".join(new_lines) + "\n")
+        names = ", ".join(name for _, name in selected)
+        print(f"  ✓ Whitelisted: {names}")
+    else:
+        print("  ⚠️  No servers whitelisted — all commands will be denied until configured.")
+
+
 def _cmd_setup(args: argparse.Namespace) -> None:
     """Interactive setup wizard — select platforms, configure each, then restart."""
     import os
@@ -538,6 +629,7 @@ def _cmd_setup(args: argparse.Namespace) -> None:
             new_lines.append(f"GITS_DISCORD_TOKEN={token}")
             config_env.write_text("\n".join(new_lines) + "\n")
             print("  ✓ Token saved")
+            _discord_guild_setup(token, config_env)
             configured.append("Discord")
         elif existing_discord:
             configured.append("Discord")
@@ -614,6 +706,8 @@ def _cmd_discord(args: argparse.Namespace) -> None:
         new_lines.append(f"GITS_DISCORD_TOKEN={token}")
         config_env.write_text("\n".join(new_lines) + "\n")
         print(f"✓  Written to {config_env}")
+
+    _discord_guild_setup(token or existing_token, config_env)
 
     if args.no_start:
         print("\n✅ Setup complete. Run `ghost start` to start the bot")
