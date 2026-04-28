@@ -5,12 +5,23 @@ from pathlib import Path
 
 import pytest
 
+from gits.core.account import AccountLayout
 from gits.core.launcher import RESUME_TEMPLATES, CLISession, CodingCLILauncher
 
 
 @pytest.fixture
 def launcher(tmp_path):
     return CodingCLILauncher(session_map_path=tmp_path / "session_map.json")
+
+
+@pytest.fixture
+def launcher_with_layout(tmp_path):
+    """Launcher rooted at ``tmp_path`` so account dirs land under it."""
+    layout = AccountLayout(home=tmp_path)
+    return CodingCLILauncher(
+        session_map_path=tmp_path / "session_map.json",
+        account_layout=layout,
+    )
 
 
 class TestResumeTemplates:
@@ -63,6 +74,103 @@ class TestBuildLaunchCommand:
     def test_unknown_cli(self, launcher):
         cmd = launcher.build_launch_command(cli="unknown-cli")
         assert cmd == "unknown-cli"
+
+
+class TestAccountAwareLaunch:
+    """Phase 0.5 — CLAUDE_CONFIG_DIR injection by claude_account."""
+
+    def test_claude_with_account_injects_config_dir(self, launcher_with_layout, tmp_path):
+        cmd = launcher_with_layout.build_launch_command(
+            cli="claude", session_id="s1", claude_account="personal"
+        )
+        expected_dir = str(tmp_path / ".claude-personal")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={expected_dir} "), cmd
+        assert cmd.endswith("claude --resume s1")
+
+    def test_claude_no_account_no_injection(self, launcher_with_layout):
+        cmd = launcher_with_layout.build_launch_command(
+            cli="claude", session_id="s1", claude_account=None
+        )
+        assert "CLAUDE_CONFIG_DIR" not in cmd
+        assert cmd == "claude --resume s1"
+
+    @pytest.mark.parametrize("base_cli", ["codex", "copilot", "opencode"])
+    def test_non_claude_cli_no_injection(self, launcher_with_layout, base_cli):
+        # claude_account ignored for non-claude bases
+        cmd = launcher_with_layout.build_launch_command(
+            cli=base_cli, session_id="s", claude_account="personal"
+        )
+        assert "CLAUDE_CONFIG_DIR" not in cmd
+
+    def test_resolve_cli_account_overrides_config_dir(self, launcher_with_layout, tmp_path):
+        resolved = launcher_with_layout.resolve_cli("claude", claude_account="work")
+        assert resolved.config_dir == str(tmp_path / ".claude-work")
+        assert resolved.session_path == str(tmp_path / ".claude-work" / "projects")
+
+    def test_resolve_cli_no_account_no_override(self, launcher_with_layout):
+        resolved = launcher_with_layout.resolve_cli("claude")
+        assert resolved.config_dir is None
+        assert resolved.session_path is None
+
+    def test_alias_with_account_account_wins(self, tmp_path):
+        # Set up an alias with explicit config_dir; account override should beat it.
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({
+            "cli_aliases": {
+                "myclaude": {
+                    "type": "claude",
+                    "cmd": "myclaude",
+                    "config_dir": "/tmp/alias-config-dir",
+                    "session_path": "/tmp/alias-projects",
+                }
+            }
+        }))
+        launcher = CodingCLILauncher(
+            session_map_path=tmp_path / "session_map.json",
+            config_path=config,
+            account_layout=AccountLayout(home=tmp_path),
+        )
+        # Without account: alias config wins
+        no_acct = launcher.resolve_cli("myclaude")
+        assert no_acct.config_dir == "/tmp/alias-config-dir"
+        # With account: account overrides
+        with_acct = launcher.resolve_cli("myclaude", claude_account="work")
+        assert with_acct.config_dir == str(tmp_path / ".claude-work")
+        assert with_acct.session_path == str(tmp_path / ".claude-work" / "projects")
+
+    def test_get_session_file_account_aware(self, launcher_with_layout, tmp_path):
+        # Set up an account dir with a fake JSONL
+        account_projects = tmp_path / ".claude-personal" / "projects"
+        work_dir = "/data/projects/foo"
+        dir_hash = work_dir.replace("/", "-")
+        target_dir = account_projects / dir_hash
+        target_dir.mkdir(parents=True)
+        jsonl = target_dir / "session-X.jsonl"
+        jsonl.write_text("{}\n")
+
+        # With account → finds it
+        found = launcher_with_layout.get_session_file(
+            work_dir, "claude", "session-X", claude_account="personal"
+        )
+        assert found == str(jsonl)
+
+        # Without account → looks in legacy and finds nothing
+        not_found = launcher_with_layout.get_session_file(
+            work_dir, "claude", "session-X", claude_account=None
+        )
+        assert not_found is None
+
+    def test_active_env_file_no_longer_injected(self, tmp_path):
+        # Phase 0.1 deprecation: even if active_env_file is provided, it
+        # MUST NOT appear in the launch command.
+        launcher = CodingCLILauncher(
+            session_map_path=tmp_path / "sm.json",
+            active_env_file=tmp_path / "active-env.sh",
+        )
+        cmd = launcher.build_launch_command(cli="claude", session_id="s")
+        assert "active-env.sh" not in cmd
+        assert "[ -f" not in cmd
+        assert cmd == "claude --resume s"
 
 
 class TestSessionMap:

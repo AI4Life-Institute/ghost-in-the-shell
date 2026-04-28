@@ -32,6 +32,39 @@ class SessionBinding:
     )
     last_active_at: float = field(default_factory=time.time)
     suspended: bool = False
+    # Per openspec change ``add-multi-account-hotswap`` (Phase 0.4):
+    # ``None`` → legacy/back-compat path, claude reads ~/.claude/.
+    # A name → the launcher injects ``CLAUDE_CONFIG_DIR=$HOME/.claude-{name}``.
+    claude_account: str | None = None
+    # Set when a per-binding switch_account abort/respawn failure leaves the
+    # binding in an unrecoverable state. Surfaced in ``gits account list``.
+    respawn_failed: bool = False
+
+
+def _binding_to_dict(b: SessionBinding) -> dict:
+    """Serialize a SessionBinding, omitting fields that default to None/False.
+
+    Keeps state.json diffs minimal for unmigrated installs and avoids
+    populating the file with the new account-management fields when they
+    are not in use.
+    """
+    data = asdict(b)
+    if data.get("claude_account") is None:
+        data.pop("claude_account", None)
+    if data.get("respawn_failed") is False:
+        data.pop("respawn_failed", None)
+    return data
+
+
+def _binding_from_dict(data: dict) -> SessionBinding:
+    """Construct a SessionBinding from a JSON dict, ignoring unknown keys.
+
+    Forward-compat: future fields not yet known to this version of ghost
+    are silently dropped rather than raising :class:`TypeError`.
+    """
+    known = SessionBinding.__dataclass_fields__.keys()
+    filtered = {k: v for k, v in data.items() if k in known}
+    return SessionBinding(**filtered)
 
 
 class SessionManager:
@@ -54,7 +87,7 @@ class SessionManager:
                 data = json.load(f)
             self._bindings.clear()
             for channel_id, binding_data in data.get("bindings", {}).items():
-                self._bindings[channel_id] = SessionBinding(**binding_data)
+                self._bindings[channel_id] = _binding_from_dict(binding_data)
         except (json.JSONDecodeError, OSError, TypeError):
             pass
 
@@ -70,7 +103,11 @@ class SessionManager:
 
     async def _save(self) -> None:
         """Persist state to JSON file atomically."""
-        data = {"bindings": {cid: asdict(b) for cid, b in self._bindings.items()}}
+        data = {
+            "bindings": {
+                cid: _binding_to_dict(b) for cid, b in self._bindings.items()
+            }
+        }
         await atomic_write_json(self.state_file, data)
 
     async def bind(
@@ -85,6 +122,7 @@ class SessionManager:
         parent_channel_id: str | None = None,
         subdir: str | None = None,
         permission_mode: str | None = None,
+        claude_account: str | None = None,
     ) -> SessionBinding:
         """Create or update a binding."""
         binding = SessionBinding(
@@ -98,6 +136,7 @@ class SessionManager:
             parent_channel_id=parent_channel_id,
             subdir=subdir,
             permission_mode=permission_mode,
+            claude_account=claude_account,
         )
         self._bindings[channel_id] = binding
         await self._save()
@@ -174,3 +213,43 @@ class SessionManager:
                 b.cli_session_id = session_id
                 await self._save()
                 return
+
+    async def update_claude_account(
+        self, channel_id: str, claude_account: str | None
+    ) -> SessionBinding | None:
+        """Update a binding's ``claude_account`` field (used by switch_account)."""
+        binding = self._bindings.get(channel_id)
+        if binding is None:
+            return None
+        binding.claude_account = claude_account
+        await self._save()
+        return binding
+
+    async def mark_respawn_failed(self, channel_id: str, failed: bool = True) -> None:
+        """Set/clear ``respawn_failed`` on a binding (used by switch_account)."""
+        binding = self._bindings.get(channel_id)
+        if binding is not None:
+            binding.respawn_failed = failed
+            await self._save()
+
+    async def migrate_legacy_bindings(self, target_account: str) -> int:
+        """Set ``claude_account = target_account`` for every binding currently None.
+
+        Per spec ``Capture-Current Auto-Migrates Bindings``: invoked at the
+        end of ``gits account add <name> --capture-current`` to prevent the
+        "dual-source" hazard where pre-existing bindings would keep writing
+        to ``~/.claude/projects/`` while the new account directory holds a
+        full copy.
+
+        Bindings are NOT respawned — the new ``claude_account`` takes effect
+        on the next natural respawn (HealthMonitor recovery, manual switch,
+        binding restart). Returns the number of migrated bindings.
+        """
+        migrated = 0
+        for binding in self._bindings.values():
+            if binding.claude_account is None:
+                binding.claude_account = target_account
+                migrated += 1
+        if migrated:
+            await self._save()
+        return migrated

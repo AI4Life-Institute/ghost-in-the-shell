@@ -159,6 +159,110 @@ Ghost 作为后台服务运行，不需要开着桌面，随时发消息随时�
 | `/mode <模式>` | 切换权限模式（`default`、`bypassPermissions`、`auto`、`acceptEdits`） |
 | `/fork <标题>` | 创建独立 git worktree 的子线程 |
 | `/cc <命令>` | 直接转发斜杠命令给 CLI |
+| `/accounts` | 列出 Claude 账户与 OAuth Usage 用量，高亮当前 channel 在哪个账户 |
+| `/account-switch <name>` | 把当前 channel 的 binding 切到指定账户；自动 import 当前 session |
+
+### 多账户隔离（可选）
+
+ghost 支持在同一台机器上保管多个独立的 Claude Max 订阅账户，并按 binding（即每个 tmux 会话）独立选用其中一个。配额耗尽通过主动调 OAuth Usage API 实时查询，由用户手动切换；不同 binding 可以同时挂在不同账户上互不干扰。
+
+> 此机制使用 claude CLI 官方的 `CLAUDE_CONFIG_DIR` 环境变量做账户隔离——每账户一份完整独立的 config 目录在 `~/.claude-{name}/`，没有跨账户共享，不会出现两份 claude 进程并发写同一份 session 文件的风险。
+>
+> 旧的 `gits subscription *` 命令族仍可使用但已弃用（启动时会输出 deprecation 提示），新用户请直接使用 `gits account *`。
+
+#### 目录布局
+
+- `~/.claude/` — 不动；外部直接调用 `claude`、未配置账户的 binding 仍用此身份
+- `~/.claude-{name}/` — 每账户一份独立目录（凭据、projects、settings、todos 等都是真实文件，不是 symlink）
+- `~/.gits/accounts/manifest.json` — 账户元数据（name、email、orgId、subscriptionType、config_dir、lastUsed、default、lastSwitch、lastImport）
+
+#### 添加账户
+
+```bash
+# 从老版本迁移：把当前 ~/.claude/ 全量拷贝为第一个账户（包括凭据），并自动迁移所有现有 binding 到该账户
+gits account add personal --capture-current
+
+# 注册第二个及之后的账户：启动 OAuth login，写入到 ~/.claude-{name}/.credentials.json
+gits account add work
+gits account add home
+```
+
+`--capture-current` **仅在第一次 add 时有效**（之后会拒绝）。它会触发：
+1. `rsync -a ~/.claude/ ~/.claude-personal/`（含凭据）
+2. 为该账户写入 manifest 条目并设为 default
+3. 把所有 `claude_account=None` 的现有 binding 自动迁移为 `claude_account="personal"`，避免新旧路径"双源"风险
+
+#### 列表 + 用量
+
+```bash
+gits account list
+```
+
+输出每账户一行，含 email/订阅档位/5h 与 7d 用量百分比/重置时间/绑定数。用量数据通过 `GET https://api.anthropic.com/api/oauth/usage` 实时查询（带必需的 `anthropic-beta: oauth-2025-04-20` header），不依赖被动模式匹配。401 时显示 `stale (run claude --resume)` 引导用户跑 claude 让 CLI 自带的 refresh 机制刷新——ghost **不**实现自己的 OAuth refresh 客户端。
+
+如需覆盖端点（Anthropic 升级 beta 版本时）：
+
+```bash
+export GITS_OAUTH_USAGE_URL=https://api.anthropic.com/api/oauth/usage   # 默认
+export GITS_OAUTH_BETA_HEADER=oauth-2025-04-20                          # 默认
+```
+
+#### 切换 binding 的账户
+
+```bash
+# 从本机 CLI 切换某个 binding（必须显式指定 binding id）
+gits account switch work --binding <channel-id>
+
+# 从 Discord：在该 channel 发 /account-switch work
+# Discord 路径自动 import 当前 session（target 没有该 session 文件时拷贝；已有则保留 target 端历史不覆盖）
+```
+
+CLI `switch` **不**自动 import；如需把当前对话搬到目标账户，先：
+
+```bash
+gits account import <session-id> --to work [--from <source>] [--force]
+```
+
+import 是一次性快照拷贝——之后 source 与 target 各自演进，不会双向同步。target 已有同 session 文件时默认拒绝（保护已积累的对话历史）；用 `--force` 强制覆盖（旧文件先备份为 `.gits-bak`，成功后清理）。
+
+#### 删除账户
+
+```bash
+gits account remove work
+```
+
+如有任何 binding 仍在使用该账户会拒绝；先 `gits account switch <other> --binding <id>` 把它们迁走。
+
+#### 命令一览
+
+| 命令 | 说明 |
+|---|---|
+| `gits account add <name> [--capture-current]` | 注册账户；首次可选 `--capture-current` 全量迁移 |
+| `gits account list` | 列出账户、用量、binding 计数 |
+| `gits account switch <name> --binding <id>` | 切换某 binding 到指定账户 |
+| `gits account remove <name>` | 删除账户（在用则拒绝） |
+| `gits account import <id> --to <name> [--from <name>] [--force]` | 跨账户拷贝 session JSONL |
+
+短别名 `gits acct` 等价于 `gits account`。
+
+#### Hooks 跨账户传播
+
+`gits hook --install --all-accounts` 会把 ghost 的 SessionStart hook 安装到 `~/.claude/settings.json` **以及**每个 `~/.claude-{name}/settings.json`。`gits account add` 在末段自动尝试一次该传播（best-effort）。
+
+#### 向后兼容
+
+未创建任何账户时（`~/.gits/accounts/manifest.json` 不存在），ghost 行为与改前完全一致——纯加性功能。要回滚：
+
+```bash
+rm -rf ~/.claude-*/   # 删除所有账户目录（~/.claude/ 不动）
+rm -rf ~/.gits/accounts/
+```
+
+`~/.claude/` 自始至终未被本功能修改（`--capture-current` 是 `cp` 不是 `mv`），凭据与现有 session 完整保留。
+
+#### 详细设计
+
+完整规范见 [`openspec/changes/add-multi-account-hotswap/`](openspec/changes/add-multi-account-hotswap/)。
 
 ### 微信命令
 

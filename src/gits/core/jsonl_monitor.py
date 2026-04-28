@@ -246,6 +246,10 @@ class JsonlMonitor:
 
         # Callback: (channel_id, text) -> None
         self._on_message: Callable[[str, str], Awaitable[None]] | None = None
+        # Callback: (channel_id, raw_jsonl_line) -> None — fed every raw JSONL
+        # line for downstream quota-pattern classification. Synchronous so it
+        # can be cheap (no event-loop hop).
+        self._on_jsonl_line: Callable[[str, str], None] | None = None
 
     def on_message(self, callback: Callable[[str, str], Awaitable[None]]) -> None:
         """Register callback for new assistant messages.
@@ -253,6 +257,14 @@ class JsonlMonitor:
         The callback receives (channel_id, text).
         """
         self._on_message = callback
+
+    def on_jsonl_line(self, callback: Callable[[str, str], None]) -> None:
+        """Register a synchronous callback fed with every raw JSONL line.
+
+        Used by ``QuotaPatternMatcher`` integration. Errors are caught and
+        logged — a misbehaving callback must never break message delivery.
+        """
+        self._on_jsonl_line = callback
 
     def start(self) -> None:
         """Start the JSONL monitoring loop."""
@@ -507,9 +519,14 @@ class JsonlMonitor:
             )
             last_offset = 0
 
-        # Read new content from byte offset (blocking I/O in thread)
+        # Read new content from byte offset (blocking I/O in thread).
+        # If a quota callback is registered we also collect raw lines for
+        # pattern classification — otherwise we skip the cost.
+        raw_lines: list[str] | None = (
+            [] if self._on_jsonl_line is not None else None
+        )
         new_texts = await asyncio.to_thread(
-            self._read_new_entries, jsonl_path, last_offset
+            self._read_new_entries, jsonl_path, last_offset, raw_lines
         )
 
         # Update tracking
@@ -521,6 +538,14 @@ class JsonlMonitor:
         self._offsets[file_key] = new_size
         self._mtimes[file_key] = stat.st_mtime
         self._offsets_dirty = True
+
+        # Feed every raw line to the quota-pattern callback (cheap; sync)
+        if raw_lines and self._on_jsonl_line is not None:
+            for raw in raw_lines:
+                try:
+                    self._on_jsonl_line(binding.channel_id, raw)
+                except Exception:
+                    logger.exception("on_jsonl_line callback error")
 
         # Fire callbacks
         if new_texts and self._on_message:
@@ -545,14 +570,25 @@ class JsonlMonitor:
 
         Dispatches to CLI-specific finders based on binding.coding_cli.
         If a launcher is available, delegates to it so alias session_path
-        overrides are respected.
+        overrides are respected. Per Phase 0.5/0.6, the binding's
+        ``claude_account`` is forwarded to the launcher so account-isolated
+        ``~/.claude-{name}/projects/`` paths resolve correctly.
         """
         if not binding.cli_session_id or not binding.work_dir:
             return None
 
+        # Defensive: tests often use MagicMock bindings where unset attrs
+        # auto-create magic values. Treat anything non-str as None.
+        claude_account = getattr(binding, "claude_account", None)
+        if not isinstance(claude_account, str):
+            claude_account = None
+
         if self._launcher is not None:
             result = self._launcher.get_session_file(
-                binding.work_dir, binding.coding_cli or "claude", binding.cli_session_id
+                binding.work_dir,
+                binding.coding_cli or "claude",
+                binding.cli_session_id,
+                claude_account=claude_account,
             )
             return Path(result) if result else None
 
@@ -564,8 +600,21 @@ class JsonlMonitor:
         return self._find_claude_jsonl(binding)
 
     def _find_claude_jsonl(self, binding: Any) -> Path | None:
-        """Find Claude Code JSONL: ~/.claude/projects/<dir-hash>/<session_id>.jsonl"""
-        claude_projects = self._projects_path
+        """Find Claude Code JSONL: ``<projects_dir>/<dir-hash>/<session_id>.jsonl``.
+
+        ``projects_dir`` is account-aware: when ``binding.claude_account`` is
+        set, looks under ``~/.claude-{name}/projects/``; otherwise the
+        configured ``_projects_path`` (default ``~/.claude/projects``).
+        Used as a fallback when no launcher is wired.
+        """
+        claude_account = getattr(binding, "claude_account", None)
+        if not isinstance(claude_account, str):
+            claude_account = None
+        if claude_account is not None:
+            from .account import AccountLayout
+            claude_projects = AccountLayout().projects_dir(claude_account)
+        else:
+            claude_projects = self._projects_path
         if not claude_projects.exists():
             return None
 
@@ -683,7 +732,6 @@ class JsonlMonitor:
         ``~/.local/share/opencode/opencode.db``.  We query for assistant
         text parts newer than the last-seen timestamp.
         """
-        import sqlite3
 
         db_path = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
         if not db_path.exists():
@@ -779,10 +827,16 @@ class JsonlMonitor:
         return texts, max_ts
 
     @staticmethod
-    def _read_new_entries(file_path: Path, offset: int) -> list[str]:
+    def _read_new_entries(
+        file_path: Path,
+        offset: int,
+        raw_sink: list[str] | None = None,
+    ) -> list[str]:
         """Read new JSONL entries from a file starting at byte offset.
 
-        Returns a list of displayable text strings.
+        Returns a list of displayable text strings. If *raw_sink* is provided,
+        every non-empty raw line is appended to it (used for quota-pattern
+        classification).
         Called in a thread via asyncio.to_thread.
         """
         texts: list[str] = []
@@ -790,6 +844,8 @@ class JsonlMonitor:
             with open(file_path, encoding="utf-8") as f:
                 f.seek(offset)
                 for line in f:
+                    if raw_sink is not None and line.strip():
+                        raw_sink.append(line)
                     entry = parse_jsonl_line(line)
                     if entry is None:
                         continue
@@ -798,3 +854,22 @@ class JsonlMonitor:
         except OSError as e:
             logger.error("Error reading JSONL file %s: %s", file_path, e)
         return texts
+
+    @staticmethod
+    def _read_new_lines_raw(file_path: Path, offset: int) -> list[str]:
+        """Read raw JSONL lines (one per line) since *offset*.
+
+        Used for quota-pattern matching — the raw line is fed into
+        ``QuotaPatternMatcher`` so error-type entries are visible without
+        having to parse them as assistant text.
+        """
+        lines: list[str] = []
+        try:
+            with open(file_path, encoding="utf-8") as f:
+                f.seek(offset)
+                for line in f:
+                    if line.strip():
+                        lines.append(line)
+        except OSError:
+            pass
+        return lines

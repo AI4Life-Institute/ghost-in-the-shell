@@ -44,6 +44,9 @@ class PaneMonitor:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._prev_prompt_key: dict[str, str] = {}
         self._on_prompt_detected: PromptCallback | None = None
+        # Synchronous callback fed with each captured pane text — used for
+        # quota-pattern classification.
+        self._on_pane_text: Any = None  # Callable[[str, str], None]
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -52,6 +55,14 @@ class PaneMonitor:
     def on_prompt(self, callback: PromptCallback) -> None:
         """Register callback for detected interactive prompts."""
         self._on_prompt_detected = callback
+
+    def on_pane_text(self, callback) -> None:
+        """Register a synchronous callback fed with raw pane text.
+
+        Used by ``QuotaPatternMatcher`` integration. ``callback(channel_id, text)``.
+        Errors are caught and logged.
+        """
+        self._on_pane_text = callback
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -117,6 +128,13 @@ class PaneMonitor:
             return
         if not pane_text:
             return
+
+        # Feed quota-pattern callback first (sync, cheap).
+        if self._on_pane_text is not None:
+            try:
+                self._on_pane_text(channel_id, pane_text)
+            except Exception:
+                logger.exception("on_pane_text callback error for %s", channel_id)
 
         # 2. Check for interactive prompts
         ui_content = extract_interactive_content(pane_text)

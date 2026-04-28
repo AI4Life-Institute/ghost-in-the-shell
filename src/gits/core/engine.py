@@ -16,13 +16,18 @@ from typing import Any
 from ..adapters.base import Button, IncomingMessage, OutgoingMessage, SelectOption
 from ..config import Settings
 from ..telemetry import platform_for, track
+from .account import AccountLayout, SwitchResult
+from .account_vault import AccountVault
 from .guard import GuardHandler
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
 from .launcher import CLISession, CodingCLILauncher
 from .monitor import PaneMonitor
+from .quota import QuotaPatternMatcher, QuotaSignalDebouncer
+from .quota_notifier import QuotaNotifier
 from .screenshot import ScreenshotEngine
 from .session import SessionManager
+from .subscription import SubscriptionVault, SwitchPrimitive
 from .terminal_parser import PromptInfo, parse_status_line
 from .tmux import TmuxController
 
@@ -44,15 +49,28 @@ class Engine:
         self.tmux = TmuxController(session_name=settings.tmux_session_name)
         self.session_mgr = SessionManager(state_dir=settings.state_dir)
         self.screenshot = ScreenshotEngine(font_size=settings.screenshot_font_size)
+        from .subscription import active_env_file_path
+
+        # Multi-account isolation (Phase 0.2/0.3/0.5/0.7).
+        self.account_layout = AccountLayout()
+        self.account_vault = AccountVault(
+            state_dir=settings.state_dir, layout=self.account_layout
+        )
+        # Per-binding switch_account locks; lazily populated.
+        self._switch_locks: dict[str, asyncio.Lock] = {}
+
         self.launcher = CodingCLILauncher(
             session_map_path=settings.session_map_file,
             config_path=settings.config_file,
+            active_env_file=active_env_file_path(settings.state_dir),
+            account_layout=self.account_layout,
         )
         self.health = HealthMonitor(
             tmux=self.tmux,
             session_mgr=self.session_mgr,
             launcher=self.launcher,
             check_interval=settings.health_check_interval,
+            credential_lock_path=settings.credential_lock_file,
         )
         self.monitor = PaneMonitor(
             tmux=self.tmux,
@@ -65,6 +83,30 @@ class Engine:
             launcher=self.launcher,
             tmux=self.tmux,
         )
+
+        # Subscription credential vault (multi-account hot-swap).
+        # Lazy: only meaningful once user runs `gits subscription add`.
+        self.subscription_vault = SubscriptionVault(settings.subscriptions_dir)
+        self.switch_primitive = SwitchPrimitive(
+            tmux=self.tmux,
+            session_mgr=self.session_mgr,
+            launcher=self.launcher,
+            vault=self.subscription_vault,
+            lock_path=settings.credential_lock_file,
+        )
+
+        # Quota detection chain: pattern matcher → debouncer → notifier.
+        # Wired even when no subscriptions exist so the cost is just regex
+        # classification per JSONL/pane line, but events are dropped by the
+        # notifier (which checks for an active subscription).
+        self.quota_matcher = QuotaPatternMatcher(settings.quota_patterns_file)
+        self.quota_matcher.load()
+        self.quota_debouncer = QuotaSignalDebouncer(self.quota_matcher)
+        self.quota_notifier = QuotaNotifier(
+            vault=self.subscription_vault,
+            notify=self._broadcast_to_bindings,
+        )
+        self._wire_quota_pipeline()
 
         # Guard handler (initialized in start())
         self.guard: GuardHandler | None = None
@@ -83,6 +125,11 @@ class Engine:
     async def start(self) -> None:
         """Start the engine: ensure tmux session, start health monitor."""
         self.settings.state_dir.mkdir(parents=True, exist_ok=True)
+
+        # Detect legacy artifacts from earlier design drafts (see openspec
+        # change add-multi-account-hotswap). These do not block startup but
+        # surface guidance to the user.
+        self._warn_legacy_artifacts()
 
         # Auto-install Claude Code SessionStart hook if not present
         self._ensure_hooks_installed()
@@ -114,15 +161,56 @@ class Engine:
         self.jsonl_monitor.on_message(self._on_jsonl_message)
         self.jsonl_monitor.start()
 
+        # Quota notifier (no-op until subscriptions are registered)
+        await self.quota_notifier.start()
+
         logger.info("Engine started")
 
     async def stop(self) -> None:
         """Stop the engine."""
         self.monitor.stop_all()
         self.jsonl_monitor.stop()
+        await self.quota_notifier.stop()
         await self.health.stop()
         # Cancel all message drainer tasks
         logger.info("Engine stopped")
+
+    def _wire_quota_pipeline(self) -> None:
+        """Hook QuotaSignalDebouncer into JsonlMonitor and PaneMonitor."""
+
+        def feed(channel_id: str, text: str) -> None:
+            try:
+                event = self.quota_debouncer.feed(channel_id, text)
+                if event is not None:
+                    self.quota_notifier.submit(event)
+            except Exception:
+                logger.exception("quota feed failed for %s", channel_id)
+
+        self.jsonl_monitor.on_jsonl_line(feed)
+        self.monitor.on_pane_text(feed)
+
+    async def _broadcast_to_bindings(self, text: str) -> None:
+        """Send *text* to every channel that currently has a binding.
+
+        Used by QuotaNotifier for user-visible quota-exhaustion notifications.
+        Falls through silently if no adapter is wired.
+        """
+        if self._adapter is None:
+            return
+        try:
+            from ..adapters.base import OutgoingMessage
+        except Exception:
+            return
+        bindings = self.session_mgr.list_bindings()
+        for b in bindings:
+            try:
+                await self._adapter.send_message(
+                    b.channel_id, OutgoingMessage(text=text)
+                )
+            except Exception:
+                logger.debug(
+                    "broadcast to %s failed", b.channel_id, exc_info=True
+                )
 
     async def inject_message(self, session_name: str, text: str) -> None:
         """Inject text into a named tmux session (for Guard and other uses)."""
@@ -134,6 +222,42 @@ class Engine:
             await self.tmux.send_text(window_id, text, submit_keys="\n")
         else:
             logger.warning("inject_message: no window found for session %s", session_name)
+
+    # ------------------------------------------------------------------
+    # Legacy artifact detection
+    # ------------------------------------------------------------------
+
+    def _warn_legacy_artifacts(self) -> None:
+        """Surface legacy paths from older design drafts.
+
+        See openspec change ``add-multi-account-hotswap``. These do not block
+        startup; they hint at residual state from earlier (now-deprecated)
+        design iterations so the user can clean up or migrate.
+        """
+        from pathlib import Path
+
+        candidates = [
+            (
+                Path.home() / ".gits" / "subscriptions",
+                "deprecated SubscriptionVault path; replaced by ~/.gits/accounts/",
+            ),
+            (
+                Path.home() / ".gits" / "active-env.sh",
+                "deprecated env-source-file mechanism; replaced by CLAUDE_CONFIG_DIR injection",
+            ),
+            (
+                Path.home() / ".claude-shared",
+                "residue from an earlier shared-symlink design draft; the current strict-isolation "
+                "design does not use a shared directory",
+            ),
+            (
+                Path.home() / ".gits" / "quota_patterns.yaml",
+                "deprecated passive quota matcher input; replaced by OAuth Usage API",
+            ),
+        ]
+        for path, hint in candidates:
+            if path.exists():
+                logger.warning("legacy artifact found at %s — %s", path, hint)
 
     # ------------------------------------------------------------------
     # Hook auto-install
@@ -329,6 +453,18 @@ class Engine:
                 "Start typing and use the dropdown to navigate.",
             )
 
+    def _default_claude_account(self) -> str | None:
+        """Look up ``manifest.default`` for new bindings (Phase 0.4 D4).
+
+        Returns ``None`` when the multi-account vault isn't initialized so
+        legacy single-account installs continue using ``~/.claude/`` with
+        no ``CLAUDE_CONFIG_DIR`` injection.
+        """
+        try:
+            return self.account_vault.load().default
+        except Exception:
+            return None
+
     async def _create_bind(
         self,
         channel_id: str,
@@ -345,9 +481,17 @@ class Engine:
         If *mode* is provided, adds the corresponding flag to the CLI command:
         - ``"auto"`` → ``--allowedTools Edit,Write,... ``
         - ``"yolo"`` → ``--dangerously-skip-permissions``
+
+        New bindings inherit ``manifest.default`` (per spec D4); the account
+        is persisted on the binding and ``CLAUDE_CONFIG_DIR`` is injected
+        into the launch command so claude reads/writes
+        ``~/.claude-{name}/`` instead of ``~/.claude/``.
         """
         p = Path(work_dir)
-        cmd = self.launcher.build_launch_command(cli=cli, session_id=session_id)
+        claude_account = self._default_claude_account()
+        cmd = self.launcher.build_launch_command(
+            cli=cli, session_id=session_id, claude_account=claude_account,
+        )
 
         # Append permission mode flag (CLI-specific)
         if mode and mode != "default":
@@ -367,6 +511,7 @@ class Engine:
             coding_cli=cli,
             cli_session_id=session_id,
             permission_mode=mode if mode and mode != "default" else None,
+            claude_account=claude_account,
         )
 
         # Start pane polling for the new binding
@@ -615,7 +760,11 @@ class Engine:
 
         cli = parent_binding.coding_cli
         mode = parent_binding.permission_mode
-        cmd = self.launcher.build_launch_command(cli=cli)
+        # Threads and forks inherit the parent's claude_account so the child
+        # claude process reads/writes the same per-account config dir as
+        # the parent (per spec: New binding inherits per-binding account).
+        claude_account = getattr(parent_binding, "claude_account", None)
+        cmd = self.launcher.build_launch_command(cli=cli, claude_account=claude_account)
         if mode:
             cmd = _append_permission_flag(cmd, cli, mode)
         work_dir = parent_binding.work_dir
@@ -633,6 +782,7 @@ class Engine:
             coding_cli=cli,
             parent_channel_id=channel_id,
             permission_mode=mode,
+            claude_account=claude_account,
         )
 
         # Start monitoring
@@ -681,7 +831,11 @@ class Engine:
 
         cli = parent_binding.coding_cli
         mode = parent_binding.permission_mode
-        cmd = self.launcher.build_launch_command(cli=cli)
+        # Threads and forks inherit the parent's claude_account so the child
+        # claude process reads/writes the same per-account config dir as
+        # the parent (per spec: New binding inherits per-binding account).
+        claude_account = getattr(parent_binding, "claude_account", None)
+        cmd = self.launcher.build_launch_command(cli=cli, claude_account=claude_account)
         if mode:
             cmd = _append_permission_flag(cmd, cli, mode)
         work_dir = parent_binding.work_dir
@@ -699,6 +853,7 @@ class Engine:
             coding_cli=cli,
             parent_channel_id=parent_channel_id,
             permission_mode=mode,
+            claude_account=claude_account,
         )
 
         self.monitor.start_polling(thread_id, win.window_id)
@@ -772,7 +927,11 @@ class Engine:
 
         cli = parent_binding.coding_cli
         mode = parent_binding.permission_mode
-        cmd = self.launcher.build_launch_command(cli=cli)
+        # Threads and forks inherit the parent's claude_account so the child
+        # claude process reads/writes the same per-account config dir as
+        # the parent (per spec: New binding inherits per-binding account).
+        claude_account = getattr(parent_binding, "claude_account", None)
+        cmd = self.launcher.build_launch_command(cli=cli, claude_account=claude_account)
         if mode:
             cmd = _append_permission_flag(cmd, cli, mode)
 
@@ -789,6 +948,7 @@ class Engine:
             coding_cli=cli,
             parent_channel_id=channel_id,
             permission_mode=mode,
+            claude_account=claude_account,
         )
 
         self.monitor.start_polling(thread_id, win.window_id)
@@ -881,6 +1041,15 @@ class Engine:
             lines.append(f"Subdir: `{binding.subdir}`")
         if binding.permission_mode:
             lines.append(f"Permission: `{binding.permission_mode}`")
+        # Claude account isolation (per add-multi-account-hotswap, Phase 0.4):
+        # show which CLAUDE_CONFIG_DIR this binding launches into.
+        acct = getattr(binding, "claude_account", None)
+        if isinstance(acct, str):
+            lines.append(f"Account: `{acct}` (~/.claude-{acct}/)")
+        else:
+            lines.append("Account: `<default>` (~/.claude/)")
+        if getattr(binding, "respawn_failed", False):
+            lines.append("⚠ Respawn failed — try `/account-switch <name>` to retry")
         lines.append(f"Created: `{binding.created_at}`")
 
         # Session file path + live stats
@@ -1108,8 +1277,7 @@ class Engine:
 
     async def _suspend_binding(self, channel_id: str) -> None:
         """Kill the claude process in a tmux window but keep the window alive."""
-        import os
-        import signal
+        from ..utils.process import find_claude_children, kill_claude_process
 
         binding = self.session_mgr.get_binding(channel_id)
         if binding is None or binding.suspended:
@@ -1120,7 +1288,7 @@ class Engine:
             binding.window_id,
             (time.time() - binding.last_active_at) / 60,
         )
-        # Send C-c to interrupt any running tool, then try to find and kill the
+        # Send C-c to interrupt any running tool, then find and kill the
         # Claude child process directly so it actually exits.
         try:
             await self.tmux.send_keys(binding.window_id, "C-c")
@@ -1128,34 +1296,11 @@ class Engine:
         except Exception:
             logger.debug("Could not send C-c to window %s", binding.window_id)
 
-        # Find the Claude child process under the pane and kill it.
         pane_pid = await self.tmux.pane_pid(binding.window_id)
         if pane_pid:
-            try:
-                children = await asyncio.to_thread(
-                    lambda: [
-                        int(p)
-                        for p in __import__("subprocess")
-                        .check_output(["pgrep", "-P", str(pane_pid)], text=True)
-                        .split()
-                    ]
-                )
-            except Exception:
-                children = []
-            for child_pid in children:
-                try:
-                    os.kill(child_pid, signal.SIGTERM)
-                    logger.debug("Sent SIGTERM to claude pid %d", child_pid)
-                except ProcessLookupError:
-                    pass
+            children = await find_claude_children(pane_pid)
             if children:
-                await asyncio.sleep(2)
-                for child_pid in children:
-                    try:
-                        os.kill(child_pid, signal.SIGKILL)
-                        logger.debug("Sent SIGKILL to claude pid %d (still alive)", child_pid)
-                    except ProcessLookupError:
-                        pass  # already dead
+                await kill_claude_process(children, grace_seconds=2.0)
         self.monitor.stop_polling(channel_id)
         await self.session_mgr.mark_suspended(channel_id)
 
@@ -1201,9 +1346,16 @@ class Engine:
         else:
             logger.info("Auto-restarting CLI for binding %s (fresh)", binding.channel_id)
         await self._ensure_window_alive(binding)
+        # Verify the session JSONL actually exists before passing --resume; if
+        # the binding has a stale session_id (e.g., the SessionStart hook
+        # registered an id but claude exited before writing any conversation),
+        # fall back to a fresh launch instead of looping on
+        # "No conversation found with session ID: ...".
+        safe_sid = await self._safe_session_id(binding)
         cmd = self.launcher.build_launch_command(
             cli=binding.coding_cli,
-            session_id=binding.cli_session_id,
+            session_id=safe_sid,
+            claude_account=getattr(binding, "claude_account", None),
         )
         if binding.permission_mode:
             cmd = _append_permission_flag(cmd, binding.coding_cli, binding.permission_mode)
@@ -1214,6 +1366,334 @@ class Engine:
             logger.exception("Failed to resume binding %s", binding.channel_id)
         await self.session_mgr.touch_active(binding.channel_id)
         self.monitor.start_polling(binding.channel_id, binding.window_id)
+
+    # ------------------------------------------------------------------
+    # Multi-account switch primitive (Phase 0.7)
+    # ------------------------------------------------------------------
+
+    def _binding_lock(self, channel_id: str) -> asyncio.Lock:
+        """Return (and lazily create) a per-binding asyncio.Lock."""
+        lock = self._switch_locks.get(channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._switch_locks[channel_id] = lock
+        return lock
+
+    async def switch_account(
+        self,
+        channel_id: str,
+        target: str,
+        *,
+        auto_import: bool = False,
+        reason: str = "manual",
+    ) -> SwitchResult:
+        """Atomically switch a binding's claude account.
+
+        Per openspec change ``add-multi-account-hotswap`` (D5/D16):
+
+        1. Hold a per-binding asyncio.Lock for the entire operation.
+        2. Validate the target exists in :class:`AccountVault`.
+        3. Send ``C-c`` to the pane and wait briefly.
+        4. Find the claude child processes and SIGTERM → SIGKILL → reap.
+        5. (Optional) When ``auto_import=True`` and the binding has a
+           non-None ``claude_account`` and ``cli_session_id``, copy the
+           current source JSONL into the target account's projects dir IF
+           the target does not already have it. This step is the core of
+           the Discord ``/account-switch`` UX (D16).
+        6. Update the binding's ``claude_account`` field (atomic state.json
+           write) and the manifest's ``lastSwitch`` / ``default``.
+        7. Respawn claude in the same pane with
+           ``CLAUDE_CONFIG_DIR=$HOME/.claude-{target}`` injected.
+        8. Release the lock and return a :class:`SwitchResult`.
+
+        Concurrent ``switch_account`` calls on **different** bindings run
+        in parallel — there is no global mutex.
+        """
+
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            return SwitchResult(
+                success=False, binding_id=channel_id, target=target,
+                previous=None, error=f"no binding for channel {channel_id}",
+            )
+
+        previous = getattr(binding, "claude_account", None)
+
+        # Same-account fast path (no lock needed)
+        if previous == target:
+            return SwitchResult(
+                success=True, binding_id=channel_id, target=target,
+                previous=previous, import_status="same_account",
+            )
+
+        # Validate target before doing anything destructive.
+        if self.account_vault.get(target) is None:
+            return SwitchResult(
+                success=False, binding_id=channel_id, target=target,
+                previous=previous, error=f"unknown account '{target}'",
+            )
+
+        async with self._binding_lock(channel_id):
+            return await self._do_switch(
+                binding, target, previous,
+                auto_import=auto_import, reason=reason,
+            )
+
+    async def _do_switch(
+        self,
+        binding: Any,
+        target: str,
+        previous: str | None,
+        *,
+        auto_import: bool,
+        reason: str,
+    ) -> SwitchResult:
+        """Perform the locked switch sequence. Caller must hold the binding lock."""
+        from ..utils.process import find_claude_children, kill_claude_process
+
+        result = SwitchResult(
+            success=False, binding_id=binding.channel_id, target=target,
+            previous=previous,
+        )
+
+        # 1. Send C-c, wait 300ms
+        try:
+            await self.tmux.send_keys(binding.window_id, "C-c")
+            await asyncio.sleep(0.3)
+        except Exception:
+            logger.debug("send_keys C-c failed for %s", binding.window_id)
+
+        # 2. Kill claude process(es). 5s SIGTERM grace, 1s reap after SIGKILL.
+        pane_pid = await self.tmux.pane_pid(binding.window_id)
+        if pane_pid:
+            children = await find_claude_children(pane_pid)
+            if children:
+                kill_results = await kill_claude_process(
+                    children, grace_seconds=5.0, reap_after_kill=1.0,
+                )
+                still_alive = [pid for pid, ok in kill_results.items() if not ok]
+                if still_alive:
+                    result.error = (
+                        f"failed to kill claude pids {still_alive}; switch aborted"
+                    )
+                    logger.warning(result.error)
+                    return result
+
+        # 3. Auto-import (D16) — runs after kill, before field update.
+        if auto_import:
+            result.import_status = self._auto_import_session(binding, target, result)
+        # else: leave import_status="skipped_no_import"
+
+        # 4. Update binding.claude_account and persist state.json.
+        await self.session_mgr.update_claude_account(binding.channel_id, target)
+        await self.session_mgr.mark_respawn_failed(binding.channel_id, False)
+        # Refresh local reference because the in-memory dataclass was mutated.
+        binding = self.session_mgr.get_binding(binding.channel_id)
+
+        # 5. Update manifest (lastSwitch + default + lastUsed).
+        try:
+            self.account_vault.record_switch(
+                binding_id=binding.channel_id,
+                from_=previous,
+                to=target,
+                reason=reason,
+            )
+        except Exception as e:
+            logger.warning("record_switch failed: %s", e)
+
+        # 6. Respawn with CLAUDE_CONFIG_DIR=<target>.
+        try:
+            await self._ensure_window_alive(binding)
+            # Verify the target-side session JSONL actually exists before
+            # passing --resume. After auto-import "imported" or "target_existed"
+            # the file is there; for "no_source" / "no_session" / CLI path the
+            # file may be missing — fall back to fresh launch to avoid
+            # `claude --resume <id>` failing with "No conversation found".
+            safe_sid = await self._safe_session_id(binding)
+            cmd = self.launcher.build_launch_command(
+                cli=binding.coding_cli,
+                session_id=safe_sid,
+                claude_account=target,
+            )
+            if binding.permission_mode:
+                cmd = _append_permission_flag(
+                    cmd, binding.coding_cli, binding.permission_mode,
+                )
+            await self.tmux.send_text(binding.window_id, cmd)
+            await asyncio.sleep(0.5)  # let claude start; respawn confirmation is async
+        except Exception as e:
+            logger.exception("respawn failed for %s", binding.channel_id)
+            result.respawn_failed = True
+            result.error = f"respawn failed: {e}"
+            await self.session_mgr.mark_respawn_failed(binding.channel_id, True)
+            try:
+                self.account_vault.record_switch(
+                    binding_id=binding.channel_id, from_=previous, to=target,
+                    reason=reason, partial=True,
+                )
+            except Exception:
+                pass
+            return result
+
+        result.success = True
+        return result
+
+    async def _safe_session_id(self, binding: Any) -> str | None:
+        """Return ``binding.cli_session_id`` only if its JSONL file exists.
+
+        Used before passing the id to ``claude --resume <id>``. Avoids the
+        ``"No conversation found with session ID: ..."`` failure mode where
+        the SessionStart hook registered a session_id (writing it to
+        session_map.json which ghost picks up) but claude exited before
+        writing any conversation JSONL — leaving a permanently-stale id on
+        the binding that breaks every subsequent respawn.
+
+        When the file is missing, the stale id is cleared from the binding
+        (atomic state.json write) so the next launch is fresh AND
+        :class:`JsonlMonitor` stops emitting "session not found" warnings
+        every poll cycle. The hook will write the new session_id once
+        claude actually starts a conversation.
+        """
+        sid = binding.cli_session_id
+        if not sid:
+            return None
+        account = getattr(binding, "claude_account", None)
+        if not isinstance(account, str):
+            account = None
+        try:
+            path_str = self.launcher.get_session_file(
+                binding.work_dir,
+                binding.coding_cli or "claude",
+                sid,
+                claude_account=account,
+            )
+        except Exception:
+            path_str = None
+        if path_str and Path(path_str).exists():
+            return sid
+        logger.info(
+            "binding %s: session %s not found at expected path "
+            "(account=%s, work_dir=%s) — clearing stale id, launching fresh",
+            binding.channel_id, sid, account, binding.work_dir,
+        )
+        try:
+            await self.session_mgr.update_cli_session_id(binding.channel_id, "")
+        except Exception:
+            logger.exception("could not clear stale cli_session_id")
+        return None
+
+    def _auto_import_session(
+        self, binding: Any, target: str, result: SwitchResult
+    ) -> str:
+        """Inline auto-import step for ``switch_account`` (D16).
+
+        Returns one of:
+
+        * ``"no_session"`` — binding has no ``cli_session_id``.
+        * ``"no_source"`` — source-side JSONL doesn't exist anywhere.
+        * ``"imported"`` — target was missing the file; copied source → target.
+        * ``"imported_overwrote"`` — target had an OLDER copy; replaced with
+          source (source mtime > target mtime). The previous target file is
+          preserved as ``<target>.gits-bak`` until the copy succeeds, then
+          removed.
+        * ``"target_existed"`` — target had a copy at least as new as source;
+          preserved unchanged. Caller can still ``--force`` via host CLI to
+          override.
+
+        The mtime-based decision rule replaces the original "always preserve
+        target" semantics so a switch sequence like A→B→A→B uses the most
+        recently-active copy by default (typically the source side, since
+        that's where the user has been talking right before the switch).
+        """
+        import shutil
+
+        sid = binding.cli_session_id
+        if not sid:
+            return "no_session"
+
+        previous = getattr(binding, "claude_account", None)
+        # Locate source — use launcher.get_session_file so dir-hash variants
+        # are handled identically to runtime resolution.
+        source_str = self.launcher.get_session_file(
+            binding.work_dir, binding.coding_cli or "claude", sid,
+            claude_account=previous,
+        )
+        if source_str is None:
+            return "no_source"
+        source_path = Path(source_str)
+
+        # Mirror source's parent dir name into target so claude finds it
+        # via the same dir-hash strategy.
+        target_projects = self.account_layout.projects_dir(target)
+        target_dir = target_projects / source_path.parent.name
+        target_path = target_dir / source_path.name
+
+        result.source_path = str(source_path)
+        result.target_path = str(target_path)
+
+        # Decide based on existence + mtime comparison.
+        will_overwrite = False
+        if target_path.exists():
+            try:
+                source_mtime = source_path.stat().st_mtime
+                target_mtime = target_path.stat().st_mtime
+            except OSError as e:
+                logger.warning(
+                    "auto-import mtime stat failed; preserving target: %s", e,
+                )
+                return "target_existed"
+            if source_mtime <= target_mtime:
+                logger.info(
+                    "auto-import: target %s has newer-or-equal copy of session %s "
+                    "(source mtime=%.0f, target mtime=%.0f); preserving",
+                    target, sid, source_mtime, target_mtime,
+                )
+                return "target_existed"
+            # Source is strictly newer — overwrite with backup.
+            will_overwrite = True
+
+        backup_path: Path | None = None
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if will_overwrite:
+                backup_path = target_path.with_suffix(target_path.suffix + ".gits-bak")
+                # If a stale backup exists from a prior failed run, replace it.
+                if backup_path.exists():
+                    backup_path.unlink()
+                target_path.replace(backup_path)
+            shutil.copy2(source_path, target_path)
+            if backup_path is not None:
+                backup_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("auto-import copy failed: %s", e)
+            # Best-effort restore: if we moved the original to .gits-bak but
+            # the copy failed, put it back so target has its previous content.
+            if backup_path is not None and backup_path.exists() and not target_path.exists():
+                try:
+                    backup_path.replace(target_path)
+                except OSError:
+                    pass  # leave .gits-bak for manual recovery
+            return "no_source"  # treat as best-effort
+
+        try:
+            self.account_vault.record_import(
+                session_id=sid, from_=previous, to=target,
+            )
+        except Exception:
+            pass
+
+        if will_overwrite:
+            logger.info(
+                "auto-import: overwrote older target session %s on account %s "
+                "with newer source from %s",
+                sid, target, previous,
+            )
+            return "imported_overwrote"
+        logger.info(
+            "auto-import: copied session %s from %s to %s",
+            sid, previous, target,
+        )
+        return "imported"
 
     async def handle_new(
         self, channel_id: str, interaction: Any, message: str | None = None
@@ -1232,8 +1712,13 @@ class Engine:
         await self.tmux.send_text(binding.window_id, "exit")
         await asyncio.sleep(2)
 
-        # Launch fresh CLI
-        cmd = self.launcher.build_launch_command(cli=binding.coding_cli)
+        # Launch fresh CLI — preserve binding's account so claude reads/writes
+        # the per-account config dir (per spec: existing binding respawn keeps
+        # its claude_account).
+        cmd = self.launcher.build_launch_command(
+            cli=binding.coding_cli,
+            claude_account=getattr(binding, "claude_account", None),
+        )
         await self.tmux.send_text(binding.window_id, cmd)
 
         # Clear session ID
@@ -1273,8 +1758,13 @@ class Engine:
         await self.tmux.send_text(binding.window_id, "exit")
         await asyncio.sleep(1.5)
 
-        # Resume with new mode
-        cmd = self.launcher.build_launch_command(cli=cli, session_id=session_id)
+        # Resume with new mode — preserve binding's account so claude
+        # reads/writes the per-account config dir.
+        cmd = self.launcher.build_launch_command(
+            cli=cli,
+            session_id=session_id,
+            claude_account=getattr(binding, "claude_account", None),
+        )
         if mode and mode != "default":
             cmd = _append_permission_flag(cmd, cli, mode)
         await self.tmux.send_text(binding.window_id, cmd)
@@ -1350,6 +1840,153 @@ class Engine:
     # ------------------------------------------------------------------
     # B. CLI Forwarding
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # /accounts and /account-switch (Phase 0.12)
+    # ------------------------------------------------------------------
+    # The legacy ``handle_subscriptions_list`` and ``handle_subscription_switch``
+    # handlers were removed when the Discord ``/subscriptions`` and
+    # ``/sub-switch`` slash commands were dropped (per user request,
+    # ``add-multi-account-hotswap`` Phase 0.12). The host-side
+    # ``gits subscription`` subcommands still call into ``SubscriptionVault``
+    # / ``SwitchPrimitive`` for V1 transition compatibility, but no
+    # Discord-facing path remains for the deprecated subscription model.
+    # ------------------------------------------------------------------
+
+    async def handle_accounts_list(self, channel_id: str, interaction: Any) -> None:
+        """``/accounts`` Discord handler — list accounts with live OAuth Usage data."""
+        from .oauth_usage import UsageClient
+
+        manifest = self.account_vault.load()
+        if not manifest.accounts:
+            await self._reply(
+                interaction,
+                "No accounts configured.\n"
+                "Run `gits account add <name> --capture-current` on the ghost host to start.",
+            )
+            return
+
+        # Determine which account this channel's binding currently uses (for
+        # the "current channel" highlight).
+        binding = self.session_mgr.get_binding(channel_id)
+        current = (
+            binding.claude_account
+            if binding is not None and isinstance(binding.claude_account, str)
+            else None
+        )
+
+        # Per-account binding counts.
+        binding_counts: dict[str, int] = {}
+        for b in self.session_mgr.list_bindings():
+            if isinstance(b.claude_account, str):
+                binding_counts[b.claude_account] = binding_counts.get(b.claude_account, 0) + 1
+
+        client = UsageClient(layout=self.account_layout)
+        lines: list[str] = []
+        for a in manifest.accounts:
+            arrow = "→" if a.name == current else " "
+            current_tag = " *current*" if a.name == manifest.default else ""
+            usage = client.query(a.name)
+            usage_str = self._format_usage_for_discord(usage)
+            email = a.email or "—"
+            tier = a.subscription_type or "—"
+            count = binding_counts.get(a.name, 0)
+            lines.append(
+                f"{arrow} `{a.name}`{current_tag} · {tier} · {email} · {usage_str} · "
+                f"{count} binding{'s' if count != 1 else ''}"
+            )
+        body = "\n".join(lines)
+        await self._reply(interaction, f"**Claude Accounts**\n{body}")
+
+    @staticmethod
+    def _format_usage_for_discord(result: Any) -> str:
+        from .oauth_usage import UsageError
+        if isinstance(result, UsageError):
+            if result.kind == "stale_credentials":
+                return "stale (run `claude --resume`)"
+            if result.kind == "rate_limited":
+                return "api rate limited"
+            if result.kind == "missing_credentials":
+                return "no credentials"
+            if result.kind == "api_unsupported":
+                return "api unsupported"
+            if result.kind in ("unavailable_5xx", "unavailable_network"):
+                return "unavailable"
+            return f"err: {result.kind}"
+        parts: list[str] = []
+        if result.five_hour and result.five_hour.utilization is not None:
+            parts.append(f"5h {result.five_hour.utilization:.0f}%")
+        if result.seven_day and result.seven_day.utilization is not None:
+            parts.append(f"7d {result.seven_day.utilization:.0f}%")
+        return " · ".join(parts) or "ok"
+
+    async def handle_account_switch(
+        self, channel_id: str, target: str, interaction: Any
+    ) -> None:
+        """``/account-switch <name>`` Discord handler — auto-imports current session (D16)."""
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            await self._reply(
+                interaction,
+                "❌ This channel has no binding. Run `/start` (or `/bind`) first.",
+            )
+            return
+
+        if self.account_vault.get(target) is None:
+            await self._reply(interaction, f"❌ Account `{target}` not found.")
+            return
+
+        if binding.claude_account == target:
+            await self._reply(interaction, f"✓ Already on `{target}` — no change.")
+            return
+
+        await self._reply(interaction, f"⚙️ Switching to `{target}`...")
+
+        try:
+            result = await self.switch_account(channel_id, target, auto_import=True)
+        except Exception as e:
+            await self._reply(interaction, f"❌ Switch failed: {e}")
+            return
+
+        if not result.success:
+            await self._reply(interaction, f"❌ Switch failed: {result.error}")
+            return
+
+        # Build status message based on import_status.
+        status_msg = {
+            "imported": (
+                f"✅ Switched to `{target}` — session imported from "
+                f"`{result.previous}`. Conversation history preserved."
+            ),
+            "imported_overwrote": (
+                f"✅ Switched to `{target}` — session imported from "
+                f"`{result.previous}` (overwrote older copy on `{target}`; "
+                "newer source content prevails)."
+            ),
+            "target_existed": (
+                f"✅ Switched to `{target}` — `{target}` already had a "
+                "newer-or-equal copy of this session, kept it as is. To force "
+                f"the older `{result.previous}` content over it anyway, run on "
+                f"the host: `gits account import {binding.cli_session_id} "
+                f"--from {result.previous} --to {target} --force`"
+            ),
+            "no_source": (
+                f"✅ Switched to `{target}` — no current session file found; "
+                "starting fresh."
+            ),
+            "no_session": (
+                f"✅ Switched to `{target}` — binding hasn't started a session yet."
+            ),
+            "same_account": f"✓ Already on `{target}` — no change.",
+            "skipped_no_import": f"✅ Switched to `{target}`.",
+        }.get(result.import_status, f"✅ Switched to `{target}`.")
+
+        if result.respawn_failed:
+            status_msg += (
+                f"\n⚠ Respawn failed; binding marked respawn_failed. "
+                f"Try `/account-switch {target}` again or check logs."
+            )
+        await self._reply(interaction, status_msg)
 
     async def handle_cli_forward(
         self, channel_id: str, command: str, interaction: Any
@@ -1697,7 +2334,7 @@ class Engine:
 
     async def _handle_cross_cli_import(
         self,
-        session: "CLISession",
+        session: CLISession,
         pending: dict,
         pending_channel: str,
         reply_channel: str,

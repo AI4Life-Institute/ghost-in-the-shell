@@ -884,6 +884,93 @@ class TestSessionMapIntegration:
         assert callback.call_args[0][1] == "Hello from the new session!"
 
 
+# -- Account-aware path resolution (Phase 0.6) --------------------------------
+
+
+class TestAccountAwarePaths:
+    """``_find_claude_jsonl`` resolves the projects dir from binding.claude_account."""
+
+    def test_account_routes_to_account_projects_dir(self, monitor, tmp_path, monkeypatch):
+        """When binding.claude_account is set, JSONL is found under ~/.claude-{name}/projects."""
+        from gits.core import account as account_mod
+
+        monkeypatch.setattr(
+            account_mod.AccountLayout, "__init__",
+            lambda self: setattr(self, "_AccountLayout__patched", None) or AccountLayout_init(self, home=tmp_path),
+        )
+        # Easier: patch Path.home and use real AccountLayout
+        monkeypatch.setattr(account_mod.Path, "home", lambda: tmp_path)
+
+        # Set up an account dir with a JSONL for a known work_dir.
+        work_dir = "/data/proj"
+        dir_hash = "-data-proj"
+        session_id = "X-Y-Z"
+        account_projects = tmp_path / ".claude-personal" / "projects" / dir_hash
+        account_projects.mkdir(parents=True)
+        target = account_projects / f"{session_id}.jsonl"
+        target.write_text("{}\n")
+
+        # Also a different file under legacy ~/.claude — which MUST be ignored.
+        legacy_projects = tmp_path / ".claude" / "projects" / dir_hash
+        legacy_projects.mkdir(parents=True)
+        (legacy_projects / f"{session_id}.jsonl").write_text("{wrong:1}\n")
+
+        # Re-point monitor's legacy fallback so test isolation holds.
+        monitor._projects_path = tmp_path / ".claude" / "projects"
+
+        # Build a real-shaped binding (not MagicMock) — claude_account must be a string.
+        binding = MagicMock()
+        binding.cli_session_id = session_id
+        binding.work_dir = work_dir
+        binding.suspended = False
+        binding.coding_cli = "claude"
+        binding.claude_account = "personal"
+
+        result = monitor._find_jsonl_file(binding)
+        assert result == target  # account-aware path, not legacy
+
+    def test_no_account_uses_legacy_path(self, monitor, tmp_path):
+        """binding.claude_account=None falls back to monitor._projects_path."""
+        legacy = tmp_path / ".claude" / "projects" / "-w"
+        legacy.mkdir(parents=True)
+        target = legacy / "sess.jsonl"
+        target.write_text("{}\n")
+        monitor._projects_path = tmp_path / ".claude" / "projects"
+
+        binding = MagicMock()
+        binding.cli_session_id = "sess"
+        binding.work_dir = "/w"
+        binding.suspended = False
+        binding.coding_cli = "claude"
+        binding.claude_account = None
+
+        result = monitor._find_jsonl_file(binding)
+        assert result == target
+
+    def test_non_string_claude_account_treated_as_none(self, monitor, tmp_path):
+        """Defensive: a MagicMock or other non-string claude_account → fallback to legacy."""
+        legacy = tmp_path / ".claude" / "projects" / "-w"
+        legacy.mkdir(parents=True)
+        target = legacy / "sess.jsonl"
+        target.write_text("{}\n")
+        monitor._projects_path = tmp_path / ".claude" / "projects"
+
+        binding = MagicMock()  # claude_account auto-becomes a MagicMock
+        binding.cli_session_id = "sess"
+        binding.work_dir = "/w"
+        binding.suspended = False
+        binding.coding_cli = "claude"
+        # Don't set claude_account explicitly — MagicMock default.
+
+        result = monitor._find_jsonl_file(binding)
+        assert result == target  # not crashed by the MagicMock attribute
+
+
+def AccountLayout_init(self, home):
+    """Helper used in monkeypatched AccountLayout above."""
+    self._home = home
+
+
 # -- Hardening: offset isolation, persistence, session-switch guard ----------
 
 

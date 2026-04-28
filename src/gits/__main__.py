@@ -62,6 +62,15 @@ def main() -> None:
         action="store_true",
         help="Install the session plugin into OpenCode config",
     )
+    hook_p.add_argument(
+        "--all-accounts",
+        action="store_true",
+        help=(
+            "When combined with --install, also install the Claude hook into "
+            "every per-account settings.json registered in ~/.gits/accounts/manifest.json "
+            "(per openspec change add-multi-account-hotswap)."
+        ),
+    )
 
     # gits info
     sub.add_parser("info", help="Show current bindings")
@@ -107,6 +116,16 @@ def main() -> None:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
 
+    # gits subscription / gits sub  (deprecated; kept for V1 transition)
+    from . import cli_subscription as _cli_sub
+
+    _cli_sub.install_parser(sub)
+
+    # gits account / gits acct  (Phase 0.11 — replaces gits subscription)
+    from . import cli_account as _cli_account
+
+    _cli_account.install_parser(sub)
+
     args = parser.parse_args()
 
     if args.command == "start":
@@ -131,6 +150,10 @@ def main() -> None:
         _cmd_setup(args)
     elif args.command == "desktop":
         _cmd_desktop(args)
+    elif args.command in ("subscription", "sub"):
+        _cli_sub.dispatch(args)
+    elif args.command in ("account", "acct"):
+        _cli_account.dispatch(args)
 
 
 def _cmd_start(args: argparse.Namespace) -> None:
@@ -922,7 +945,23 @@ def _cmd_hook(args: argparse.Namespace) -> None:
 
     if args.install:
         logger.info("Hook install requested (Claude)")
-        sys.exit(_install_hook())
+        rc = _install_hook()
+        if getattr(args, "all_accounts", False):
+            # Per-account propagation (Phase 0.10 / D14): iterate manifest
+            # accounts and install into each ~/.claude-{name}/settings.json.
+            try:
+                from .config import Settings as _Settings
+                from .core.account_vault import AccountVault as _AccountVault
+                settings = _Settings()
+                vault = _AccountVault(settings.state_dir)
+                if vault.is_initialized():
+                    for entry in vault.list():
+                        sub_rc = _install_hook(config_dir=entry.config_dir)
+                        if sub_rc != 0:
+                            rc = sub_rc
+            except Exception as e:
+                logger.warning("hook --all-accounts propagation failed: %s", e)
+        sys.exit(rc)
 
     if args.install_copilot:
         logger.info("Hook install requested (Copilot)")

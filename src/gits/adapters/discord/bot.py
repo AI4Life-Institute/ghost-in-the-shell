@@ -826,6 +826,66 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), command, interaction
                 )
 
+        # ── E. Account management (Phase 0.12) ────────────────────────
+        # Multi-account isolation via CLAUDE_CONFIG_DIR.
+        # The deprecated ``/subscriptions`` and ``/sub-switch`` commands are
+        # NOT registered — per the spec, only ``/accounts`` and
+        # ``/account-switch`` are exposed via Discord. Credential add/remove
+        # and session import remain CLI-only. The host-side ``gits subscription``
+        # subcommands still exist (with deprecation hints) for V1 transition,
+        # but no equivalent Discord surface is provided.
+
+        @tree.command(name="accounts", description="List Claude accounts with live OAuth Usage data")
+        async def cmd_accounts_list(interaction: discord.Interaction):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message("Access denied.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            if self._engine:
+                await self._engine.handle_accounts_list(
+                    str(interaction.channel_id), interaction
+                )
+
+        @tree.command(
+            name="account-switch",
+            description=(
+                "Switch this channel's binding to a different Claude account "
+                "(auto-imports current session)"
+            ),
+        )
+        @app_commands.describe(name="Account name to switch to")
+        async def cmd_account_switch(interaction: discord.Interaction, name: str):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message("Access denied.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_account_switch(
+                    str(interaction.channel_id), name, interaction
+                )
+
+        @cmd_account_switch.autocomplete("name")
+        async def _account_switch_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
+            if not self._check_interaction_access(interaction):
+                return []
+            if not self._engine:
+                return []
+            try:
+                manifest = self._engine.account_vault.load()
+            except Exception:
+                return []
+            choices: list[app_commands.Choice[str]] = []
+            for a in manifest.accounts:
+                if current and current.lower() not in a.name.lower():
+                    continue
+                tag = " (default)" if a.name == manifest.default else ""
+                choices.append(app_commands.Choice(name=a.name + tag, value=a.name))
+                if len(choices) >= 25:
+                    break
+            return choices
+
     def _register_forward_command(
         self, tree: app_commands.CommandTree, name: str, description: str
     ) -> None:

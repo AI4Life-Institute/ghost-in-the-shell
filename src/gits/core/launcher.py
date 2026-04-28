@@ -70,9 +70,28 @@ class CLISession:
 class CodingCLILauncher:
     """Launch coding CLIs with session resume support."""
 
-    def __init__(self, session_map_path: Path, config_path: Path | None = None):
+    def __init__(
+        self,
+        session_map_path: Path,
+        config_path: Path | None = None,
+        active_env_file: Path | None = None,
+        account_layout: object | None = None,
+    ):
         self.session_map_path = session_map_path
         self.config_path = config_path or (session_map_path.parent / "config.json")
+        # ``active_env_file`` is preserved as a no-op for V1 transition
+        # compatibility with the deprecated SubscriptionVault. Per openspec
+        # change ``add-multi-account-hotswap``, account isolation now uses
+        # ``CLAUDE_CONFIG_DIR`` injection (see ``build_launch_command`` and
+        # ``gits.core.account.AccountLayout``); the env-source-file mechanism
+        # is no longer applied to launch commands.
+        self.active_env_file = active_env_file
+        # Per Phase 0.5: account-aware path resolution. Lazy-imported so
+        # tests can construct a launcher without account state.
+        if account_layout is None:
+            from .account import AccountLayout
+            account_layout = AccountLayout()
+        self._account_layout = account_layout
         self._session_map: dict[str, str] = {}  # window_name -> session_id
         self._aliases: dict[str, dict] = {}     # alias_name -> alias config
         self._load_map()
@@ -96,12 +115,20 @@ class CodingCLILauncher:
             except (json.JSONDecodeError, OSError):
                 self._aliases = {}
 
-    def resolve_cli(self, cli: str) -> ResolvedCLI:
+    def resolve_cli(self, cli: str, claude_account: str | None = None) -> ResolvedCLI:
         """Resolve a cli name / alias to its concrete launch info.
 
         For built-in names (claude, codex, …) returns defaults.
         For user-defined aliases from config.json, overrides cmd and
         resume_by_id while inheriting the base_type's session-discovery logic.
+
+        When ``claude_account`` is set AND the resolved base type is
+        ``claude``, ``session_path`` and ``config_dir`` are overridden by
+        :class:`AccountLayout` to point at ``~/.claude-{name}/`` (per
+        openspec change ``add-multi-account-hotswap``, Phase 0.5). Account
+        precedence beats any alias-level ``session_path`` / ``config_dir``
+        because account selection is a runtime decision while alias config
+        is a static install.
         """
         alias_cfg = self._aliases.get(cli)
         if alias_cfg:
@@ -111,15 +138,33 @@ class CodingCLILauncher:
             resume = alias_cfg.get("resume_by_id", default_resume.replace(base, cmd, 1))
             session_path = alias_cfg.get("session_path") or None
             config_dir = alias_cfg.get("config_dir") or None
-            return ResolvedCLI(base_type=base, cmd=cmd, resume_by_id=resume, session_path=session_path, config_dir=config_dir)
+            resolved = ResolvedCLI(
+                base_type=base, cmd=cmd, resume_by_id=resume,
+                session_path=session_path, config_dir=config_dir,
+            )
+        else:
+            # Built-in CLI — derive from RESUME_TEMPLATES
+            templates = RESUME_TEMPLATES.get(cli, {})
+            resolved = ResolvedCLI(
+                base_type=cli,
+                cmd=cli,
+                resume_by_id=templates.get("by_id", f"{cli} --resume {{id}}"),
+            )
 
-        # Built-in CLI — derive from RESUME_TEMPLATES
-        templates = RESUME_TEMPLATES.get(cli, {})
-        return ResolvedCLI(
-            base_type=cli,
-            cmd=cli,
-            resume_by_id=templates.get("by_id", f"{cli} --resume {{id}}"),
-        )
+        # Account-aware override (Phase 0.5). Only applies when the resolved
+        # base type is claude — codex/copilot/opencode have their own auth.
+        # Defensive: only act on str account names (test fixtures sometimes
+        # pass MagicMock for legacy fields).
+        if isinstance(claude_account, str) and resolved.base_type == "claude":
+            account_dir = self._account_layout.account_dir(claude_account)
+            resolved = ResolvedCLI(
+                base_type=resolved.base_type,
+                cmd=resolved.cmd,
+                resume_by_id=resolved.resume_by_id,
+                session_path=str(account_dir / "projects"),
+                config_dir=str(account_dir),
+            )
+        return resolved
 
     def get_session_id(self, window_name: str) -> str | None:
         return self._session_map.get(window_name)
@@ -136,26 +181,53 @@ class CodingCLILauncher:
         cli: str = "claude",
         session_id: str | None = None,
         work_dir: str | None = None,
+        claude_account: str | None = None,
     ) -> str:
         """Build the CLI launch/resume command string.
 
         When *session_id* is provided the CLI is launched in resume mode.
         When it is ``None`` or empty, a **fresh** session is started
         (just the bare CLI command — no ``--continue``).
-        """
-        resolved = self.resolve_cli(cli)
-        if session_id:
-            return resolved.resume_by_id.format(id=session_id)
-        # No session_id → start fresh (don't use --continue)
-        return resolved.cmd
 
-    def get_session_file(self, work_dir: str, cli: str, session_id: str) -> str | None:
+        Account isolation (per openspec change ``add-multi-account-hotswap``):
+        when ``claude_account`` is set AND the resolved base type is
+        ``claude``, ``CLAUDE_CONFIG_DIR=$HOME/.claude-{name}`` is prepended
+        to the command so the spawned claude process reads its credentials
+        and writes its session JSONL to the per-account directory. For
+        codex / copilot / opencode the account argument is ignored (they
+        have their own auth mechanisms).
+        """
+        import shlex
+
+        resolved = self.resolve_cli(cli, claude_account=claude_account)
+        if session_id:
+            base = resolved.resume_by_id.format(id=session_id)
+        else:
+            base = resolved.cmd
+
+        if isinstance(claude_account, str) and resolved.base_type == "claude":
+            account_dir = self._account_layout.account_dir(claude_account)
+            return f"CLAUDE_CONFIG_DIR={shlex.quote(str(account_dir))} {base}"
+        return base
+
+    def get_session_file(
+        self,
+        work_dir: str,
+        cli: str,
+        session_id: str,
+        claude_account: str | None = None,
+    ) -> str | None:
         """Return the file path for a known session ID, or None if not found.
 
-        For Claude, the path is reconstructed directly (fast).
-        For other CLIs, we scan discover_sessions and match by session_id.
+        For Claude, the path is reconstructed directly (fast). When
+        ``claude_account`` is supplied, the search is scoped to that
+        account's ``~/.claude-{name}/projects/`` directory; otherwise the
+        legacy ``~/.claude/projects/`` is used.
+
+        For other CLIs, we scan discover_sessions and match by session_id;
+        ``claude_account`` is ignored for non-claude bases.
         """
-        resolved = self.resolve_cli(cli)
+        resolved = self.resolve_cli(cli, claude_account=claude_account)
         if resolved.base_type == "claude":
             claude_projects = (
                 Path(resolved.session_path).expanduser()
@@ -185,9 +257,19 @@ class CodingCLILauncher:
                 return s.file_path
         return None
 
-    def discover_sessions(self, work_dir: str, cli: str = "claude") -> list[CLISession]:
-        """Discover existing CLI sessions for a given directory."""
-        resolved = self.resolve_cli(cli)
+    def discover_sessions(
+        self,
+        work_dir: str,
+        cli: str = "claude",
+        claude_account: str | None = None,
+    ) -> list[CLISession]:
+        """Discover existing CLI sessions for a given directory.
+
+        ``claude_account`` (Phase 0.5): when set and the CLI base type is
+        ``claude``, sessions are discovered under ``~/.claude-{name}/projects/``
+        instead of ``~/.claude/projects/``.
+        """
+        resolved = self.resolve_cli(cli, claude_account=claude_account)
         discoverers = {
             "claude": self._discover_claude_sessions,
             "codex": self._discover_codex_sessions,
@@ -231,7 +313,7 @@ class CodingCLILauncher:
     # Cross-CLI conversation extraction
     # ------------------------------------------------------------------
 
-    def extract_conversation_text(self, session: "CLISession", max_chars: int = 8000) -> str:
+    def extract_conversation_text(self, session: CLISession, max_chars: int = 8000) -> str:
         """Extract conversation turns from a session as human-readable markdown.
 
         Returns a string of ``**USER**: …`` / ``**ASSISTANT**: …`` blocks,

@@ -68,3 +68,19 @@ class Settings(BaseSettings):
     @property
     def log_file(self) -> Path:
         return self.state_dir / "gits.log"
+
+    @property
+    def subscriptions_dir(self) -> Path:
+        return self.state_dir / "subscriptions"
+
+    @property
+    def subscriptions_manifest_file(self) -> Path:
+        return self.subscriptions_dir / "manifest.json"
+
+    @property
+    def credential_lock_file(self) -> Path:
+        return self.state_dir / ".switch.lock"
+
+    @property
+    def quota_patterns_file(self) -> Path:
+        return self.state_dir / "quota_patterns.yaml"

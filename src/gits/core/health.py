@@ -13,8 +13,10 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..utils.lock import is_locked
 from .launcher import CodingCLILauncher
 from .session import SessionManager
 from .tmux import TmuxController
@@ -86,6 +88,7 @@ class HealthMonitor:
         launcher: CodingCLILauncher,
         check_interval: float = 5.0,
         max_retries: int = 3,
+        credential_lock_path: "Path | None" = None,
     ):
         self.tmux = tmux
         self.session_mgr = session_mgr
@@ -97,6 +100,7 @@ class HealthMonitor:
         self._idle_task: asyncio.Task | None = None
         self._on_recovery: list = []  # callbacks
         self._engine: Engine | None = None  # set via set_engine()
+        self._credential_lock_path = credential_lock_path
 
     def set_engine(self, engine: Engine) -> None:
         """Set engine reference for idle suspension."""
@@ -180,8 +184,26 @@ class HealthMonitor:
                 )
                 await self._engine._suspend_binding(binding.channel_id)
 
+    def _credential_lock_held(self) -> bool:
+        """True if a subscription switch is currently in flight."""
+        if self._credential_lock_path is None:
+            return False
+        try:
+            return is_locked(self._credential_lock_path)
+        except Exception:
+            return False
+
     async def _check_health(self) -> None:
         """Run a single health check."""
+        # Skip recovery while a subscription switch holds the credential lock —
+        # the switch primitive is mid-kill or mid-respawn and HealthMonitor
+        # spawning new claude processes here would race with credential swap.
+        if self._credential_lock_held():
+            logger.debug(
+                "credential lock held; HealthMonitor skipping this tick"
+            )
+            return
+
         # Check tmux server
         if not await self.tmux.is_server_alive():
             logger.warning("tmux server is down, attempting recovery...")
