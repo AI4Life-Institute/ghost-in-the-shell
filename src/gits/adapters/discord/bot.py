@@ -157,7 +157,30 @@ class DiscordAdapter(PlatformAdapter):
                         select_placeholder=msg.select_placeholder,
                     )
 
-            sent = await channel.send(**kwargs)
+            try:
+                sent = await channel.send(**kwargs)
+            except discord.HTTPException as e:
+                if msg.select_options or msg.buttons:
+                    n_opts = len(msg.select_options or [])
+                    n_btns = sum(len(r) for r in (msg.buttons or []))
+                    opt_chars = sum(
+                        len(o.label or "") + len(o.value or "") + len(o.description or "")
+                        for o in (msg.select_options or [])
+                    )
+                    btn_chars = sum(
+                        len(b.label or "") + len(b.callback_data or "")
+                        for r in (msg.buttons or []) for b in r
+                    )
+                    logger.error(
+                        "Discord POST failed ch=%s status=%s text_len=%d "
+                        "select_opts=%d opt_chars=%d buttons=%d btn_chars=%d "
+                        "placeholder=%r text_preview=%r",
+                        channel_id, getattr(e, "status", "?"), len(chunk),
+                        n_opts, opt_chars, n_btns, btn_chars,
+                        (msg.select_placeholder or "")[:80],
+                        (msg.text or "")[:120],
+                    )
+                raise
 
         logger.info(
             "Discord POST ch=%s msg_id=%s content=%s",

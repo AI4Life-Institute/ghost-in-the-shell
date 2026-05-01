@@ -564,7 +564,7 @@ class Engine:
     # Session Picker helpers
     # ------------------------------------------------------------------
 
-    _SESSION_PAGE_SIZE = 24  # max Select options per page (leave 1 for "New Session")
+    _SESSION_PAGE_SIZE = 10  # max Select options per page (leave 1 for "New Session")
 
     def _build_session_picker_message(
         self,
