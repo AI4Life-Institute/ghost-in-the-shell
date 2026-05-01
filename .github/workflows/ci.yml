@@ -110,12 +110,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Discord notification
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          MSG: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          if [ "${{ needs.test.result }}" = "failure" ] || [ "${{ needs.release.result }}" = "failure" ]; then
+          if [ "$TEST_RESULT" = "failure" ] || [ "$RELEASE_RESULT" = "failure" ]; then
             ICON="❌"
           else
             ICON="✅"
           fi
-          curl -fsSL -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+          CONTENT="${ICON} **CI** — ${MSG}"$'\n'"🔗 ${RUN_URL}"
+          PAYLOAD=$(jq -nc --arg content "$CONTENT" '{content: $content}')
+          curl -fsSL -X POST "$DISCORD_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"${ICON} **CI** — ${{ github.event.head_commit.message || github.event.pull_request.title }}\n🔗 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+            -d "$PAYLOAD"
