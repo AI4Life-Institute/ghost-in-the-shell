@@ -1564,6 +1564,7 @@ class TestHookNonInteractiveFilter:
         with patch.object(Path, "read_text", fake_read_text), \
              patch.object(Path, "read_bytes", fake_read_bytes), \
              patch.object(Path, "home", staticmethod(lambda: tmp_path)), \
+             patch.dict("os.environ", {"TMUX_PANE": "%99"}), \
              patch("os.getpid", return_value=100), \
              patch("sys.stdin", io.StringIO(payload)), \
              patch("subprocess.run", return_value=tmux_result):
