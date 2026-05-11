@@ -620,8 +620,28 @@ class WeixinAdapter(PlatformAdapter):
             await eng.handle_bind(user_id, arg, iact, mode="bypassPermissions")
             return
 
+        # Recursively search for directories whose name contains the query
+        # (up to 3 levels deep to keep it fast).
+        def _find_dirs(root: _P, query: str, max_depth: int = 3) -> list[_P]:
+            results: list[_P] = []
+            stack: list[tuple[_P, int]] = [(root, 0)]
+            while stack:
+                cur, depth = stack.pop()
+                try:
+                    entries = sorted(cur.iterdir(), key=lambda e: e.name.lower())
+                except OSError:
+                    continue
+                for entry in entries:
+                    if not entry.is_dir() or entry.name.startswith("."):
+                        continue
+                    if query in entry.name.lower():
+                        results.append(entry)
+                    if depth + 1 < max_depth:
+                        stack.append((entry, depth + 1))
+            return results
+
         matches = sorted(
-            [d for d in search_root.iterdir() if d.is_dir() and arg.lower() in d.name.lower()],
+            _find_dirs(search_root, arg.lower()),
             key=lambda d: d.name.lower(),
         )
 

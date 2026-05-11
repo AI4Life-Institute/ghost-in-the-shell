@@ -30,3 +30,12 @@ src-tauri/target/
 
 # State
 *.gits/
+
+# Coverage / test artifacts
+.coverage
+
+# Git worktrees
+.worktrees/
+
+# Editor backups
+*.bak
