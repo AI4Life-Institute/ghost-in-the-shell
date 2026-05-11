@@ -9,9 +9,25 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any
+
+# Messages authored by the bot itself are normally skipped to avoid self-loops.
+# Vault-dispatched messages (sent via the bot's REST token from outside, e.g.
+# the `butler` CLI) tag themselves with a recognizable prefix so they get
+# forwarded to the bound CLI session.
+#
+# Default accepts: [butler], [butler:user], [管家], [管家:user], [vault], [vault:user]
+# Override via GITS_DISPATCH_PREFIX_PATTERN env var (a Python regex).
+_VAULT_DISPATCH_RE = re.compile(
+    os.environ.get(
+        "GITS_DISPATCH_PREFIX_PATTERN",
+        r"^\[(butler|管家|vault)(:[^\]]*)?\]",
+    )
+)
 
 import discord
 from discord import app_commands
@@ -297,9 +313,15 @@ class DiscordAdapter(PlatformAdapter):
         ``PlatformAdapter.on_message()`` which registers callbacks.
         Registered with discord.py via a wrapper in ``__init__``.
         """
-        # Ignore bot's own messages
+        # Ignore bot's own messages, except those tagged as vault-dispatched.
+        # Pattern: leading "[butler]" or "[butler:<user>]" marks a message
+        # sent from a vault session via the bot's REST token (see butler CLI).
+        vault_match = None
         if message.author == self.bot.user:
-            return
+            vault_match = _VAULT_DISPATCH_RE.match(message.content or "")
+            if not vault_match:
+                return
+            logger.info("butler-dispatched: %s", (message.content or "")[:120])
 
         # Ignore Discord system messages (e.g. "started a thread", pins, etc.)
         if message.type != discord.MessageType.default and message.type != discord.MessageType.reply:
@@ -321,8 +343,19 @@ class DiscordAdapter(PlatformAdapter):
             (message.content or "")[:80],
         )
 
-        # Only react and forward if this channel is bound
         channel_id = str(message.channel.id)
+
+        # Butler-dispatched slash commands (e.g. ``[butler:user] /bind <path>``)
+        # are routed to engine handlers instead of forwarded to the CLI session.
+        # Regular user messages can't reach this branch because line 293 already
+        # returns early for any content starting with "/".
+        if vault_match is not None:
+            payload = (message.content or "")[vault_match.end():].lstrip()
+            if payload.startswith("/"):
+                if await self._handle_butler_command(message, channel_id, payload):
+                    return
+
+        # Only react and forward if this channel is bound
         is_bound = bool(
             self._engine and self._engine.session_mgr.get_binding(channel_id)
         )
@@ -364,6 +397,164 @@ class DiscordAdapter(PlatformAdapter):
 
         # Let commands.Bot process prefix commands (e.g. !bash)
         await self.bot.process_commands(message)
+
+    async def _handle_butler_command(
+        self, message: discord.Message, channel_id: str, payload: str
+    ) -> bool:
+        """Dispatch butler-prefixed slash commands (e.g. ``/bind``, ``/unbind``).
+
+        Returns True when *payload* was handled here and the caller should
+        skip the normal forward-to-CLI flow; False for unknown commands so
+        they fall through (and ultimately get ignored — they start with "/").
+        """
+        if not self._engine:
+            return False
+
+        parts = payload.split()
+        cmd = parts[0]
+        args = parts[1:]
+
+        if cmd == "/bind":
+            # Parse positionals (path, cli) and flags (--fresh, --resume=<id>).
+            positionals: list[str] = []
+            explicit_fresh = False
+            resume_id: str | None = None
+            for tok in args:
+                if tok == "--fresh":
+                    explicit_fresh = True
+                elif tok.startswith("--resume="):
+                    resume_id = tok[len("--resume="):]
+                else:
+                    positionals.append(tok)
+
+            if not positionals:
+                try:
+                    await message.reply(
+                        "⚠️ `/bind` requires a path: "
+                        "`/bind <path> [cli] [--fresh|--resume=<id>]`"
+                    )
+                except Exception:
+                    logger.debug("Failed to reply to butler /bind")
+                return True
+
+            if explicit_fresh and resume_id:
+                try:
+                    await message.reply(
+                        "⚠️ `--fresh` and `--resume` are mutually exclusive."
+                    )
+                except Exception:
+                    logger.debug("Failed to reply to butler /bind")
+                return True
+
+            path = positionals[0]
+            cli = positionals[1] if len(positionals) >= 2 else None
+
+            # Picker is unusable from butler, so default (no flag) and --fresh
+            # both go through the fresh path.
+            fresh = resume_id is None
+
+            # Discover sessions up-front so we can validate --resume=<id> and
+            # include a "you could also resume X" hint when defaulting fresh.
+            sessions: list = []
+            discover_cli = cli or self._engine.settings.coding_cli_command
+            try:
+                resolved_path = Path(path).expanduser().resolve()
+                if resolved_path.is_dir():
+                    sessions = self._engine.launcher.discover_all_sessions(
+                        str(resolved_path), target_cli=discover_cli
+                    )
+            except Exception:
+                logger.debug("butler /bind: session discovery failed", exc_info=True)
+
+            if resume_id:
+                match = next(
+                    (s for s in sessions if s.session_id == resume_id), None
+                )
+                if match is None:
+                    try:
+                        await message.reply(
+                            f"⚠️ No session `{resume_id}` found in `{path}`. "
+                            f"Run `/bind {path}` to see available sessions."
+                        )
+                    except Exception:
+                        logger.debug("Failed to reply to butler /bind")
+                    return True
+                # v1: refuse cross-CLI resume from butler. The Discord UI's
+                # button-resume path handles this via _handle_cross_cli_import;
+                # butler can't drive that flow yet.
+                try:
+                    target_type = self._engine.launcher.resolve_cli(
+                        discover_cli
+                    ).base_type
+                    source_type = (
+                        self._engine.launcher.resolve_cli(match.source_cli).base_type
+                        if match.source_cli
+                        else target_type
+                    )
+                except Exception:
+                    target_type = source_type = ""
+                if target_type and source_type and target_type != source_type:
+                    try:
+                        await message.reply(
+                            f"⚠️ Session `{resume_id}` originated from "
+                            f"`{source_type}`; target CLI is `{target_type}`. "
+                            f"Cross-CLI resume isn't supported via butler — "
+                            f"use the Discord UI."
+                        )
+                    except Exception:
+                        logger.debug("Failed to reply to butler /bind")
+                    return True
+
+            try:
+                await message.add_reaction("🔗")
+            except Exception:
+                logger.debug("Failed to add 🔗 reaction")
+
+            try:
+                await self._engine.handle_bind(
+                    channel_id,
+                    path,
+                    interaction=None,
+                    mode="bypassPermissions",
+                    cli=cli,
+                    fresh=fresh,
+                    session_id=resume_id,
+                )
+            except Exception:
+                logger.exception("butler /bind failed")
+                return True
+
+            # When defaulting to fresh, surface any existing sessions so vault
+            # can re-run with --resume=<id> if it actually wanted one of them.
+            if fresh and sessions:
+                lines = ["Existing sessions you could resume:"]
+                for s in sessions[:10]:
+                    summary = (s.summary or "").strip()[:60] or "(no summary)"
+                    lines.append(f"• `{s.session_id}` — {summary}")
+                if len(sessions) > 10:
+                    lines.append(f"…and {len(sessions) - 10} more")
+                lines.append(f"Use `/bind {path} --resume=<id>` to switch.")
+                try:
+                    await self.send_message(
+                        channel_id, OutgoingMessage(text="\n".join(lines))
+                    )
+                except Exception:
+                    logger.debug("Failed to send sessions hint")
+
+            return True
+
+        if cmd == "/unbind":
+            try:
+                await message.add_reaction("🔓")
+            except Exception:
+                logger.debug("Failed to add 🔓 reaction")
+            try:
+                await self._engine.handle_unbind(channel_id, interaction=None)
+            except Exception:
+                logger.exception("butler /unbind failed")
+            return True
+
+        return False
 
     async def _download_attachments(self, attachments: list[discord.Attachment]) -> list[str]:
         """Download image attachments to /tmp and return their local file paths."""
@@ -517,13 +708,27 @@ class DiscordAdapter(PlatformAdapter):
                     cmd_name,
                 )
                 return
-            # Re-raise all other errors so discord.py logs them normally
+            cmd_name = interaction.command.name if interaction.command else "unknown"
             logger.error(
                 "App command error in /%s: %s",
-                interaction.command.name if interaction.command else "unknown",
+                cmd_name,
                 error,
                 exc_info=error,
             )
+            # If the interaction was deferred, send a followup so Discord
+            # stops showing "thinking".
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        f"⚠️ `/{cmd_name}` failed: {original}",
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"⚠️ `/{cmd_name}` failed: {original}",
+                        ephemeral=True,
+                    )
+            except Exception:
+                pass
 
         # ── A. Native Commands ────────────────────────────────────────
 
@@ -606,9 +811,16 @@ class DiscordAdapter(PlatformAdapter):
                 return
             await interaction.response.defer()
             if self._engine:
-                await self._engine.handle_thread(
-                    str(interaction.channel_id), message, interaction
-                )
+                try:
+                    await self._engine.handle_thread(
+                        str(interaction.channel_id), message, interaction
+                    )
+                except Exception as exc:
+                    logger.exception("cmd_thread failed")
+                    try:
+                        await interaction.followup.send(f"Failed to create thread: {exc}")
+                    except Exception:
+                        pass
 
         @tree.command(name="fork", description="Create a thread with isolated git worktree")
         @app_commands.describe(

@@ -404,8 +404,12 @@ class Engine:
             window_name = channel.name if channel else f"ch-{channel_id[:8]}"
             cli = cli or self.settings.coding_cli_command
 
-            # Discover existing sessions (all CLIs, target first)
-            sessions = [] if fresh else self.launcher.discover_all_sessions(str(p), target_cli=cli)
+            # Discover existing sessions (all CLIs, target first).
+            # Treat an explicit ``session_id`` the same as ``fresh``: caller
+            # has already picked, so skip the picker and let ``_create_bind``
+            # resume it directly. Slash-UI button picks go through
+            # ``_handle_bind_resume`` → ``_create_bind`` and don't enter here.
+            sessions = [] if (fresh or session_id) else self.launcher.discover_all_sessions(str(p), target_cli=cli)
 
             if sessions:
                 # Store pending bind info and show session picker
