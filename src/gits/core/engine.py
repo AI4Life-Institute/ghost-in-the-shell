@@ -136,6 +136,14 @@ class Engine:
 
         await self.tmux.ensure_session()
 
+        # Defensive: rename any windows whose names contain \n/\t/\r/\0.
+        # libtmux's list-windows parser crashes on those, which would
+        # cascade into bind/health failures.
+        try:
+            await self.tmux.scrub_window_names()
+        except Exception:
+            logger.debug("startup: window-name scrub failed", exc_info=True)
+
         # Initialize guard handler for ops session
         from .skill_loader import SkillLoader
         loader = SkillLoader()

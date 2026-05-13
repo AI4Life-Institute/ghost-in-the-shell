@@ -97,7 +97,7 @@ class TmuxController:
         """Check if a specific window exists."""
         def _sync() -> bool:
             session = self._get_or_create_session()
-            return any(w.id == window_id for w in session.windows)
+            return any(w.id == window_id for w in self._safe_windows(session))
         try:
             return await asyncio.to_thread(_sync)
         except Exception:
@@ -154,7 +154,7 @@ class TmuxController:
     def _list_windows_sync(self) -> list[WindowInfo]:
         session = self._get_or_create_session()
         result: list[WindowInfo] = []
-        for w in session.windows:
+        for w in self._safe_windows(session):
             pane = w.active_pane
             cwd = pane.current_path if pane else ""
             result.append(
@@ -183,11 +183,29 @@ class TmuxController:
         command: str | None = None,
     ) -> WindowInfo:
         session = self._get_or_create_session()
-        w = session.new_window(
-            window_name=name,
-            start_directory=cwd,
-            attach=False,
-        )
+        try:
+            w = session.new_window(
+                window_name=name,
+                start_directory=cwd,
+                attach=False,
+            )
+        except ValueError as e:
+            # libtmux parses `tmux list-windows -F ...` line-by-line; an
+            # existing window whose name contains \n / \t / \r / \0 spans
+            # multiple stdout lines and trips `zip(..., strict=True)`.
+            # Scrub names of existing windows and retry once.
+            if "zip()" not in str(e) and "shorter than argument" not in str(e):
+                raise
+            scrubbed = self._scrub_window_names()
+            logger.warning(
+                "tmux.new_window hit libtmux parse error; scrubbed %d window name(s) and retrying",
+                scrubbed,
+            )
+            w = session.new_window(
+                window_name=name,
+                start_directory=cwd,
+                attach=False,
+            )
         # Unset CLAUDECODE so coding CLIs don't think they're nested
         pane = w.active_pane
         if pane:
@@ -207,7 +225,7 @@ class TmuxController:
 
     def _kill_window_sync(self, window_id: str) -> bool:
         session = self._get_or_create_session()
-        for w in session.windows:
+        for w in self._safe_windows(session):
             if w.id == window_id:
                 w.kill()
                 return True
@@ -359,13 +377,106 @@ class TmuxController:
         await asyncio.to_thread(self._scrub_env, session)
 
     # ------------------------------------------------------------------
+    # Window Name Scrubbing
+    # ------------------------------------------------------------------
+
+    _BAD_NAME_CHARS = "\n\t\r\0"
+
+    def _scrub_window_names(self) -> int:
+        """Rename any windows whose names contain chars that break libtmux.
+
+        libtmux's ``fetch_objs`` parses ``tmux list-windows -F ...`` output
+        line-by-line, so a window name containing ``\\n``/``\\t``/``\\r``/``\\0``
+        splits one record across multiple lines and trips ``zip(..., strict=True)``.
+        We bypass libtmux entirely here: read window IDs via subprocess
+        (``#{window_id}`` is always single-line safe), query each window's
+        name with ``display-message``, and rename any offenders.
+
+        Returns the number of windows renamed.
+        """
+        renamed = 0
+        try:
+            list_proc = subprocess.run(
+                ["tmux", "list-windows", "-t", self.session_name, "-F", "#{window_id}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if list_proc.returncode != 0:
+                return 0
+            ids = [line for line in list_proc.stdout.splitlines() if line.startswith("@")]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return 0
+
+        for wid in ids:
+            try:
+                name_proc = subprocess.run(
+                    ["tmux", "display-message", "-t", wid, "-p", "#{window_name}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+            if name_proc.returncode != 0:
+                continue
+            # display-message always appends one trailing \n; strip just that one.
+            raw = name_proc.stdout
+            if raw.endswith("\n"):
+                raw = raw[:-1]
+            if not any(ch in raw for ch in self._BAD_NAME_CHARS):
+                continue
+            safe = raw.translate(
+                str.maketrans({c: " " for c in self._BAD_NAME_CHARS})
+            ).strip()[:80] or "window"
+            try:
+                subprocess.run(
+                    ["tmux", "rename-window", "-t", wid, safe],
+                    check=False,
+                    timeout=3,
+                )
+                renamed += 1
+                logger.warning(
+                    "tmux: window %s had control chars in name; renamed to %r",
+                    wid, safe,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+        return renamed
+
+    async def scrub_window_names(self) -> int:
+        """Async wrapper; safe to call on startup."""
+        return await asyncio.to_thread(self._scrub_window_names)
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _find_pane(self, window_id: str) -> libtmux.Pane | None:
         """Find the active pane of a window by window ID."""
         session = self._get_or_create_session()
-        for w in session.windows:
+        for w in self._safe_windows(session):
             if w.id == window_id:
                 return w.active_pane
         return None
+
+    def _safe_windows(self, session: libtmux.Session) -> list[libtmux.Window]:
+        """Return ``session.windows`` with one retry if libtmux's parser dies.
+
+        ``session.windows`` runs ``tmux list-windows -F ...`` and parses
+        stdout line-by-line; a window name with ``\\n``/``\\t``/``\\r``/``\\0``
+        splits one record across multiple lines and crashes the parse
+        with ``ValueError: zip() argument 2 is shorter than argument 1``.
+        Scrub offending names and retry.
+        """
+        try:
+            return list(session.windows)
+        except ValueError as e:
+            if "zip()" not in str(e) and "shorter than argument" not in str(e):
+                raise
+            scrubbed = self._scrub_window_names()
+            logger.warning(
+                "tmux list-windows hit libtmux parse error; scrubbed %d window name(s) and retrying",
+                scrubbed,
+            )
+            return list(session.windows)
