@@ -241,7 +241,10 @@ class JsonlMonitor:
         # Pending missing-session warnings:
         #   channel_id -> (session_id, work_dir, assigned_at, attempt)
         # Retried up to _WARN_MAX_ATTEMPTS times every _WARN_RETRY_INTERVAL s;
-        # warning only fires after all retries are exhausted.
+        # warning only fires after all retries are exhausted AND the user has
+        # actually interacted (binding.first_interaction_at is set).  Without
+        # that gate, every fresh /bind would false-alarm because claude does
+        # not flush <sid>.jsonl until the first user prompt is processed.
         self._pending_warn: dict[str, tuple[str, str, float, int]] = {}
 
         # Callback: (channel_id, text) -> None
@@ -311,42 +314,58 @@ class JsonlMonitor:
         session_map = self._read_session_map()
 
         # ── Step 0: fire deferred missing-session warnings ────────────────────
-        # Checked at _WARN_RETRY_INTERVAL-second intervals up to
-        # _WARN_MAX_ATTEMPTS times (15 s, 30 s, 45 s from assignment).
-        # Warning only fires if the JSONL file is still absent after the final
-        # attempt, avoiding false positives on slow-starting fresh sessions.
+        # Two-stage gate:
+        #   (1) binding.first_interaction_at must be set — claude doesn't flush
+        #       <sid>.jsonl until the user actually prompts it, so any earlier
+        #       alarm is a race not a real wrong-dir bug.
+        #   (2) Then ``(attempt + 1) * _WARN_RETRY_INTERVAL`` seconds must
+        #       elapse since ``max(assigned_at, first_interaction_at)`` — the
+        #       later of "session id was assigned" and "user actually typed".
+        # Warning fires only after _WARN_MAX_ATTEMPTS retries with the jsonl
+        # still absent.
         _WARN_RETRY_INTERVAL = 15
         _WARN_MAX_ATTEMPTS = 3
         if self._pending_warn:
             now = time.time()
-            due = [
-                ch
-                for ch, (sid, _, assigned_at, attempt) in self._pending_warn.items()
-                if now - assigned_at >= (attempt + 1) * _WARN_RETRY_INTERVAL
-            ]
+            bindings_by_ch = {b.channel_id: b for b in bindings}
+            due: list[str] = []
+            for ch, (_sid, _wd, assigned_at, attempt) in self._pending_warn.items():
+                binding = bindings_by_ch.get(ch)
+                if binding is None:
+                    # Binding gone — schedule pop so the entry GCs itself.
+                    due.append(ch)
+                    continue
+                first_int = getattr(binding, "first_interaction_at", None)
+                if not isinstance(first_int, (int, float)):
+                    # User hasn't interacted yet — don't fire, don't expire.
+                    continue
+                anchor = max(assigned_at, first_int)
+                if now - anchor >= (attempt + 1) * _WARN_RETRY_INTERVAL:
+                    due.append(ch)
             for ch in due:
                 sid, work_dir, assigned_at, attempt = self._pending_warn.pop(ch)
-                binding = next(
-                    (b for b in bindings if b.channel_id == ch), None
-                )
+                binding = bindings_by_ch.get(ch)
                 if binding is None or binding.cli_session_id != sid:
-                    continue  # session changed — skip
+                    continue  # session changed / unbound — skip
                 if self._find_jsonl_file(binding) is not None:
                     continue  # file appeared — no warning needed
                 if attempt + 1 < _WARN_MAX_ATTEMPTS:
                     # Re-queue for next retry, keeping original assigned_at
                     self._pending_warn[ch] = (sid, work_dir, assigned_at, attempt + 1)
                     continue
-                # All retries exhausted — emit warning
+                # All retries exhausted — emit warning anchored on first_int so
+                # the elapsed number reflects the actual evidence window.
+                first_int = getattr(binding, "first_interaction_at", None) or assigned_at
+                elapsed = now - first_int
                 msg = (
-                    f"⚠️ Session {sid} not found in {work_dir}. "
-                    "Possible --resume from wrong directory."
+                    f"⚠️ Session {sid}: no jsonl appeared in {work_dir} "
+                    f"within {elapsed:.0f}s after first user input. "
+                    "Possible wrong working directory."
                 )
                 logger.warning(
-                    "Session %s not found in %s (after %d retries, %.0f s). "
-                    "Possible --resume from wrong directory.",
-                    sid, work_dir, _WARN_MAX_ATTEMPTS,
-                    now - assigned_at,
+                    "Session %s: no jsonl in %s after %.0fs since first user "
+                    "input (after %d retries). Possible wrong working directory.",
+                    sid, work_dir, elapsed, _WARN_MAX_ATTEMPTS,
                 )
                 if self._on_message:
                     try:

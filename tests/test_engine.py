@@ -466,6 +466,49 @@ class TestHandleMessage:
 
         asyncio.run(_test())
 
+    def test_marks_first_interaction_on_forward(self, engine, tmp_path):
+        """handle_message must set first_interaction_at on the binding so
+        JsonlMonitor's missing-session warning gate opens (task 50cp7c)."""
+        async def _test():
+            from gits.adapters.base import IncomingMessage
+
+            # Bind directly via session_mgr (handle_bind has unrelated
+            # launcher-mock requirements out of scope for this test).
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-fi",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+            )
+            binding = engine.session_mgr.get_binding("ch-fi")
+            assert binding is not None
+            assert binding.first_interaction_at is None  # fresh bind
+
+            msg = IncomingMessage(
+                platform="discord", channel_id="ch-fi", user_id="u1", text="hi",
+            )
+            await engine.handle_message(msg)
+
+            assert isinstance(binding.first_interaction_at, float)
+
+        asyncio.run(_test())
+
+    def test_cli_forward_also_marks_first_interaction(self, engine, tmp_path):
+        """/<cmd> forward (handle_cli_forward) likewise opens the gate."""
+        async def _test():
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-cf",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+            )
+            binding = engine.session_mgr.get_binding("ch-cf")
+            assert binding is not None
+            assert binding.first_interaction_at is None
+
+            await engine.handle_cli_forward("ch-cf", "/model gpt", FakeInteraction())
+            assert isinstance(binding.first_interaction_at, float)
+
+        asyncio.run(_test())
+
 
 # ------------------------------------------------------------------
 # Session Picker tests

@@ -1279,11 +1279,16 @@ class TestTwoWindowsSameDir:
 
 
 class TestMissingSessionWarning:
-    """C group: warning when session file not found after assignment."""
+    """C group: warning when session file not found after assignment.
+
+    Gating is two-stage: (1) user has interacted (first_interaction_at set);
+    (2) ``(attempt+1) * _WARN_RETRY_INTERVAL`` seconds elapsed since
+    ``max(assigned_at, first_interaction_at)``.
+    """
 
     @pytest.mark.asyncio
     async def test_c1_session_file_not_found_emits_warning_and_discord_message(self, tmp_path):
-        """C1: assigned session has no JSONL file → WARNING + Discord alert."""
+        """C1: user interacted, jsonl never materialized → WARNING + alert."""
         projects = tmp_path / "projects"
         projects.mkdir()
 
@@ -1292,6 +1297,10 @@ class TestMissingSessionWarning:
 
         binding = _make_binding(cli_session_id=None, work_dir="/tmp/proj")
         binding.window_id = "@1"
+        # Simulate the user having actually sent a message — this is what
+        # opens the warning gate.  Without this the test would (correctly)
+        # never see a warning, since fresh /bind alone is not enough.
+        binding.first_interaction_at = time.time() - 50
         session_mgr.list_bindings.return_value = [binding]
 
         callback = AsyncMock()
@@ -1321,6 +1330,171 @@ class TestMissingSessionWarning:
         alert_text = callback.call_args[0][1]
         assert "sess-missing" in alert_text
         assert "⚠️" in alert_text
+        # AC4: warning text describes what was actually checked, no more
+        # misleading "--resume from wrong directory" diagnosis.
+        assert "no jsonl appeared in" in alert_text
+        assert "/tmp/proj" in alert_text
+        assert "after first user input" in alert_text
+        assert "--resume" not in alert_text
+
+
+class TestFirstInteractionGate:
+    """Gate the missing-session warning on actual user interaction.
+
+    Covers task ``50cp7c`` cases A / A' / B — the fresh-/bind race that
+    used to false-alarm at ~46 s every time the user wasn't quick enough.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_bind_no_interaction_no_warning(self, tmp_path):
+        """A: fresh /bind, user never types → no warning even after 5 min."""
+        projects = tmp_path / "projects"
+        projects.mkdir()
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/proj")
+        binding.window_id = "@1"
+        binding.first_interaction_at = None  # explicit: user has not typed
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr, poll_interval=0.05, projects_path=projects
+        )
+        monitor.on_message(callback)
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-A"}}
+
+        # First poll: assigns session, queues pending warn.
+        await monitor._poll_once()
+        assert "ch1" in monitor._pending_warn
+
+        # Force the pending entry to look 5 minutes old AND already on its
+        # final attempt — without the gate this would emit a warning.
+        monitor._pending_warn["ch1"] = ("sess-A", "/tmp/proj", time.time() - 300, 2)
+
+        # Poll repeatedly — should never fire because first_interaction_at is
+        # still None.  Entry stays queued (no attempt expiration either).
+        for _ in range(5):
+            await monitor._poll_once()
+        callback.assert_not_called()
+        assert "ch1" in monitor._pending_warn
+
+    @pytest.mark.asyncio
+    async def test_a_prime_late_interaction_no_warning_if_jsonl_arrives(self, tmp_path):
+        """A': idle then late message — if jsonl shows up within grace, no warn."""
+        projects = tmp_path / "projects"
+        project_dir = projects / "-tmp-proj"
+        project_dir.mkdir(parents=True)
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/proj")
+        binding.window_id = "@1"
+        binding.first_interaction_at = None
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr, poll_interval=0.05, projects_path=projects
+        )
+        monitor.on_message(callback)
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-Aprime"}}
+
+        await monitor._poll_once()  # queues pending_warn
+
+        # Simulate 5 idle minutes, then user types — first_interaction_at set
+        # NOW, so anchor slides to now and the 45s window starts fresh.
+        binding.first_interaction_at = time.time()
+
+        # Within that fresh window the jsonl appears (claude flushed it).
+        jsonl = project_dir / "sess-Aprime.jsonl"
+        jsonl.write_text("")
+
+        # Even if we force the entry onto its final attempt, the file-exists
+        # short-circuit must skip the warning.
+        monitor._pending_warn["ch1"] = (
+            "sess-Aprime", "/tmp/proj", time.time() - 300, 2,
+        )
+        # Anchor for due-check uses max(assigned_at, first_int) — bump first_int
+        # backwards so the entry is due, then verify the file-exists path wins.
+        binding.first_interaction_at = time.time() - 50
+
+        await monitor._poll_once()
+        callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_b_immediate_interaction_with_jsonl_no_warning(self, tmp_path):
+        """B: bind + immediate message, jsonl present from the start → no warn."""
+        projects = tmp_path / "projects"
+        project_dir = projects / "-tmp-proj"
+        project_dir.mkdir(parents=True)
+        jsonl = project_dir / "sess-B.jsonl"
+        jsonl.write_text("")
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/proj")
+        binding.window_id = "@1"
+        binding.first_interaction_at = time.time()
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr, poll_interval=0.05, projects_path=projects
+        )
+        monitor.on_message(callback)
+        monitor._read_session_map = lambda: {"gits:@1": {"session_id": "sess-B"}}
+
+        # Poll a few times — file is present so even though pending_warn is
+        # queued briefly, the file-exists short-circuit must skip the warning.
+        await monitor._poll_once()
+        # Speed up: pretend it's the final attempt and time has elapsed.
+        if "ch1" in monitor._pending_warn:
+            monitor._pending_warn["ch1"] = (
+                "sess-B", "/tmp/proj", time.time() - 50, 2,
+            )
+        await monitor._poll_once()
+        callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_anchor_uses_max_of_assigned_and_first_interaction(self, tmp_path):
+        """Anchor = max(assigned_at, first_interaction_at).
+
+        When user interacted long before session was assigned (e.g. across a
+        session_switch), the wait counts from assigned_at, not from the older
+        first_interaction_at — otherwise switches would fire instantly.
+        """
+        projects = tmp_path / "projects"
+        projects.mkdir()
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id="sess-old", work_dir="/tmp/proj")
+        binding.window_id = "@1"
+        # User interacted ages ago, then session_switch just happened.
+        binding.first_interaction_at = time.time() - 3600
+        session_mgr.list_bindings.return_value = [binding]
+
+        callback = AsyncMock()
+        monitor = JsonlMonitor(
+            session_mgr=session_mgr, poll_interval=0.05, projects_path=projects
+        )
+        monitor.on_message(callback)
+
+        # Entry assigned 5 s ago, only on first attempt → anchor=assigned_at,
+        # 5 s elapsed < 15 s threshold → NOT due, no warning yet.
+        monitor._pending_warn["ch1"] = (
+            "sess-old", "/tmp/proj", time.time() - 5, 0,
+        )
+        monitor._read_session_map = lambda: {}
+        await monitor._poll_once()
+        callback.assert_not_called()
+        assert "ch1" in monitor._pending_warn
 
 
 class TestSuspendedBindingSkipped:

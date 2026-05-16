@@ -343,6 +343,10 @@ class Engine:
                     await self._resume_suspended(binding)
 
             await self.session_mgr.touch_active(msg.channel_id)
+            # Mark before forwarding so JsonlMonitor's missing-session warning
+            # gate opens for this binding (claude doesn't flush its jsonl until
+            # the user actually interacts — any earlier alarm is a race).
+            await self.session_mgr.mark_first_interaction(msg.channel_id)
 
             submit = _submit_keys_for_cli(binding.coding_cli)
 
@@ -2046,6 +2050,9 @@ class Engine:
         command = f"/{command}"
 
         submit = _submit_keys_for_cli(binding.coding_cli)
+        # A slash-command forward also counts as a user interaction with the
+        # pane — opens JsonlMonitor's missing-session warning gate.
+        await self.session_mgr.mark_first_interaction(channel_id)
         await self.tmux.send_text(binding.window_id, command, submit_keys=submit)
         await self._reply(interaction, f"Forwarded: `{command}`")
 

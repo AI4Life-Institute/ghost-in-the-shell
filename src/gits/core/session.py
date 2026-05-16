@@ -39,6 +39,12 @@ class SessionBinding:
     # Set when a per-binding switch_account abort/respawn failure leaves the
     # binding in an unrecoverable state. Surfaced in ``gits account list``.
     respawn_failed: bool = False
+    # Timestamp (epoch seconds) of the first non-empty user forward to this
+    # binding's tmux pane.  Transient (not persisted to state.json) — used by
+    # JsonlMonitor to gate the "session not found" warning until the user has
+    # actually interacted (claude does not flush its <sid>.jsonl until then,
+    # so any earlier alarm is a false positive).
+    first_interaction_at: float | None = None
 
 
 def _binding_to_dict(b: SessionBinding) -> dict:
@@ -53,6 +59,8 @@ def _binding_to_dict(b: SessionBinding) -> dict:
         data.pop("claude_account", None)
     if data.get("respawn_failed") is False:
         data.pop("respawn_failed", None)
+    # first_interaction_at is a transient in-memory signal — never persist it.
+    data.pop("first_interaction_at", None)
     return data
 
 
@@ -196,6 +204,18 @@ class SessionManager:
             binding.last_active_at = time.time()
             binding.suspended = False
             await self._save()
+
+    async def mark_first_interaction(self, channel_id: str) -> None:
+        """Record the first non-empty user forward to this binding's pane.
+
+        Idempotent: only writes when currently unset.  Transient (in-memory
+        only) — never persisted to ``state.json``.  Read by JsonlMonitor to
+        gate the "session not found" warning, since claude does not flush its
+        ``<sid>.jsonl`` until the user actually interacts.
+        """
+        binding = self._bindings.get(channel_id)
+        if binding is not None and binding.first_interaction_at is None:
+            binding.first_interaction_at = time.time()
 
     async def mark_suspended(self, channel_id: str) -> None:
         """Mark a binding as suspended (claude process killed)."""
