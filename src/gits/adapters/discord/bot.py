@@ -576,36 +576,52 @@ class DiscordAdapter(PlatformAdapter):
     async def _handle_thread_create(self, thread: discord.Thread) -> None:
         """Handle a new thread being created in a bound channel.
 
-        If the parent channel has an active binding and this thread
-        was NOT created by the bot itself, auto-create a child session.
+        Auto-create a child session when the parent channel has an
+        active binding and the thread originated from a user (or a
+        butler-dispatched message — see exception below).
+
+        Bot-created threads are normally ignored to avoid double-handling
+        with ``/thread`` and ``/fork`` slash commands. Exception: when
+        butler dispatches a task via the REST API it uses this bot's
+        identity, so the thread's ``owner_id`` IS the bot — but the
+        starter message carries the ``[butler|管家|vault[:user]]`` prefix
+        that ``_VAULT_DISPATCH_RE`` recognizes. Those opt back in to the
+        auto-bind path so the dispatched task lands in a live session.
         """
         if not self._engine:
-            return
-
-        # Ignore threads created by the bot (e.g. from /thread or /fork)
-        if thread.owner_id == self.bot.user.id:
-            return
-
-        # Check access
-        guild_id = thread.guild.id if thread.guild else None
-        if thread.owner_id and not self._check_access(thread.owner_id, guild_id):
             return
 
         parent_id = str(thread.parent_id) if thread.parent_id else None
         if not parent_id:
             return
 
-        # Get starter message
+        # Fetch starter message early so we can tell butler dispatches
+        # apart from /thread, /fork, and any other future bot-created
+        # threads. Empty string on miss — that's still "not butler".
         starter_message = ""
         try:
             if thread.starter_message:
                 starter_message = thread.starter_message.content or ""
             else:
-                # Fetch it
                 starter = await thread.fetch_message(thread.id)
                 starter_message = starter.content or ""
         except Exception:
             logger.debug("Could not fetch starter message for thread %s", thread.id)
+
+        # Bot-created thread: only proceed when the starter message is a
+        # butler-prefix dispatch. /thread and /fork don't carry the prefix,
+        # so they still skip (their own flow handles session creation).
+        if thread.owner_id == self.bot.user.id:
+            if not _VAULT_DISPATCH_RE.match(starter_message):
+                return
+
+        # Access check (skip for bot-owned butler dispatches — the
+        # author identity is the bot, which always has access to its
+        # own channels).
+        if thread.owner_id != self.bot.user.id:
+            guild_id = thread.guild.id if thread.guild else None
+            if thread.owner_id and not self._check_access(thread.owner_id, guild_id):
+                return
 
         try:
             await self._engine.handle_thread_auto(
