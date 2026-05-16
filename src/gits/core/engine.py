@@ -1310,10 +1310,10 @@ class Engine:
         await self.tmux.kill_window(binding.window_id)
         await self.session_mgr.unbind(channel_id)
 
-        # Remove worktree if requested
-        if remove_worktree or await asyncio.to_thread(
-            _is_worktree, binding.work_dir
-        ):
+        # Remove worktree only when the caller explicitly asks. Do NOT auto-remove
+        # just because work_dir happens to be a worktree — that silently destroyed
+        # user-owned worktrees on thread archive (see task [[23do0p]]).
+        if remove_worktree:
             await asyncio.to_thread(_remove_worktree, binding.work_dir)
 
         # Archive thread

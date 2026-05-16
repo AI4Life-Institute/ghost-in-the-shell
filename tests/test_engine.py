@@ -1063,6 +1063,98 @@ class TestHandleDoneWithChildren:
 
 
 # ------------------------------------------------------------------
+# Regression: _kill_single must respect remove_worktree (task 23do0p)
+# ------------------------------------------------------------------
+
+
+def _make_repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a real git repo + a worktree off it. Returns (repo, worktree)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--allow-empty", "-m", "init"],
+        capture_output=True,
+        check=True,
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-b", "wt-branch", str(wt)],
+        capture_output=True,
+        check=True,
+    )
+    return repo, wt
+
+
+class TestKillSingleWorktreeGate:
+    """`_kill_single` must only delete the bound worktree when the caller
+    explicitly passes `remove_worktree=True`. The previous OR-with-_is_worktree
+    silently destroyed user worktrees on thread archive — see task 23do0p."""
+
+    def test_kill_single_default_preserves_worktree(self, engine, tmp_path):
+        """Regression: archive-path call (no kwargs) must NOT delete the worktree."""
+        async def _test():
+            _, wt = _make_repo_with_worktree(tmp_path)
+            assert _is_worktree(str(wt))  # sanity: it really is a worktree
+
+            await engine.session_mgr.bind(
+                platform="discord",
+                channel_id="ch-archive",
+                window_id="@1",
+                window_name="archived",
+                work_dir=str(wt),
+                coding_cli="claude",
+            )
+
+            await engine._kill_single("ch-archive")
+
+            assert wt.exists(), "worktree was deleted despite remove_worktree=False default"
+            assert engine.session_mgr.get_binding("ch-archive") is None
+
+        asyncio.run(_test())
+
+    def test_kill_single_remove_false_preserves_worktree(self, engine, tmp_path):
+        """Explicit remove_worktree=False must also preserve the worktree."""
+        async def _test():
+            _, wt = _make_repo_with_worktree(tmp_path)
+
+            await engine.session_mgr.bind(
+                platform="discord",
+                channel_id="ch-explicit",
+                window_id="@1",
+                window_name="explicit",
+                work_dir=str(wt),
+                coding_cli="claude",
+            )
+
+            await engine._kill_single("ch-explicit", remove_worktree=False)
+
+            assert wt.exists()
+
+        asyncio.run(_test())
+
+    def test_kill_single_remove_true_deletes_worktree(self, engine, tmp_path):
+        """remove_worktree=True (the /done + kill_wt_yes path) still deletes."""
+        async def _test():
+            _, wt = _make_repo_with_worktree(tmp_path)
+
+            await engine.session_mgr.bind(
+                platform="discord",
+                channel_id="ch-done",
+                window_id="@1",
+                window_name="done",
+                work_dir=str(wt),
+                coding_cli="claude",
+            )
+
+            await engine._kill_single("ch-done", remove_worktree=True)
+
+            assert not wt.exists(), "remove_worktree=True should have deleted the worktree"
+
+        asyncio.run(_test())
+
+
+# ------------------------------------------------------------------
 # E2E tests — full flow with mocked adapter + tmux
 # ------------------------------------------------------------------
 
