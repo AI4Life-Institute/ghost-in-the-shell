@@ -234,11 +234,24 @@ Beyond the slash commands you send from chat, Ghost ships two local CLI groups f
 
 > **Migration note.** The standalone `butler` CLI installed by older versions (a symlink at `~/.local/bin/butler`) still works and produces identical output to `ghost butler`. Prefer the new `ghost butler <verb>` form for new scripts — the legacy symlink will be retired eventually.
 
+### Bundled Claude Code skills
+
+The repo ships two Claude Code skills under [`skills/`](skills/) that describe when each of the above CLI groups should be reached for and the gotchas around them:
+
+| Skill | Path | When it triggers |
+|---|---|---|
+| `butler` | [`skills/butler/SKILL.md`](skills/butler/SKILL.md) | Sending messages via `ghost butler`, reading threads, binding the worktree's home channel, or dispatching a project task (vault-aware orchestrator that creates a thread, posts `/bind` + a pointer, and atomically writes thread metadata back into the task page's frontmatter) |
+| `onboard-worktree` | [`skills/onboard-worktree/SKILL.md`](skills/onboard-worktree/SKILL.md) | Onboarding a new contributor end-to-end: worktree + Discord channel + butler home binding + ghost `/bind` |
+
+Each skill follows Claude Code's `<name>/SKILL.md` folder-per-skill convention. `uv tool install ghost` copies both into `~/.claude/skills/` so Claude Code auto-discovers them in any project on this machine.
+
 ---
 
 ## Docs
 
 See [docs/architecture.md](docs/architecture.md) for architecture, internals, and configuration reference.
+
+Using ghost as a PM tool: [role](docs/role.md) · [task schema](docs/task-schema.md) · [dispatch lifecycle](docs/dispatch-lifecycle.md).
 
 ---
 

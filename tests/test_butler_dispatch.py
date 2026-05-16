@@ -1,0 +1,496 @@
+"""Unit tests for ``ghost butler dispatch`` — vault-aware task dispatcher.
+
+Coverage (per task u78tma Acceptance #5):
+  - task-ref resolution: id-match, fuzzy-match, no-match, multi-match
+  - frontmatter validation: missing personas, wrong status, missing .butler.json
+  - atomic writeback (mock fs failure)
+  - rollback (mock thread-create success + send failure → expect thread archived)
+  - lint pass/fail
+
+Every Discord REST call is mocked via ``api()``. No network.
+"""
+
+from __future__ import annotations
+
+import os
+from unittest.mock import patch
+
+import pytest
+
+from gits.butler import butler_cli, dispatch_task
+
+
+@pytest.fixture(autouse=True)
+def _no_real_http(monkeypatch):
+    """Belt-and-suspenders: any unmocked api() call MUST fail loudly rather
+    than hitting Discord. Each test that exercises REST must patch api()
+    on BOTH ``dispatch_task`` and ``butler_cli`` modules (they each did
+    ``from .http import api``, so each holds its own binding)."""
+    def boom(*a, **kw):
+        raise RuntimeError(
+            f"unmocked api() call leaked through: {a!r} {kw!r}"
+        )
+    monkeypatch.setattr(dispatch_task, "api", boom)
+    monkeypatch.setattr(butler_cli, "api", boom)
+
+
+def _install_recorder(monkeypatch, rest):
+    """Bind the same recorder onto both modules' ``api`` references."""
+    monkeypatch.setattr(dispatch_task, "api", rest)
+    monkeypatch.setattr(butler_cli, "api", rest)
+
+
+# ---------------------------------------------------------------------------
+# Vault fixture: a temp dir that *looks* like a vault — has Projects/ tree,
+# a project README with local_path, and a .butler.json at the toplevel.
+# ---------------------------------------------------------------------------
+
+
+def _make_task_file(
+    tmp_path,
+    *,
+    fname: str,
+    tid: str,
+    project: str = "TestProj",
+    status: str = "draft",
+    personas: str = "[senior engineer]",
+    extra: str = "",
+) -> str:
+    """Create a task .md with the standard frontmatter; return absolute path."""
+    proj_tasks = tmp_path / "Projects" / project / "tasks" / "area" / "2026-05"
+    proj_tasks.mkdir(parents=True, exist_ok=True)
+    path = proj_tasks / fname
+    body = f"""---
+id: {tid}
+project: {project}
+status: {status}
+personas: {personas}
+{extra}---
+
+# Body
+
+stuff
+"""
+    path.write_text(body)
+    return str(path)
+
+
+@pytest.fixture
+def vault(tmp_path, monkeypatch):
+    """A vault-shaped tmp dir. monkeypatches ``identity.run_git`` and
+    ``identity.load_binding`` so we don't need an actual git repo / file."""
+    (tmp_path / "Projects" / "TestProj").mkdir(parents=True)
+    (tmp_path / "Projects" / "TestProj" / "README.md").write_text(
+        "local_path: /tmp/test-proj-work-dir\n"
+    )
+
+    # Pretend git toplevel resolves to tmp_path.
+    # identity.run_git is the shared shim — also called by send_decorated →
+    # resolve_user → detect_worktree_user, so the lambda has to handle the
+    # branch/show-toplevel calls too. Return a /work-suffixed branch so the
+    # worktree-user resolver yields a name (otherwise send_decorated halts).
+    def fake_git(*args, cwd=None):
+        if "--show-toplevel" in args:
+            return str(tmp_path)
+        if "--abbrev-ref" in args:
+            return "test/work"
+        return None
+
+    monkeypatch.setattr(dispatch_task.identity, "run_git", fake_git)
+    # Pretend .butler.json says channel/guild
+    monkeypatch.setattr(
+        dispatch_task.identity, "load_binding",
+        lambda cwd=None: {"channel_id": "CHAN123", "guild_id": "GUILD999"},
+    )
+    return tmp_path
+
+
+# ---------------------------------------------------------------------------
+# Task-ref resolution (Acceptance #5)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_task_file_by_id_match(vault):
+    p = _make_task_file(vault, fname="2026-05-16 abc123 the title.md", tid="abc123")
+    assert dispatch_task.resolve_task_file("abc123", str(vault)) == p
+
+
+def test_resolve_task_file_by_fuzzy_filename_match(vault):
+    p = _make_task_file(vault, fname="2026-05-16 xyz789 do the thing.md", tid="xyz789")
+    assert dispatch_task.resolve_task_file("do the thing", str(vault)) == p
+
+
+def test_resolve_task_file_no_match_halts(vault):
+    _make_task_file(vault, fname="2026-05-16 abc123 t.md", tid="abc123")
+    with pytest.raises(SystemExit) as exc:
+        dispatch_task.resolve_task_file("nomatch", str(vault))
+    assert "no task file matches" in str(exc.value)
+
+
+def test_resolve_task_file_multi_match_halts(vault):
+    _make_task_file(vault, fname="2026-05-16 aaa111 alpha.md", tid="aaa111")
+    _make_task_file(vault, fname="2026-05-16 bbb222 alpha redux.md", tid="bbb222")
+    with pytest.raises(SystemExit) as exc:
+        dispatch_task.resolve_task_file("alpha", str(vault))
+    assert "2 files match" in str(exc.value)
+
+
+def test_resolve_task_file_id_match_does_not_collide_on_substring(vault):
+    """A 6-char id needle requires word-boundaries (` abc123 `), so a longer
+    filename id containing the substring must NOT match."""
+    _make_task_file(vault, fname="2026-05-16 abc123x other.md", tid="abc123x")
+    with pytest.raises(SystemExit) as exc:
+        dispatch_task.resolve_task_file("abc123", str(vault))
+    assert "no task file matches" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Frontmatter validation (Acceptance #5)
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_rejects_non_draft_status():
+    with patch.object(dispatch_task, "api", return_value=(200, {"id": "bot"})):
+        with pytest.raises(SystemExit) as exc:
+            dispatch_task.preflight({"status": "dispatched", "personas": "[a]"})
+    assert "status is" in str(exc.value) and "refusing" in str(exc.value)
+
+
+def test_preflight_rejects_empty_personas():
+    with patch.object(dispatch_task, "api", return_value=(200, {"id": "bot"})):
+        with pytest.raises(SystemExit) as exc:
+            dispatch_task.preflight({"status": "draft", "personas": ""})
+    assert "personas" in str(exc.value)
+
+
+def test_preflight_rejects_literal_empty_list_personas():
+    with patch.object(dispatch_task, "api", return_value=(200, {"id": "bot"})):
+        with pytest.raises(SystemExit) as exc:
+            dispatch_task.preflight({"status": "draft", "personas": "[]"})
+    assert "personas" in str(exc.value)
+
+
+def test_preflight_passes_with_draft_status_and_personas():
+    with patch.object(dispatch_task, "api", return_value=(200, {"id": "bot"})):
+        dispatch_task.preflight({"status": "draft", "personas": "[a, b]"})
+
+
+def test_read_home_channel_halts_when_butler_json_missing(monkeypatch):
+    """If .butler.json is missing/empty, ``read_home_channel`` halts pointing
+    at ``ghost butler bind``."""
+    monkeypatch.setattr(
+        dispatch_task.identity, "load_binding", lambda cwd=None: {}
+    )
+    with pytest.raises(SystemExit) as exc:
+        dispatch_task.read_home_channel()
+    assert "no home channel bound" in str(exc.value)
+
+
+def test_read_home_channel_halts_when_guild_id_missing(monkeypatch):
+    monkeypatch.setattr(
+        dispatch_task.identity, "load_binding",
+        lambda cwd=None: {"channel_id": "X"},  # no guild_id
+    )
+    with pytest.raises(SystemExit):
+        dispatch_task.read_home_channel()
+
+
+# ---------------------------------------------------------------------------
+# Atomic writeback (Acceptance #5)
+# ---------------------------------------------------------------------------
+
+
+def test_writeback_updates_existing_fields_and_inserts_missing(tmp_path):
+    p = tmp_path / "task.md"
+    p.write_text("---\nid: t1\nstatus: draft\n---\n\nbody\n")
+    dispatch_task.writeback_frontmatter_atomic(
+        str(p), {"status": "dispatched", "dispatched": "2026-05-16"},
+    )
+    text = p.read_text()
+    assert "status: dispatched\n" in text
+    assert "dispatched: 2026-05-16\n" in text
+    assert "id: t1\n" in text  # existing untouched fields preserved
+    assert text.endswith("\nbody\n")  # body preserved
+
+
+def test_writeback_body_preserved_byte_for_byte(tmp_path):
+    p = tmp_path / "task.md"
+    body = "---\nx: y\n---\n\n# h\n\n- bullet\n```\ncode\n```\n"
+    p.write_text(body)
+    dispatch_task.writeback_frontmatter_atomic(str(p), {"x": "z"})
+    text = p.read_text()
+    assert text.endswith("---\n\n# h\n\n- bullet\n```\ncode\n```\n")
+
+
+def test_writeback_atomic_failure_leaves_original_untouched(tmp_path, monkeypatch):
+    """If os.rename fails, the original file must be unchanged."""
+    p = tmp_path / "task.md"
+    orig = "---\nstatus: draft\n---\n\nbody\n"
+    p.write_text(orig)
+
+    def boom(src, dst):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(dispatch_task.os, "rename", boom)
+    with pytest.raises(OSError):
+        dispatch_task.writeback_frontmatter_atomic(
+            str(p), {"status": "dispatched"}
+        )
+    assert p.read_text() == orig
+
+
+def test_writeback_no_frontmatter_raises(tmp_path):
+    p = tmp_path / "task.md"
+    p.write_text("no frontmatter here\n")
+    with pytest.raises(ValueError, match="no YAML frontmatter"):
+        dispatch_task.writeback_frontmatter_atomic(str(p), {"x": "y"})
+
+
+# ---------------------------------------------------------------------------
+# Rollback (Acceptance #5)
+# ---------------------------------------------------------------------------
+
+
+class _RestRecorder:
+    """Records (path, method, body) tuples for inspection."""
+
+    def __init__(self, responses):
+        self.calls = []
+        self._responses = list(responses)
+
+    def __call__(self, path, method="GET", body=None, query=None):
+        self.calls.append((path, method, body, query))
+        if self._responses:
+            return self._responses.pop(0)
+        return (200, {})
+
+    def archived_thread_ids(self):
+        return [
+            c[0].split("/")[-1] for c in self.calls
+            if c[1] == "PATCH" and isinstance(c[2], dict) and c[2].get("archived")
+        ]
+
+
+def _full_task(vault) -> str:
+    """A task with all required fields, ready to dispatch."""
+    return _make_task_file(
+        vault,
+        fname="2026-05-16 abc123 the title.md",
+        tid="abc123",
+    )
+
+
+def test_rollback_archives_thread_when_pointer_send_fails(vault, monkeypatch):
+    """Thread-create succeeds; /bind succeeds; pointer send returns no msg id.
+    Expect: thread archived; dispatch exits non-zero; frontmatter unchanged."""
+    task_path = _full_task(vault)
+    orig = open(task_path).read()
+
+    rest = _RestRecorder([
+        (200, {"id": "bot"}),                    # preflight /users/@me
+        (201, {"id": "123456789012345678", "name": "x"}),   # POST /channels/CHAN/threads
+        (201, {"id": "MID-BIND"}),               # POST /channels/123456789012345678/messages (/bind)
+        (500, "boom"),                           # POST /channels/123456789012345678/messages (pointer) — FAIL
+        (200, {"id": "123456789012345678"}),                # PATCH archive
+    ])
+    _install_recorder(monkeypatch, rest)
+
+    with pytest.raises(SystemExit) as exc:
+        dispatch_task.dispatch_task("abc123", "plan", cwd=str(vault))
+    assert "pointer" in str(exc.value).lower()
+    # The thread we just created must have been archived
+    assert "123456789012345678" in rest.archived_thread_ids()
+    # Frontmatter untouched
+    assert open(task_path).read() == orig
+
+
+def test_rollback_archives_thread_when_bind_send_fails(vault, monkeypatch):
+    """Thread-create succeeds; /bind send fails. Expect: archived."""
+    task_path = _full_task(vault)
+    orig = open(task_path).read()
+
+    rest = _RestRecorder([
+        (200, {"id": "bot"}),
+        (201, {"id": "123456789012345678", "name": "x"}),
+        (500, "bind boom"),
+        (200, {"id": "123456789012345678"}),                # archive
+    ])
+    _install_recorder(monkeypatch, rest)
+
+    with pytest.raises(SystemExit):
+        dispatch_task.dispatch_task("abc123", "plan", cwd=str(vault))
+    assert "123456789012345678" in rest.archived_thread_ids()
+    assert open(task_path).read() == orig
+
+
+def test_rollback_archives_thread_when_writeback_fails(vault, monkeypatch):
+    """Thread + /bind + pointer all succeed; writeback raises.
+    Expect: thread archived; exit non-zero."""
+    task_path = _full_task(vault)
+    orig = open(task_path).read()
+
+    rest = _RestRecorder([
+        (200, {"id": "bot"}),
+        (201, {"id": "123456789012345678", "name": "x"}),
+        (201, {"id": "MID-BIND"}),
+        (201, {"id": "MID-POINTER"}),
+        (200, {"id": "123456789012345678"}),                # archive
+    ])
+    _install_recorder(monkeypatch, rest)
+
+    def boom(*a, **kw):
+        raise OSError("writeback simulated failure")
+
+    monkeypatch.setattr(dispatch_task, "writeback_frontmatter_atomic", boom)
+    # Speed up the sleep between bind + pointer
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+
+    with pytest.raises(SystemExit) as exc:
+        dispatch_task.dispatch_task("abc123", "plan", cwd=str(vault))
+    assert "writeback" in str(exc.value)
+    assert "123456789012345678" in rest.archived_thread_ids()
+    assert open(task_path).read() == orig
+
+
+def test_happy_path_writes_all_four_frontmatter_fields(vault, monkeypatch):
+    task_path = _full_task(vault)
+    rest = _RestRecorder([
+        (200, {"id": "bot"}),
+        (201, {"id": "123456789012345678", "name": "x"}),
+        (201, {"id": "MID-BIND"}),
+        (201, {"id": "MID-POINTER"}),
+        # lint: read-back returns 2 messages (passes)
+        (200, [{"id": "MID-BIND"}, {"id": "MID-POINTER"}]),
+    ])
+    _install_recorder(monkeypatch, rest)
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+
+    dispatch_task.dispatch_task("abc123", "plan", cwd=str(vault))
+    fm = dispatch_task.parse_frontmatter(task_path)
+    assert fm["thread"].startswith("[the title](https://discord.com/channels/GUILD999/123456789012345678)")
+    assert fm["dispatch_msg_id"] == "MID-POINTER"
+    assert fm["status"] == "dispatched (plan-phase)"
+    assert fm["dispatched"]  # today's date — don't pin
+
+
+def test_impl_phase_writes_dispatched_status(vault, monkeypatch):
+    task_path = _full_task(vault)
+    rest = _RestRecorder([
+        (200, {"id": "bot"}),
+        (201, {"id": "123456789012345678", "name": "x"}),
+        (201, {"id": "MID-BIND"}),
+        (201, {"id": "MID-POINTER"}),
+        (200, [{"id": "MID-BIND"}, {"id": "MID-POINTER"}]),
+    ])
+    _install_recorder(monkeypatch, rest)
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+
+    dispatch_task.dispatch_task("abc123", "impl", cwd=str(vault))
+    fm = dispatch_task.parse_frontmatter(task_path)
+    assert fm["status"] == "dispatched"  # no "(plan-phase)" suffix
+
+
+# ---------------------------------------------------------------------------
+# Lint pass/fail (Acceptance #5)
+# ---------------------------------------------------------------------------
+
+
+def test_lint_passes_when_all_fields_present_and_thread_readable(tmp_path, monkeypatch):
+    p = tmp_path / "task.md"
+    p.write_text(
+        "---\n"
+        "status: dispatched (plan-phase)\n"
+        'thread: "[t](https://discord.com/channels/G/123456789012345678)"\n'
+        "dispatched: 2026-05-16\n"
+        "dispatch_msg_id: MID-POINTER\n"
+        "---\n\nbody\n"
+    )
+    rest = _RestRecorder([(200, [{"id": "a"}, {"id": "b"}])])
+    _install_recorder(monkeypatch, rest)
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+
+    failures = dispatch_task.lint(
+        str(p), "123456789012345678", "dispatched (plan-phase)",
+    )
+    assert failures == []
+
+
+def test_lint_flags_missing_frontmatter_fields(tmp_path, monkeypatch):
+    p = tmp_path / "task.md"
+    p.write_text(
+        "---\nstatus: dispatched (plan-phase)\n---\n\nbody\n"
+    )
+    monkeypatch.setattr(
+        dispatch_task, "api", lambda *a, **kw: (200, [{"id": "a"}, {"id": "b"}]),
+    )
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+    failures = dispatch_task.lint(str(p), "TID", "dispatched (plan-phase)")
+    msgs = " | ".join(failures)
+    assert "thread" in msgs and "dispatched" in msgs and "dispatch_msg_id" in msgs
+
+
+def test_lint_flags_wrong_status(tmp_path, monkeypatch):
+    p = tmp_path / "task.md"
+    p.write_text(
+        "---\n"
+        "status: draft\n"
+        'thread: "[t](https://discord.com/channels/G/111111111111111111)"\n'
+        "dispatched: 2026-05-16\n"
+        "dispatch_msg_id: MID\n"
+        "---\n\nbody\n"
+    )
+    monkeypatch.setattr(
+        dispatch_task, "api", lambda *a, **kw: (200, [{"id": "a"}, {"id": "b"}]),
+    )
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+    failures = dispatch_task.lint(str(p), "111111111111111111", "dispatched")
+    assert any("status" in f for f in failures)
+
+
+def test_lint_flags_thread_message_undercount(tmp_path, monkeypatch):
+    """If read-back returns <2 messages even after retry, lint fails."""
+    p = tmp_path / "task.md"
+    p.write_text(
+        "---\n"
+        "status: dispatched\n"
+        'thread: "[t](https://discord.com/channels/G/123456789012345678)"\n'
+        "dispatched: 2026-05-16\n"
+        "dispatch_msg_id: MID\n"
+        "---\n\nbody\n"
+    )
+    # Always returns 0 messages
+    monkeypatch.setattr(dispatch_task, "api", lambda *a, **kw: (200, []))
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+    # Fast-forward time so the deadline expires immediately
+    times = iter([0.0, 100.0])
+    monkeypatch.setattr(dispatch_task.time, "time", lambda: next(times))
+
+    failures = dispatch_task.lint(str(p), "123456789012345678", "dispatched")
+    assert any("read-back" in f for f in failures)
+
+
+# ---------------------------------------------------------------------------
+# Pointer message assembly — preserves the vault-original format
+# ---------------------------------------------------------------------------
+
+
+def test_pointer_message_includes_personas_and_phase_plan():
+    msg = dispatch_task.build_pointer_message(
+        {"id": "abc123", "personas": "[architect, reviewer]"},
+        "/tmp/2026-05-16 abc123 do the thing.md",
+        "plan",
+    )
+    assert "**a architect**" in msg and "**a reviewer**" in msg
+    assert "[[abc123]]" in msg
+    assert "do the thing" in msg
+    assert "plan first" in msg.lower()
+
+
+def test_pointer_message_impl_phase_uses_impl_tail():
+    msg = dispatch_task.build_pointer_message(
+        {"id": "abc123", "personas": "[a]"},
+        "/tmp/2026-05-16 abc123 t.md",
+        "impl",
+    )
+    assert "Plan approved" in msg
+    assert "plan first" not in msg.lower()

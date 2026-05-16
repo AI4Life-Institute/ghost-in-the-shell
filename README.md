@@ -313,11 +313,24 @@ rm -rf ~/.gits/accounts/
 
 > **迁移说明**：旧版本安装的独立 `butler` CLI（在 `~/.local/bin/butler` 的 symlink）仍然可用，输出和 `ghost butler` 完全一致。新脚本请用 `ghost butler <verb>` 这个写法；老的 symlink 后续会逐步下线。
 
+### 随附的 Claude Code skills
+
+仓库的 [`skills/`](skills/) 目录下打包了两个 Claude Code skill，描述上面这两组 CLI 在什么场景下该被调用、有哪些坑：
+
+| Skill | 路径 | 触发场景 |
+|---|---|---|
+| `butler` | [`skills/butler/SKILL.md`](skills/butler/SKILL.md) | 用 `ghost butler` 发消息、读 thread、绑定 home channel，或派任务（vault-aware orchestrator：建 thread、发 `/bind` + 指针消息、原子地把 thread 元数据写回 task page 的 frontmatter） |
+| `onboard-worktree` | [`skills/onboard-worktree/SKILL.md`](skills/onboard-worktree/SKILL.md) | 给新贡献者一站式开通 worktree + Discord 频道 + butler 绑定 + ghost `/bind` |
+
+每个 skill 是 `<name>/SKILL.md` 的文件夹形式（Claude Code 约定）。`uv tool install ghost` 时会顺手把这两份 skill 复制到 `~/.claude/skills/`，全局可用——这样 Claude Code 在任何项目下都能在合适的时机自动触发它们。
+
 ---
 
 ## 文档
 
 架构说明、内部机制和配置参考见 [docs/architecture.md](docs/architecture.md)。
+
+把 ghost 当作 PM 工具来用：[role](docs/role.md) · [task schema](docs/task-schema.md) · [dispatch lifecycle](docs/dispatch-lifecycle.md)。
 
 ---
 

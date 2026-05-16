@@ -136,22 +136,30 @@ def cmd_config_onboarding(args: argparse.Namespace) -> None:
     print(f"  channel_name_template: {cfg['channel_name_template']}")
 
 
-def cmd_send(args: argparse.Namespace) -> None:
-    """Send with butler prefix decoration; defaults to bound home channel.
+def send_decorated(
+    target_id: str,
+    content: str,
+    *,
+    user: str | None = None,
+    prefix: str | None = None,
+    raw: bool = False,
+    cwd: str | None = None,
+) -> str:
+    """Send a butler-decorated message; return new message id.
 
-    Auto-prefixes so the gateway bot's _handle_message recognizes this as
-    vault-dispatched (otherwise it'd be silently dropped under the
-    "ignore my own bot's messages" rule).
+    Shared between :func:`cmd_send` and the dispatch orchestrator
+    (:mod:`gits.butler.dispatch_task`). Decoration matches what the gateway
+    bot's ``_handle_message`` recognizes — without it, vault-dispatched
+    messages get dropped by the "ignore my own bot's messages" rule.
+
+    Exits via :func:`die` on REST failure.
     """
-    cwd = os.getcwd()
-    target_id = args.target_id or identity.require_home_channel("send", cwd=cwd)
-    content = args.content
-    if content == "-":
-        content = sys.stdin.read()
-    if not args.raw and not VAULT_DISPATCH_RE.match(content):
-        label = args.prefix or os.environ.get("BUTLER_PREFIX", LABEL_DEFAULT)
-        user = _resolve_or_refuse(args.user)
-        content = decorate(label, user, content)
+    if cwd is None:
+        cwd = os.getcwd()
+    if not raw and not VAULT_DISPATCH_RE.match(content):
+        label = prefix or os.environ.get("BUTLER_PREFIX", LABEL_DEFAULT)
+        resolved_user = _resolve_or_refuse(user)
+        content = decorate(label, resolved_user, content)
     status, resp = api(
         f"/channels/{target_id}/messages",
         method="POST",
@@ -159,61 +167,29 @@ def cmd_send(args: argparse.Namespace) -> None:
     )
     if status not in (200, 201):
         die(status, resp)
-    print(resp["id"])
-    print(f"# sent to {target_id} ({len(content)} chars)", file=sys.stderr)
+    return resp["id"]
+
+
+def cmd_send(args: argparse.Namespace) -> None:
+    """Send with butler prefix decoration; defaults to bound home channel."""
+    cwd = os.getcwd()
+    target_id = args.target_id or identity.require_home_channel("send", cwd=cwd)
+    content = args.content
+    if content == "-":
+        content = sys.stdin.read()
+    mid = send_decorated(
+        target_id, content,
+        user=args.user, prefix=args.prefix, raw=args.raw, cwd=cwd,
+    )
+    print(mid)
+    print(f"# sent to {target_id}", file=sys.stderr)
 
 
 def cmd_dispatch(args: argparse.Namespace) -> None:
-    """Create a thread in home channel + post first message; prints new thread id.
+    """Vault-aware task dispatcher — see :mod:`gits.butler.dispatch_task`."""
+    from . import dispatch_task as _dt
 
-    Stdout = thread id (capture-friendly); stderr = one-line summary.
-    """
-    cwd = os.getcwd()
-    channel_id = args.channel or identity.require_home_channel("dispatch", cwd=cwd)
-
-    # Read content up front so we don't leave an empty thread on failure.
-    if args.file:
-        with open(args.file) as f:
-            content = f.read()
-    else:
-        content = sys.stdin.read()
-    if not content.strip():
-        sys.exit("ghost butler: dispatch content is empty (read from stdin or --file)")
-
-    if not args.raw and not VAULT_DISPATCH_RE.match(content):
-        label = args.prefix or os.environ.get("BUTLER_PREFIX", LABEL_DEFAULT)
-        user = _resolve_or_refuse(args.user)
-        content = decorate(label, user, content)
-
-    # 1. Create thread under (home or overridden) channel
-    status, thread = api(
-        f"/channels/{channel_id}/threads",
-        method="POST",
-        body={
-            "name": args.name,
-            "type": 12 if args.private else 11,
-            "auto_archive_duration": args.auto_archive,
-        },
-    )
-    if status not in (200, 201):
-        die(status, thread)
-    tid = thread["id"]
-
-    # 2. Post the first message
-    status, msg = api(
-        f"/channels/{tid}/messages",
-        method="POST",
-        body={"content": content},
-    )
-    if status not in (200, 201):
-        die(status, msg)
-
-    print(tid)
-    print(
-        f"# dispatched: thread '{args.name}' ({tid}) in channel {channel_id}, "
-        f"first message {msg['id']} ({len(content)} chars)",
-        file=sys.stderr,
-    )
+    _dt.cmd_dispatch(args)
 
 
 def cmd_read_thread(args: argparse.Namespace) -> None:
@@ -296,24 +272,27 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
 
     sp = verbs.add_parser(
         "dispatch",
-        help="Create a thread in home channel + post first message; prints new thread id",
+        help=(
+            "Vault-aware orchestrator: resolve task page by id/fragment, "
+            "create thread with /bind + pointer, atomic frontmatter writeback, "
+            "rollback on failure, lint at end"
+        ),
+        description=(
+            "Vault-aware task dispatcher. Resolves <task-ref> (6-char id or "
+            "filename fragment) under <cwd-git-toplevel>/Projects/, reads task "
+            "frontmatter, validates status=='draft' and personas non-empty, "
+            "creates a thread under this worktree's home channel with /bind as "
+            "the first message and the pointer as the second, writes "
+            "thread/dispatched/dispatch_msg_id/status back atomically, "
+            "rolls back (archives the thread) on any failure between thread "
+            "creation and writeback."
+        ),
     )
-    sp.add_argument("name", help="Thread name")
-    sp.add_argument("--file", help="Read content from this file (default: stdin)")
-    sp.add_argument("--channel", help="Override home channel for this dispatch")
-    sp.add_argument("--private", action="store_true", help="Create private thread")
+    sp.add_argument("task_ref", help="6-char task id or filename fragment")
     sp.add_argument(
-        "--auto-archive", type=int, default=1440,
-        help="Auto-archive minutes (60/1440/4320/10080)",
-    )
-    sp.add_argument("--prefix", help="Tool label in prefix (default: 'butler')")
-    sp.add_argument(
-        "--user", "--as", dest="user",
-        help="User in prefix (defaults to worktree identity)",
-    )
-    sp.add_argument(
-        "--raw", action="store_true",
-        help="Send first message as-is, no auto-prefix",
+        "--phase", choices=("plan", "impl"), default="plan",
+        help="'plan' (default; asks for plan first) or "
+             "'impl' (greenlight, asks for diff)",
     )
     sp.set_defaults(func=cmd_dispatch)
 
