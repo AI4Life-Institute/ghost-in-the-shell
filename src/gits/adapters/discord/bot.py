@@ -355,6 +355,34 @@ class DiscordAdapter(PlatformAdapter):
                 if await self._handle_butler_command(message, channel_id, payload):
                     return
 
+        # Race-recovery for butler-dispatched threads: butler creates the thread
+        # via REST then posts the first message; THREAD_CREATE fires before that
+        # message lands, so `_handle_thread_create` can't see the starter to
+        # decide whether to auto-bind. Catch up here — first butler-prefix
+        # message in a still-unbound thread whose parent IS bound triggers
+        # the same `handle_thread_auto` path.
+        if (
+            vault_match is not None
+            and self._engine
+            and isinstance(message.channel, discord.Thread)
+            and not self._engine.session_mgr.get_binding(channel_id)
+        ):
+            parent_id = (
+                str(message.channel.parent_id) if message.channel.parent_id else None
+            )
+            if parent_id and self._engine.session_mgr.get_binding(parent_id):
+                try:
+                    await self._engine.handle_thread_auto(
+                        thread_id=channel_id,
+                        parent_channel_id=parent_id,
+                        starter_message=message.content or "",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to auto-bind thread %s on first butler message",
+                        channel_id,
+                    )
+
         # Only react and forward if this channel is bound
         is_bound = bool(
             self._engine and self._engine.session_mgr.get_binding(channel_id)
