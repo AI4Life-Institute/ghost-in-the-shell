@@ -114,6 +114,39 @@ Ghost supports two messaging platforms:
 - **Discord** — slash commands (`/bind`, `/info`, `/bash`, etc.) in any channel or thread. Configure with `ghost discord setup` or set `GITS_DISCORD_TOKEN` in `~/.gits/config.env`.
 - **WeChat** — plain-text commands (`/bind`, `/s`, `/bash`, etc.) via WeChat messages. Configure with `ghost wechat` (QR-code login via ilinkai). Both platforms can run simultaneously.
 
+### Local CLI tooling (`ghost butler` + `ghost discord`)
+
+Two subcommand groups scriptable from the terminal (in addition to the chat-side slash commands above):
+
+**`ghost butler <verb>`** — PM-semantic layer over `ghost discord`. Resolves outgoing user from the cwd git worktree, stamps the butler prefix the bot recognizes, defaults target to the worktree's bound home channel.
+
+| Verb | What it does |
+|---|---|
+| `whoami` | Bot identity + resolved outgoing user + bound home channel |
+| `bind <channel-id>` | Bind a channel as this worktree's home channel |
+| `unbind` | Clear this worktree's home channel binding |
+| `home` | Show this worktree's home channel binding |
+| `config-onboarding` | Write `~/.gits/butler-onboarding.json` (guild + category for new worktree channels) |
+| `send [target] <content>` | Send a butler-decorated message (defaults to bound home channel) |
+| `dispatch <name>` | Create a thread in home channel and post first message; prints new thread id |
+| `read-thread <id>` | Read recent messages from a thread or channel (thin passthrough to `ghost discord read-thread`) |
+
+**`ghost discord <verb>`** — raw Discord transport primitives. No prefix decoration, no identity resolution. Use directly when you don't want PM semantics.
+
+| Verb | What it does |
+|---|---|
+| `setup` | Interactive setup wizard (token + guild + restart) |
+| `whoami` | Print bot identity (id / username / discriminator) |
+| `send <target> <content>` | Send a raw message — no prefix decoration |
+| `read-thread <id>` | Read recent messages from a thread or channel |
+| `create-channel <name>` | Create a text channel under the configured onboarding category |
+| `create-thread <channel-id> <name>` | Create a thread in a text channel |
+| `archive-thread <thread-id>` | Archive (close) a thread |
+| `guild-channels <guild-id>` | List channels in a guild |
+| `channel <channel-id>` | Inspect a channel by ID |
+
+The standalone `butler` symlink at `~/.local/bin/butler` from older installs still works and produces output identical to `ghost butler` — new scripts should prefer `ghost butler`.
+
 ## Common issues
 
 | Symptom | Likely cause | Fix |

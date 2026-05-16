@@ -281,6 +281,38 @@ rm -rf ~/.gits/accounts/
 | `/help` | 查看所有命令 |
 | （普通文字） | 直接转发到终端 |
 
+### 工具命令 (Tooling)：`ghost butler` + `ghost discord`
+
+除了从聊天端发的 slash 命令，Ghost 还提供两组本地 CLI，可以直接在终端里脚本化操作 Discord：
+
+- **`ghost butler <verb>`** —— PM 语义封装层：从当前 git worktree 解析出发送者身份，自动加上 bot 识别的 butler 前缀，默认目标是这个 worktree 绑定的 home channel。适合从 agent 或 cron 任务里发消息，让 bot 知道"是谁在说话"。
+- **`ghost discord <verb>`** —— 底层 Discord 传输原语：原样发消息、建/归档 thread、查 channel。需要不加任何前缀装饰、或者不要 worktree 身份解析时用这套。
+
+| `ghost butler …` | 说明 |
+|---|---|
+| `whoami` | 显示 bot 身份、解析出的发送者、当前绑定的 home channel |
+| `bind <channel-id>` | 把指定 channel 绑定为当前 worktree 的 home channel |
+| `unbind` | 清除当前 worktree 的 home channel 绑定 |
+| `home` | 查看当前 worktree 的 home channel 绑定 |
+| `config-onboarding` | 写入 `~/.gits/butler-onboarding.json`（新 worktree channel 用的 guild + category） |
+| `send [target] <content>` | 发一条带 butler 前缀的消息（默认目标是绑定的 home channel） |
+| `dispatch <name>` | 在 home channel 里建一个 thread 并发第一条消息 |
+| `read-thread <id>` | 读取 thread 或 channel 的最近消息 |
+
+| `ghost discord …` | 说明 |
+|---|---|
+| `setup` | 交互式配置向导（token + guild + 重启） |
+| `whoami` | 打印 bot 身份（id / username / discriminator） |
+| `send <target> <content>` | 发原始消息（不加任何前缀装饰） |
+| `read-thread <id>` | 读取 thread 或 channel 的最近消息 |
+| `create-channel <name>` | 在配置的 onboarding category 下建一个文字 channel |
+| `create-thread <channel-id> <name>` | 在指定 channel 里建一个 thread |
+| `archive-thread <thread-id>` | 归档（关闭）一个 thread |
+| `guild-channels <guild-id>` | 列出 guild 里的所有 channel |
+| `channel <channel-id>` | 按 ID 查看 channel 详情 |
+
+> **迁移说明**：旧版本安装的独立 `butler` CLI（在 `~/.local/bin/butler` 的 symlink）仍然可用，输出和 `ghost butler` 完全一致。新脚本请用 `ghost butler <verb>` 这个写法；老的 symlink 后续会逐步下线。
+
 ---
 
 ## 文档

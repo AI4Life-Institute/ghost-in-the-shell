@@ -202,6 +202,38 @@ Send these as plain-text messages to Ghost on WeChat:
 | `/help` | Show all commands |
 | (plain text) | Forwarded directly to the terminal |
 
+### Tooling: `ghost butler` + `ghost discord`
+
+Beyond the slash commands you send from chat, Ghost ships two local CLI groups for scripting Discord directly from your terminal:
+
+- **`ghost butler <verb>`** — PM-flavored layer: resolves the outgoing user from your current git worktree, stamps the butler prefix the bot recognizes, and defaults the target to this worktree's bound home channel. Use this for scripted messages from agents or cron jobs that should "speak as" a user.
+- **`ghost discord <verb>`** — raw Discord transport primitives: send a message verbatim, create/archive threads, inspect channels. Use this when you don't want any prefix decoration or worktree-resolved identity.
+
+| `ghost butler …` | What it does |
+|---|---|
+| `whoami` | Show bot identity, resolved outgoing user, and bound home channel |
+| `bind <channel-id>` | Bind a channel as this worktree's home channel |
+| `unbind` | Clear this worktree's home channel binding |
+| `home` | Show this worktree's home channel binding |
+| `config-onboarding` | Write `~/.gits/butler-onboarding.json` (guild + category for new worktree channels) |
+| `send [target] <content>` | Send a butler-decorated message (defaults to bound home channel) |
+| `dispatch <name>` | Create a thread in the home channel and post the first message |
+| `read-thread <id>` | Read recent messages from a thread or channel |
+
+| `ghost discord …` | What it does |
+|---|---|
+| `setup` | Interactive setup wizard (token + guild + restart) |
+| `whoami` | Print bot identity (id / username / discriminator) |
+| `send <target> <content>` | Send a raw message — no prefix decoration |
+| `read-thread <id>` | Read recent messages from a thread or channel |
+| `create-channel <name>` | Create a text channel under the configured onboarding category |
+| `create-thread <channel-id> <name>` | Create a thread in a text channel |
+| `archive-thread <thread-id>` | Archive (close) a thread |
+| `guild-channels <guild-id>` | List channels in a guild |
+| `channel <channel-id>` | Inspect a channel by ID |
+
+> **Migration note.** The standalone `butler` CLI installed by older versions (a symlink at `~/.local/bin/butler`) still works and produces identical output to `ghost butler`. Prefer the new `ghost butler <verb>` form for new scripts — the legacy symlink will be retired eventually.
+
 ---
 
 ## Docs
