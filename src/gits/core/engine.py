@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -1395,6 +1396,22 @@ class Engine:
         )
         return True
 
+    async def _send_relaunch_in_pane(self, binding: Any, cmd: str) -> None:
+        """Send a CLI launch/resume command into an existing pane, CWD-safe.
+
+        The pane's shell may hold a stale CWD inode (e.g. the work_dir was
+        rm'd and recreated under the same path while the shell was alive).
+        In that state zsh refuses to fork/exec anything with
+        "current working directory was deleted, so that command didn't work",
+        so a bare ``send_text(cmd)`` silently fails. Prefixing
+        ``cd <work_dir> && `` rescues the stale-inode case (absolute-path
+        ``cd`` does not need the current inode), is a no-op when CWD is
+        already healthy, and degrades to a single clean ``cd:`` error when
+        the work_dir genuinely no longer exists.
+        """
+        guarded = f"cd {shlex.quote(binding.work_dir)} && {cmd}"
+        await self.tmux.send_text(binding.window_id, guarded)
+
     async def _resume_suspended(self, binding: Any) -> None:
         """Resume a suspended binding by relaunching the CLI."""
         if binding.cli_session_id:
@@ -1417,7 +1434,7 @@ class Engine:
         if binding.permission_mode:
             cmd = _append_permission_flag(cmd, binding.coding_cli, binding.permission_mode)
         try:
-            await self.tmux.send_text(binding.window_id, cmd)
+            await self._send_relaunch_in_pane(binding, cmd)
             await asyncio.sleep(3.0)  # wait for CLI to be ready
         except Exception:
             logger.exception("Failed to resume binding %s", binding.channel_id)
@@ -1576,7 +1593,7 @@ class Engine:
                 cmd = _append_permission_flag(
                     cmd, binding.coding_cli, binding.permission_mode,
                 )
-            await self.tmux.send_text(binding.window_id, cmd)
+            await self._send_relaunch_in_pane(binding, cmd)
             await asyncio.sleep(0.5)  # let claude start; respawn confirmation is async
         except Exception as e:
             logger.exception("respawn failed for %s", binding.channel_id)
@@ -1776,7 +1793,7 @@ class Engine:
             cli=binding.coding_cli,
             claude_account=getattr(binding, "claude_account", None),
         )
-        await self.tmux.send_text(binding.window_id, cmd)
+        await self._send_relaunch_in_pane(binding, cmd)
 
         # Clear session ID
         await self.session_mgr.update_cli_session_id(channel_id, "")
@@ -1824,7 +1841,7 @@ class Engine:
         )
         if mode and mode != "default":
             cmd = _append_permission_flag(cmd, cli, mode)
-        await self.tmux.send_text(binding.window_id, cmd)
+        await self._send_relaunch_in_pane(binding, cmd)
 
         # Persist new mode
         stored_mode = mode if mode != "default" else None
