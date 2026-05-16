@@ -93,10 +93,17 @@ def main() -> None:
         help="Skip starting the bot after setup",
     )
 
-    # gits discord
-    discord_p = sub.add_parser("discord", help="Discord setup wizard")
-    discord_p.add_argument("--token", default=None, help="Discord bot token")
-    discord_p.add_argument("--no-start", action="store_true", help="Skip restart after setup")
+    # gits discord — transport group + setup wizard (formerly bare `ghost discord`,
+    # now `ghost discord setup`; see task a2ec59). Registration lives in
+    # gits.butler.discord_cli so transport verbs share http helpers with butler.
+    from .butler import discord_cli as _discord_cli
+
+    _discord_cli.install_parser(sub)
+
+    # gits butler — PM-semantic layer atop discord transport (task a2ec59).
+    from .butler import butler_cli as _butler_cli
+
+    _butler_cli.install_parser(sub)
 
     # gits restart
     sub.add_parser("restart", help="Restart the Ghost background service")
@@ -145,7 +152,9 @@ def main() -> None:
     elif args.command == "wechat":
         _cmd_weixin(args)
     elif args.command == "discord":
-        _cmd_discord(args)
+        _discord_cli.dispatch(args)
+    elif args.command == "butler":
+        _butler_cli.dispatch(args)
     elif args.command == "setup":
         _cmd_setup(args)
     elif args.command == "desktop":

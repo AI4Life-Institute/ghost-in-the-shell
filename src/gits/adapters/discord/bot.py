@@ -9,30 +9,19 @@ from __future__ import annotations
 import io
 import json
 import logging
-import os
-import re
 import uuid
 from pathlib import Path
 from typing import Any
 
 # Messages authored by the bot itself are normally skipped to avoid self-loops.
 # Vault-dispatched messages (sent via the bot's REST token from outside, e.g.
-# the `butler` CLI) tag themselves with a recognizable prefix so they get
-# forwarded to the bound CLI session.
+# the `ghost butler send` CLI) tag themselves with a recognizable prefix so
+# they get forwarded to the bound CLI session.
 #
-# The bracket pattern is the recognition anchor, but butler is free to
-# decorate around it for visual emphasis (emoji + bold wrapping). The regex
-# accepts an optional leading emoji + whitespace and optional ``**`` bold
-# markers around the bracket, so messages like ``📨 **[butler:weiliu]** msg``
-# are still recognized as butler dispatches.
-#
-# Override via GITS_DISPATCH_PREFIX_PATTERN env var (a Python regex).
-_VAULT_DISPATCH_RE = re.compile(
-    os.environ.get(
-        "GITS_DISPATCH_PREFIX_PATTERN",
-        r"^(?:[\U0001F300-\U0001FAFF]\s*)?(?:\*\*)?\[(butler|管家|vault)(:[^\]]*)?\](?:\*\*)?",
-    )
-)
+# Single source of truth: gits.butler.prefix — same regex used by the
+# encoder (`ghost butler` CLI). Override via GITS_DISPATCH_PREFIX_PATTERN
+# env var is honored there.
+from ...butler.prefix import VAULT_DISPATCH_RE as _VAULT_DISPATCH_RE
 
 import discord
 from discord import app_commands

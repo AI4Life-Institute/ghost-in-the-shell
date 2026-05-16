@@ -83,7 +83,7 @@ brew install ai4life-institute/tap/ghost
 Run the setup wizard:
 
 ```bash
-ghost discord
+ghost discord setup
 ```
 
 Or set manually in `~/.gits/config.env`:

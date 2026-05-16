@@ -111,7 +111,7 @@ sqlite3 ~/.gits/gits.db "PRAGMA integrity_check;"
 
 Ghost supports two messaging platforms:
 
-- **Discord** — slash commands (`/bind`, `/info`, `/bash`, etc.) in any channel or thread. Configure with `ghost discord` or set `GITS_DISCORD_TOKEN` in `~/.gits/config.env`.
+- **Discord** — slash commands (`/bind`, `/info`, `/bash`, etc.) in any channel or thread. Configure with `ghost discord setup` or set `GITS_DISCORD_TOKEN` in `~/.gits/config.env`.
 - **WeChat** — plain-text commands (`/bind`, `/s`, `/bash`, etc.) via WeChat messages. Configure with `ghost wechat` (QR-code login via ilinkai). Both platforms can run simultaneously.
 
 ## Common issues
