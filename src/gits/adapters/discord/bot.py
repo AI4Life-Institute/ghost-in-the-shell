@@ -626,13 +626,18 @@ class DiscordAdapter(PlatformAdapter):
         # Fetch starter message early so we can tell butler dispatches
         # apart from /thread, /fork, and any other future bot-created
         # threads. Empty string on miss — that's still "not butler".
+        # Keep the message OBJECT too so we can add a 🔗 reaction on it
+        # later (parity with manual /bind, which reacts on the user's
+        # originating message).
         starter_message = ""
+        starter_msg_obj: discord.Message | None = None
         try:
             if thread.starter_message:
+                starter_msg_obj = thread.starter_message
                 starter_message = thread.starter_message.content or ""
             else:
-                starter = await thread.fetch_message(thread.id)
-                starter_message = starter.content or ""
+                starter_msg_obj = await thread.fetch_message(thread.id)
+                starter_message = starter_msg_obj.content or ""
         except Exception:
             logger.debug("Could not fetch starter message for thread %s", thread.id)
 
@@ -650,6 +655,18 @@ class DiscordAdapter(PlatformAdapter):
             guild_id = thread.guild.id if thread.guild else None
             if thread.owner_id and not self._check_access(thread.owner_id, guild_id):
                 return
+
+        # 🔗 the user's starter message to mirror manual /bind's ack.
+        # Skip for bot-owned threads — those come from butler dispatch and
+        # there's no human "originator" to acknowledge.
+        if (
+            thread.owner_id != self.bot.user.id
+            and starter_msg_obj is not None
+        ):
+            try:
+                await starter_msg_obj.add_reaction("🔗")
+            except Exception:
+                logger.debug("Failed to add 🔗 reaction on thread starter")
 
         try:
             await self._engine.handle_thread_auto(

@@ -529,7 +529,40 @@ class Engine:
         # Start pane polling for the new binding
         self.monitor.start_polling(channel_id, win.window_id)
 
-        # List directory contents for user orientation
+        if interaction:
+            await self._reply(interaction, "Bound successfully.")
+
+        # Shared post-bind UX: confirmation + dir listing + nav buttons + screenshot
+        await self._send_bind_report(
+            channel_id=channel_id,
+            work_dir=p,
+            window_id=win.window_id,
+            window_name=window_name,
+            cli=cli,
+            session_id=session_id,
+            interaction=interaction,
+        )
+
+    async def _send_bind_report(
+        self,
+        channel_id: str,
+        work_dir: str | Path,
+        window_id: str,
+        window_name: str,
+        cli: str,
+        session_id: str | None = None,
+        interaction: Any = None,
+    ) -> None:
+        """Post the standard post-bind UX block to *channel_id*.
+
+        Shared by ``_create_bind`` (manual ``/bind``) and
+        ``handle_thread_auto`` (auto-bind) so the two paths can't drift.
+        Sends a confirmation line + directory listing of ``work_dir`` +
+        quick-action buttons, then fires ``_auto_screenshot`` against the
+        binding for this channel. ``interaction`` is only used as a
+        fallback channel for the screenshot when no adapter is registered.
+        """
+        p = Path(work_dir)
         dir_info = self._format_dir_listing(p)
 
         if session_id:
@@ -537,8 +570,7 @@ class Engine:
         else:
             session_info = "\nFresh session"
 
-        # Build confirmation with quick-action buttons
-        wid = win.window_id
+        wid = window_id
         nav_buttons = [
             [
                 Button(label="↑ Up", callback_data=f"prompt_opt:{wid}:Up"),
@@ -564,10 +596,7 @@ class Engine:
                 channel_id,
                 OutgoingMessage(text=confirm_text, buttons=nav_buttons),
             )
-        if interaction:
-            await self._reply(interaction, "Bound successfully.")
 
-        # Auto-screenshot after CLI starts up
         binding = self.session_mgr.get_binding(channel_id)
         if binding:
             await self._auto_screenshot(channel_id, binding, interaction, delay=2.0)
@@ -881,13 +910,16 @@ class Engine:
 
             asyncio.create_task(_send_initial_prompt())
 
-        if self._adapter:
-            await self._adapter.send_message(
-                thread_id,
-                OutgoingMessage(
-                    text=f"Auto-session started → `{work_dir}`\ntmux: `{win.window_id}` | CLI: `{cli}`"
-                ),
-            )
+        # Shared post-bind UX — same block as manual /bind so users get the
+        # familiar directory listing + screenshot signal that the session
+        # actually came up. No interaction (auto-bind has no slash command).
+        await self._send_bind_report(
+            channel_id=thread_id,
+            work_dir=work_dir,
+            window_id=win.window_id,
+            window_name=title,
+            cli=cli,
+        )
 
     async def handle_fork(
         self,
