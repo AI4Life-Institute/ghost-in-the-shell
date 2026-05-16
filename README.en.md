@@ -67,6 +67,10 @@ brew install ai4life-institute/tap/ghost
 ```
 
 > The install script handles uv and tmux automatically. Python >= 3.12 is required.
+>
+> **Upgrading from local source** (developers): use `uv tool install --reinstall .`
+> — `--refresh` only invalidates the PyPI download cache, it does NOT rebuild
+> from a local checkout.
 
 **2. Install a coding CLI (at least one)**
 
