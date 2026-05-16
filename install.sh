@@ -47,6 +47,20 @@ fi
 
 ok "ghost installed → $(command -v ghost)"
 
+# ── 3b. install bundled Claude Code skills (G-4 irzsbr) ────────────────────────
+# Honors GHOST_NO_INSTALL_SKILLS=1 opt-out. Non-fatal: a failure here
+# (e.g. ~/.claude/ permission issue) shouldn't block the rest of install.
+if [ "${GHOST_NO_INSTALL_SKILLS:-}" = "1" ]; then
+  info "skipping skills install (GHOST_NO_INSTALL_SKILLS=1)"
+else
+  info "Installing bundled Claude Code skills..."
+  if ghost install-skills 2>&1; then
+    ok "skills installed → ~/.claude/skills/"
+  else
+    printf '\033[1;33m! skills install failed (non-fatal). Re-run later with: ghost install-skills\033[0m\n'
+  fi
+fi
+
 # ── 4. shell rc — ensure ghost is on PATH permanently ──────────────────────────
 _add_to_path() {
   local dir="$1" rc="$2"

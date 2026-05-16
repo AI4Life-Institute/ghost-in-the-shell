@@ -322,7 +322,16 @@ rm -rf ~/.gits/accounts/
 | `butler` | [`skills/butler/SKILL.md`](skills/butler/SKILL.md) | 用 `ghost butler` 发消息、读 thread、绑定 home channel，或派任务（vault-aware orchestrator：建 thread、发 `/bind` + 指针消息、原子地把 thread 元数据写回 task page 的 frontmatter） |
 | `onboard-worktree` | [`skills/onboard-worktree/SKILL.md`](skills/onboard-worktree/SKILL.md) | 给新贡献者一站式开通 worktree + Discord 频道 + butler 绑定 + ghost `/bind` |
 
-每个 skill 是 `<name>/SKILL.md` 的文件夹形式（Claude Code 约定）。`uv tool install ghost` 时会顺手把这两份 skill 复制到 `~/.claude/skills/`，全局可用——这样 Claude Code 在任何项目下都能在合适的时机自动触发它们。
+每个 skill 是 `<name>/SKILL.md` 的文件夹形式（Claude Code 约定）。安装时（`install.sh` 或首次跑 `ghost setup` 向导）会自动把这两份 skill 复制到 `~/.claude/skills/`，全局可用——这样 Claude Code 在任何项目下都能在合适的时机自动触发它们。
+
+手动管理：
+
+```bash
+ghost install-skills        # 同步 / 更新（幂等；只覆盖 ghost 管理的文件夹，不动你自己装的 skills）
+ghost uninstall-skills      # 移除（只删 manifest 里登记的，自己装的 skills 不动）
+```
+
+不想装可以跳过：传 `--no-install-skills`，或者设环境变量 `GHOST_NO_INSTALL_SKILLS=1`。manifest 在 `~/.claude/skills/.ghost-installed.json`，记录了 ghost 管理的 skill 列表 + 版本 + 安装时间。
 
 ---
 

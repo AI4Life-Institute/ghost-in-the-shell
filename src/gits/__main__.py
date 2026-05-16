@@ -133,6 +133,11 @@ def main() -> None:
 
     _cli_account.install_parser(sub)
 
+    # gits install-skills / gits uninstall-skills  (G-4 irzsbr)
+    from . import install_skills as _install_skills
+
+    _install_skills.install_parser(sub)
+
     args = parser.parse_args()
 
     if args.command == "start":
@@ -163,6 +168,8 @@ def main() -> None:
         _cli_sub.dispatch(args)
     elif args.command in ("account", "acct"):
         _cli_account.dispatch(args)
+    elif args.command in ("install-skills", "uninstall-skills"):
+        _install_skills.dispatch(args)
 
 
 def _cmd_start(args: argparse.Namespace) -> None:
@@ -688,6 +695,16 @@ def _cmd_setup(args: argparse.Namespace) -> None:
         return
 
     print(f"\n✅ Configured: {', '.join(configured)}")
+
+    # Default-on: sync bundled Claude Code skills into ~/.claude/skills/
+    # (G-4 irzsbr). Honors GHOST_NO_INSTALL_SKILLS=1 opt-out.
+    try:
+        from . import install_skills as _install_skills_mod
+        if not _install_skills_mod._opt_out_active(False):
+            print("\n─── Claude Code skills ───────────────────────")
+            _install_skills_mod.install_skills()
+    except Exception as exc:  # never let skills install break setup
+        print(f"  ⚠ install-skills failed (non-fatal): {exc}")
 
     if args.no_start:
         print("Run `ghost start` to start the bot")

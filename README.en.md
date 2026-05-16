@@ -243,7 +243,16 @@ The repo ships two Claude Code skills under [`skills/`](skills/) that describe w
 | `butler` | [`skills/butler/SKILL.md`](skills/butler/SKILL.md) | Sending messages via `ghost butler`, reading threads, binding the worktree's home channel, or dispatching a project task (vault-aware orchestrator that creates a thread, posts `/bind` + a pointer, and atomically writes thread metadata back into the task page's frontmatter) |
 | `onboard-worktree` | [`skills/onboard-worktree/SKILL.md`](skills/onboard-worktree/SKILL.md) | Onboarding a new contributor end-to-end: worktree + Discord channel + butler home binding + ghost `/bind` |
 
-Each skill follows Claude Code's `<name>/SKILL.md` folder-per-skill convention. `uv tool install ghost` copies both into `~/.claude/skills/` so Claude Code auto-discovers them in any project on this machine.
+Each skill follows Claude Code's `<name>/SKILL.md` folder-per-skill convention. At install time (`install.sh` or your first `ghost setup` run) both skills are copied into `~/.claude/skills/` so Claude Code auto-discovers them in any project on this machine.
+
+Manage manually:
+
+```bash
+ghost install-skills        # sync/upsert (idempotent; only overwrites ghost-managed folders, never your hand-installed skills)
+ghost uninstall-skills      # remove (only deletes manifest-listed folders; your own skills stay)
+```
+
+Opt out: pass `--no-install-skills`, or set `GHOST_NO_INSTALL_SKILLS=1`. The manifest at `~/.claude/skills/.ghost-installed.json` records which folders ghost owns plus version + install timestamp.
 
 ---
 
