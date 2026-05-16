@@ -217,10 +217,10 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
 
 
 def cmd_read_thread(args: argparse.Namespace) -> None:
-    """Thin passthrough — same behavior as ``ghost discord read-thread``."""
+    """Thin passthrough — same behavior as ``ghost discord thread read``."""
     from . import discord_cli
 
-    discord_cli.cmd_read_thread(args)
+    discord_cli.cmd_thread_read(args)
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +319,7 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
 
     sp = verbs.add_parser(
         "read-thread",
-        help="Thin passthrough to `ghost discord read-thread`",
+        help="Thin passthrough to `ghost discord thread read`",
     )
     sp.add_argument("thread_id")
     sp.add_argument("--limit", type=int, default=50)

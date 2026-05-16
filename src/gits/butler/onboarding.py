@@ -67,7 +67,7 @@ def require() -> dict:
             f"ghost butler: no onboarding config at {USER_PATH}.\n"
             f"  Run: ghost butler config-onboarding --category <category_id>\n"
             f"  (find a category id with: "
-            f"ghost discord guild-channels <guild_id>)"
+            f"ghost discord channel list --guild <guild_id>)"
         )
     return cfg
 

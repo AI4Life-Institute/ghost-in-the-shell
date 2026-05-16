@@ -129,7 +129,7 @@ Two subcommand groups scriptable from the terminal (in addition to the chat-side
 | `config-onboarding` | Write `~/.gits/butler-onboarding.json` (guild + category for new worktree channels) |
 | `send [target] <content>` | Send a butler-decorated message (defaults to bound home channel) |
 | `dispatch <name>` | Create a thread in home channel and post first message; prints new thread id |
-| `read-thread <id>` | Read recent messages from a thread or channel (thin passthrough to `ghost discord read-thread`) |
+| `read-thread <id>` | Read recent messages from a thread or channel (thin passthrough to `ghost discord thread read`) |
 
 **`ghost discord <verb>`** — raw Discord transport primitives. No prefix decoration, no identity resolution. Use directly when you don't want PM semantics.
 
@@ -137,13 +137,13 @@ Two subcommand groups scriptable from the terminal (in addition to the chat-side
 |---|---|
 | `setup` | Interactive setup wizard (token + guild + restart) |
 | `whoami` | Print bot identity (id / username / discriminator) |
-| `send <target> <content>` | Send a raw message — no prefix decoration |
-| `read-thread <id>` | Read recent messages from a thread or channel |
-| `create-channel <name>` | Create a text channel under the configured onboarding category |
-| `create-thread <channel-id> <name>` | Create a thread in a text channel |
-| `archive-thread <thread-id>` | Archive (close) a thread |
-| `guild-channels <guild-id>` | List channels in a guild |
-| `channel <channel-id>` | Inspect a channel by ID |
+| `thread create <channel-id> <name>` | Create a thread in a text channel |
+| `thread archive <thread-id>` | Archive (close) a thread |
+| `thread read <id>` | Read recent messages from a thread or channel |
+| `channel create <name>` | Create a text channel under the configured onboarding category |
+| `channel show <channel-id>` | Inspect a channel by ID |
+| `channel list --guild <guild-id>` | List channels in a guild |
+| `message send <target> <content>` | Send a raw message — no prefix decoration |
 
 The standalone `butler` symlink at `~/.local/bin/butler` from older installs still works and produces output identical to `ghost butler` — new scripts should prefer `ghost butler`.
 

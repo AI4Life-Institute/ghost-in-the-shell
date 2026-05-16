@@ -303,13 +303,13 @@ rm -rf ~/.gits/accounts/
 |---|---|
 | `setup` | 交互式配置向导（token + guild + 重启） |
 | `whoami` | 打印 bot 身份（id / username / discriminator） |
-| `send <target> <content>` | 发原始消息（不加任何前缀装饰） |
-| `read-thread <id>` | 读取 thread 或 channel 的最近消息 |
-| `create-channel <name>` | 在配置的 onboarding category 下建一个文字 channel |
-| `create-thread <channel-id> <name>` | 在指定 channel 里建一个 thread |
-| `archive-thread <thread-id>` | 归档（关闭）一个 thread |
-| `guild-channels <guild-id>` | 列出 guild 里的所有 channel |
-| `channel <channel-id>` | 按 ID 查看 channel 详情 |
+| `thread create <channel-id> <name>` | 在指定 channel 里建一个 thread |
+| `thread archive <thread-id>` | 归档（关闭）一个 thread |
+| `thread read <id>` | 读取 thread 或 channel 的最近消息 |
+| `channel create <name>` | 在配置的 onboarding category 下建一个文字 channel |
+| `channel show <channel-id>` | 按 ID 查看 channel 详情 |
+| `channel list --guild <guild-id>` | 列出 guild 里的所有 channel |
+| `message send <target> <content>` | 发原始消息（不加任何前缀装饰） |
 
 > **迁移说明**：旧版本安装的独立 `butler` CLI（在 `~/.local/bin/butler` 的 symlink）仍然可用，输出和 `ghost butler` 完全一致。新脚本请用 `ghost butler <verb>` 这个写法；老的 symlink 后续会逐步下线。
 

@@ -224,13 +224,13 @@ Beyond the slash commands you send from chat, Ghost ships two local CLI groups f
 |---|---|
 | `setup` | Interactive setup wizard (token + guild + restart) |
 | `whoami` | Print bot identity (id / username / discriminator) |
-| `send <target> <content>` | Send a raw message — no prefix decoration |
-| `read-thread <id>` | Read recent messages from a thread or channel |
-| `create-channel <name>` | Create a text channel under the configured onboarding category |
-| `create-thread <channel-id> <name>` | Create a thread in a text channel |
-| `archive-thread <thread-id>` | Archive (close) a thread |
-| `guild-channels <guild-id>` | List channels in a guild |
-| `channel <channel-id>` | Inspect a channel by ID |
+| `thread create <channel-id> <name>` | Create a thread in a text channel |
+| `thread archive <thread-id>` | Archive (close) a thread |
+| `thread read <id>` | Read recent messages from a thread or channel |
+| `channel create <name>` | Create a text channel under the configured onboarding category |
+| `channel show <channel-id>` | Inspect a channel by ID |
+| `channel list --guild <guild-id>` | List channels in a guild |
+| `message send <target> <content>` | Send a raw message — no prefix decoration |
 
 > **Migration note.** The standalone `butler` CLI installed by older versions (a symlink at `~/.local/bin/butler`) still works and produces identical output to `ghost butler`. Prefer the new `ghost butler <verb>` form for new scripts — the legacy symlink will be retired eventually.
 
