@@ -20,12 +20,17 @@ from typing import Any
 # the `butler` CLI) tag themselves with a recognizable prefix so they get
 # forwarded to the bound CLI session.
 #
-# Default accepts: [butler], [butler:user], [管家], [管家:user], [vault], [vault:user]
+# The bracket pattern is the recognition anchor, but butler is free to
+# decorate around it for visual emphasis (emoji + bold wrapping). The regex
+# accepts an optional leading emoji + whitespace and optional ``**`` bold
+# markers around the bracket, so messages like ``📨 **[butler:weiliu]** msg``
+# are still recognized as butler dispatches.
+#
 # Override via GITS_DISPATCH_PREFIX_PATTERN env var (a Python regex).
 _VAULT_DISPATCH_RE = re.compile(
     os.environ.get(
         "GITS_DISPATCH_PREFIX_PATTERN",
-        r"^\[(butler|管家|vault)(:[^\]]*)?\]",
+        r"^(?:[\U0001F300-\U0001FAFF]\s*)?(?:\*\*)?\[(butler|管家|vault)(:[^\]]*)?\](?:\*\*)?",
     )
 )
 
