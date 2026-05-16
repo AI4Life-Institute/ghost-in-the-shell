@@ -45,6 +45,11 @@ class SessionBinding:
     # actually interacted (claude does not flush its <sid>.jsonl until then,
     # so any earlier alarm is a false positive).
     first_interaction_at: float | None = None
+    # True when the engine itself created the worktree at ``work_dir`` (i.e.
+    # the binding came from /fork). Lets cascade-kill cleanup distinguish
+    # engine-owned worktrees (safe to delete) from user worktrees we just
+    # happen to be bound to (must preserve — see task [[23do0p]]).
+    owned_worktree: bool = False
 
 
 def _binding_to_dict(b: SessionBinding) -> dict:
@@ -59,6 +64,8 @@ def _binding_to_dict(b: SessionBinding) -> dict:
         data.pop("claude_account", None)
     if data.get("respawn_failed") is False:
         data.pop("respawn_failed", None)
+    if data.get("owned_worktree") is False:
+        data.pop("owned_worktree", None)
     # first_interaction_at is a transient in-memory signal — never persist it.
     data.pop("first_interaction_at", None)
     return data
@@ -131,6 +138,7 @@ class SessionManager:
         subdir: str | None = None,
         permission_mode: str | None = None,
         claude_account: str | None = None,
+        owned_worktree: bool = False,
     ) -> SessionBinding:
         """Create or update a binding."""
         binding = SessionBinding(
@@ -145,6 +153,7 @@ class SessionManager:
             subdir=subdir,
             permission_mode=permission_mode,
             claude_account=claude_account,
+            owned_worktree=owned_worktree,
         )
         self._bindings[channel_id] = binding
         await self._save()

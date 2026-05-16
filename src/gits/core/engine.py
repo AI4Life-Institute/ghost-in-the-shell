@@ -997,6 +997,7 @@ class Engine:
             parent_channel_id=channel_id,
             permission_mode=mode,
             claude_account=claude_account,
+            owned_worktree=True,
         )
 
         self.monitor.start_polling(thread_id, win.window_id)
@@ -1288,9 +1289,17 @@ class Engine:
             status_parts.append("Worktree removed.")
         await self._reply(interaction, " ".join(status_parts))
 
-        # Close child sessions first (threads and forks)
+        # Close child sessions first (threads and forks). Engine-created
+        # worktrees (children from /fork) get cleaned up; bindings whose
+        # work_dir is a user-owned worktree we just happen to point at are
+        # preserved (the owned_worktree flag is the discriminator — see
+        # [[23do0p]]).
         for child in children:
-            await self._kill_single(child.channel_id, archive_thread=True)
+            await self._kill_single(
+                child.channel_id,
+                archive_thread=True,
+                remove_worktree=child.owned_worktree,
+            )
 
         # Close this session
         await self._kill_single(channel_id, archive_thread=True, remove_worktree=is_wt)

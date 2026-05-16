@@ -35,11 +35,17 @@ class FakeInteraction:
 
 @pytest.fixture
 def settings(tmp_path):
+    # Hermetic: skip ~/.gits/config.env and explicitly null fields that may
+    # otherwise leak from dev env vars (e.g. ALLOWED_PATHS / GITS_DEFAULT_PATH).
     return Settings(
+        _env_file=None,
         gits_dir=tmp_path / ".gits",
         gits_discord_token="test-token",
         tmux_session_name="test-gits",
         coding_cli_command="claude",
+        allowed_paths=[],
+        bind_root=None,
+        gits_default_path=None,
     )
 
 
@@ -1288,7 +1294,11 @@ class TestE2EThread:
                 if c[0][0] == "thread-99"
             ]
             assert len(thread_msgs) >= 1
-            assert "Auto-session" in thread_msgs[0][0][1].text
+            # Per commit 8823bf0, auto-bind now uses the shared bind-report
+            # block (same as manual /bind) — was previously "Auto-session …".
+            first = thread_msgs[0][0][1].text
+            assert "Bound" in first
+            assert "refactor the database layer" in first
 
             # Wait for initial prompt
             await asyncio.sleep(2.5)
