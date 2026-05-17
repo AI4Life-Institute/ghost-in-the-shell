@@ -973,6 +973,23 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), interaction
                 )
 
+        @tree.command(
+            name="raw",
+            description="Send text verbatim to the CLI (e.g. /raw /status)",
+        )
+        @app_commands.describe(text="Literal text to type into the CLI pane")
+        async def cmd_raw(interaction: discord.Interaction, text: str):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_raw(
+                    str(interaction.channel_id), text, interaction
+                )
+
         @tree.command(name="done", description="End the work session and close this thread")
         async def cmd_done(interaction: discord.Interaction):
             if not self._check_interaction_access(interaction):
@@ -1166,12 +1183,26 @@ class DiscordAdapter(PlatformAdapter):
                 manifest = self._engine.account_vault.load()
             except Exception:
                 return []
+            # Find this binding's currently-assigned account so the dropdown
+            # can tag it. Falls back gracefully if no binding exists.
+            binding_account: str | None = None
+            try:
+                binding = self._engine.session_mgr.get_binding(str(interaction.channel_id))
+                if binding is not None:
+                    binding_account = getattr(binding, "claude_account", None)
+            except Exception:
+                pass
             choices: list[app_commands.Choice[str]] = []
             for a in manifest.accounts:
                 if current and current.lower() not in a.name.lower():
                     continue
-                tag = " (default)" if a.name == manifest.default else ""
-                choices.append(app_commands.Choice(name=a.name + tag, value=a.name))
+                tags = []
+                if a.name == binding_account:
+                    tags.append("current")
+                if a.name == manifest.default:
+                    tags.append("default")
+                suffix = f" ({', '.join(tags)})" if tags else ""
+                choices.append(app_commands.Choice(name=a.name + suffix, value=a.name))
                 if len(choices) >= 25:
                     break
             return choices

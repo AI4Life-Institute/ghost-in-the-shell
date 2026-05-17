@@ -25,6 +25,8 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -144,6 +146,46 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
+def _extract_access_token(data: Any) -> str | None:
+    """Pull only ``claudeAiOauth.accessToken`` out of a credentials payload.
+
+    Preserves the audit invariant — refreshToken is never returned.
+    """
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    tok = oauth.get("accessToken")
+    if isinstance(tok, str) and tok:
+        return tok
+    return None
+
+
+def _read_keychain_service(service: str) -> str | None:
+    """Run ``security find-generic-password -s <service> -w`` and parse.
+
+    Returns the accessToken or None. macOS-only; caller should gate.
+    """
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    raw = r.stdout.strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return _extract_access_token(data)
+
+
 class UsageClient:
     """Active OAuth Usage queries with a 60-second per-token cache."""
 
@@ -151,6 +193,7 @@ class UsageClient:
         self,
         layout: AccountLayout | None = None,
         *,
+        vault: Any = None,
         usage_url: str | None = None,
         beta_header: str | None = None,
         http_get: HttpGetFn | None = None,
@@ -158,6 +201,11 @@ class UsageClient:
         timeout: float = HTTP_TIMEOUT_SECONDS,
     ) -> None:
         self._layout = layout or AccountLayout()
+        # Optional account vault — when provided, lets the keychain reader
+        # pick the right service name for default-routed accounts (which
+        # use ``Claude Code-credentials`` without the path-hash suffix).
+        # Per ``add-default-account-native-and-refresh``.
+        self._vault = vault
         self._usage_url = (
             usage_url
             or os.environ.get("GITS_OAUTH_USAGE_URL")
@@ -211,26 +259,66 @@ class UsageClient:
     # -- internals ----------------------------------------------------
 
     def _read_access_token(self, account_name: str) -> str | None:
-        """Read ``claudeAiOauth.accessToken`` from the account's credentials file.
+        """Read ``claudeAiOauth.accessToken`` for an account.
+
+        Tries the macOS keychain entry first (where claude writes
+        refreshed tokens — the live source), then falls back to the
+        on-disk ``.credentials.json`` file (which is often stale because
+        claude doesn't always write refreshed tokens back to disk on
+        macOS). On non-macOS the keychain step is a no-op.
 
         AUDIT INVARIANT: this method **must not** read the
-        ``refreshToken`` field. The selection below is explicitly
-        ``access_token = oauth.get("accessToken")`` and nothing else.
+        ``refreshToken`` field. Both readers below explicitly pull only
+        ``oauth.get("accessToken")``.
         """
+        return (
+            self._read_keychain_token(account_name)
+            or self._read_file_token(account_name)
+        )
+
+    def _read_file_token(self, account_name: str) -> str | None:
+        """Read access token from the account's on-disk credentials file."""
         path = self._layout.credentials_file(account_name)
         try:
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(data, dict):
+        return _extract_access_token(data)
+
+    def _read_keychain_token(self, account_name: str) -> str | None:
+        """Read access token from the per-CONFIG_DIR keychain entry on macOS.
+
+        Claude derives the keychain service name from
+        ``sha256(CLAUDE_CONFIG_DIR)[:8]`` for non-default invocations, and
+        uses ``Claude Code-credentials`` (no suffix) for native
+        ``~/.claude/`` invocations. For default-routed accounts (per
+        ``add-default-account-native-and-refresh``), we prefer the
+        no-suffix service; otherwise we prefer the suffix-derived service.
+        Both are tried in order so we surface a live token wherever it lives.
+        """
+        if sys.platform != "darwin":
             return None
-        oauth = data.get("claudeAiOauth")
-        if not isinstance(oauth, dict):
-            return None
-        access_token = oauth.get("accessToken")
-        if isinstance(access_token, str) and access_token:
-            return access_token
+        for service in self._keychain_service_candidates(account_name):
+            tok = _read_keychain_service(service)
+            if tok:
+                return tok
         return None
+
+    def _keychain_service_candidates(self, account_name: str) -> list[str]:
+        """Return keychain service names to try, in priority order."""
+        is_default = False
+        if self._vault is not None:
+            try:
+                is_default = (self._vault.load().default == account_name)
+            except Exception:
+                pass
+        config_dir = str(self._layout.account_dir(account_name))
+        suffix = hashlib.sha256(config_dir.encode()).hexdigest()[:8]
+        suffix_svc = f"Claude Code-credentials-{suffix}"
+        default_svc = "Claude Code-credentials"
+        # Default-routed accounts read from ~/.claude/ → no-suffix service.
+        # Isolated accounts read from ~/.claude-<name>/ → suffix service.
+        return [default_svc, suffix_svc] if is_default else [suffix_svc, default_svc]
 
     def _fetch(self, access_token: str) -> UsageResult:
         headers = {

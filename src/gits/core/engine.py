@@ -60,11 +60,17 @@ class Engine:
         # Per-binding switch_account locks; lazily populated.
         self._switch_locks: dict[str, asyncio.Lock] = {}
 
+        # Per ``add-default-account-native-and-refresh``: when default
+        # account routes to native ~/.claude/ but the isolated dir has
+        # newer credentials, the user may see one re-login. Surface it.
+        self._warn_if_default_credentials_diverge()
+
         self.launcher = CodingCLILauncher(
             session_map_path=settings.session_map_file,
             config_path=settings.config_file,
             active_env_file=active_env_file_path(settings.state_dir),
             account_layout=self.account_layout,
+            account_vault=self.account_vault,
         )
         self.health = HealthMonitor(
             tmux=self.tmux,
@@ -108,6 +114,16 @@ class Engine:
             notify=self._broadcast_to_bindings,
         )
         self._wire_quota_pipeline()
+
+        # OAuth token refresh — in-process daily scheduler so non-default
+        # accounts' refresh tokens stay alive without host-level launchd /
+        # cron setup. Per ``add-default-account-native-and-refresh``.
+        from .token_refresh import TokenRefreshScheduler
+        self.token_refresh = TokenRefreshScheduler(
+            vault=self.account_vault,
+            layout=self.account_layout,
+            state_dir=settings.state_dir,
+        )
 
         # Guard handler (initialized in start())
         self.guard: GuardHandler | None = None
@@ -173,6 +189,9 @@ class Engine:
         # Quota notifier (no-op until subscriptions are registered)
         await self.quota_notifier.start()
 
+        # OAuth token refresh scheduler (daily, in-process).
+        self.token_refresh.start()
+
         logger.info("Engine started")
 
     async def stop(self) -> None:
@@ -180,6 +199,7 @@ class Engine:
         self.monitor.stop_all()
         self.jsonl_monitor.stop()
         await self.quota_notifier.stop()
+        await self.token_refresh.stop()
         await self.health.stop()
         # Cancel all message drainer tasks
         logger.info("Engine stopped")
@@ -469,6 +489,42 @@ class Engine:
                 "Please provide a path: `/bind /path/to/project`\n"
                 "Start typing and use the dropdown to navigate.",
             )
+
+    def _warn_if_default_credentials_diverge(self) -> None:
+        """Log a one-line WARN if native vs isolated default-account creds disagree.
+
+        Per ``add-default-account-native-and-refresh``: the default account
+        is now routed through ``~/.claude/`` natively. If the user previously
+        had an isolated ``~/.claude-{default}/.credentials.json`` that's
+        newer than the native file, the next claude launch may see stale
+        creds and prompt re-login. Surface this at startup so the user can
+        run ``gits account migrate-default-native --apply`` proactively.
+        """
+        try:
+            manifest = self.account_vault.load()
+        except Exception:
+            return
+        default = manifest.default
+        if not default:
+            return
+        try:
+            native = self.account_layout.legacy_claude_dir() / ".credentials.json"
+            isolated = self.account_layout.account_dir(default) / ".credentials.json"
+            if not native.exists() or not isolated.exists():
+                return
+            native_mt = native.stat().st_mtime
+            isolated_mt = isolated.stat().st_mtime
+        except OSError:
+            return
+        if native_mt >= isolated_mt:
+            return
+        logger.warning(
+            "default-account credentials drift: ~/.claude-%s/.credentials.json "
+            "is newer than ~/.claude/.credentials.json — next claude launch may "
+            "prompt re-login. Run `gits account migrate-default-native --apply` "
+            "to reconcile.",
+            default,
+        )
 
     def _default_claude_account(self) -> str | None:
         """Look up ``manifest.default`` for new bindings (Phase 0.4 D4).
@@ -1227,6 +1283,26 @@ class Engine:
         await self._reply(interaction, "Sent `Escape`.")
         await self._auto_screenshot(channel_id, binding, interaction)
 
+    async def handle_raw(self, channel_id: str, text: str, interaction: Any) -> None:
+        """Handle /raw <text> — send text verbatim to the CLI pane.
+
+        Useful for things Discord intercepts (slash commands like ``/status``)
+        or that ghost itself would otherwise interpret. The text is typed
+        literally into the pane and submitted with the CLI's correct submit
+        keys (Enter for claude, Escape+Enter for codex/copilot).
+        """
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            await self._reply(interaction, "Not bound.")
+            return
+
+        submit = _submit_keys_for_cli(binding.coding_cli)
+        await self.tmux.send_text(binding.window_id, text, submit_keys=submit)
+        # Show what was sent so the user can confirm; truncate for safety
+        preview = text if len(text) <= 100 else text[:97] + "..."
+        await self._reply(interaction, f"Sent: `{preview}`")
+        await self._auto_screenshot(channel_id, binding, interaction)
+
 
     async def handle_done(
         self,
@@ -1955,7 +2031,7 @@ class Engine:
             if isinstance(b.claude_account, str):
                 binding_counts[b.claude_account] = binding_counts.get(b.claude_account, 0) + 1
 
-        client = UsageClient(layout=self.account_layout)
+        client = UsageClient(layout=self.account_layout, vault=self.account_vault)
         lines: list[str] = []
         for a in manifest.accounts:
             arrow = "→" if a.name == current else " "

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -19,6 +19,17 @@ from gits.core.oauth_usage import (
     UsageWindow,
     _parse_usage,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_keychain():
+    """Block keychain access by default so tests don't depend on host state.
+
+    Tests that explicitly exercise the keychain code path can re-patch
+    ``_read_keychain_service`` to return a string within their scope.
+    """
+    with patch("gits.core.oauth_usage._read_keychain_service", return_value=None):
+        yield
 
 
 # Real-world response sample (2026-04-27 verification)
@@ -93,6 +104,96 @@ def test_parse_usage_window_partial_null() -> None:
 # ----------------------------------------------------------------------
 # UsageClient.query — happy path
 # ----------------------------------------------------------------------
+
+
+def test_keychain_fallback_used_when_file_missing(tmp_path) -> None:
+    """When file is absent, keychain token should be used (macOS only)."""
+    layout = AccountLayout(home=tmp_path)
+    # No file written; we expect the read path to skip file and consult keychain.
+
+    received_tokens = []
+
+    def fake_get(url, headers, timeout):
+        received_tokens.append(headers["Authorization"])
+        return HttpResponse(status=200, body=json.dumps(SAMPLE_RESPONSE).encode())
+
+    client = UsageClient(layout=layout, http_get=fake_get)
+    # Patch the keychain reader at module level — bypasses macOS gate.
+    from unittest.mock import patch
+    with patch("gits.core.oauth_usage.sys.platform", "darwin"), \
+         patch("gits.core.oauth_usage._read_keychain_service", return_value="KC-TOK"):
+        result = client.query("alice")
+    assert isinstance(result, Usage)
+    assert received_tokens == ["Bearer KC-TOK"]
+
+
+def test_keychain_preferred_over_file(tmp_path) -> None:
+    """Even with a (stale) file token, keychain wins — it's the live source."""
+    layout = AccountLayout(home=tmp_path)
+    _write_credentials(layout, "alice", access_token="STALE-FILE-TOKEN")
+
+    received_tokens = []
+
+    def fake_get(url, headers, timeout):
+        received_tokens.append(headers["Authorization"])
+        return HttpResponse(status=200, body=json.dumps(SAMPLE_RESPONSE).encode())
+
+    client = UsageClient(layout=layout, http_get=fake_get)
+    from unittest.mock import patch
+    with patch("gits.core.oauth_usage.sys.platform", "darwin"), \
+         patch("gits.core.oauth_usage._read_keychain_service", return_value="LIVE-KEYCHAIN-TOKEN"):
+        client.query("alice")
+    assert received_tokens == ["Bearer LIVE-KEYCHAIN-TOKEN"]
+
+
+def test_keychain_service_candidates_default_account(tmp_path) -> None:
+    """Default-routed account prefers the no-suffix keychain service."""
+    from gits.core.account_vault import AccountEntry, AccountVault
+    layout = AccountLayout(home=tmp_path)
+    vault = AccountVault(tmp_path / ".gits", layout=layout)
+    vault.add(AccountEntry(name="personal", config_dir=str(layout.account_dir("personal"))))
+    # personal is auto-default
+
+    client = UsageClient(layout=layout, vault=vault)
+    services = client._keychain_service_candidates("personal")
+    # Default → no-suffix service first
+    assert services[0] == "Claude Code-credentials"
+    assert services[1].startswith("Claude Code-credentials-")
+
+
+def test_keychain_service_candidates_non_default_account(tmp_path) -> None:
+    """Non-default account prefers the path-hash service."""
+    from gits.core.account_vault import AccountEntry, AccountVault
+    layout = AccountLayout(home=tmp_path)
+    vault = AccountVault(tmp_path / ".gits", layout=layout)
+    vault.add(AccountEntry(name="personal", config_dir=str(layout.account_dir("personal"))))
+    vault.add(AccountEntry(name="work", config_dir=str(layout.account_dir("work"))))
+
+    client = UsageClient(layout=layout, vault=vault)
+    services = client._keychain_service_candidates("work")
+    # Non-default → suffix-based service first
+    assert services[0].startswith("Claude Code-credentials-")
+    assert services[1] == "Claude Code-credentials"
+
+
+def test_file_used_when_keychain_empty(tmp_path) -> None:
+    """When keychain returns nothing (e.g., Linux), file token is used."""
+    layout = AccountLayout(home=tmp_path)
+    _write_credentials(layout, "alice", access_token="FILE-TOK")
+
+    received_tokens = []
+
+    def fake_get(url, headers, timeout):
+        received_tokens.append(headers["Authorization"])
+        return HttpResponse(status=200, body=json.dumps(SAMPLE_RESPONSE).encode())
+
+    client = UsageClient(layout=layout, http_get=fake_get)
+    # sys.platform stays as-is (likely darwin in CI), but _read_keychain_service
+    # returns None — simulating an empty keychain.
+    from unittest.mock import patch
+    with patch("gits.core.oauth_usage._read_keychain_service", return_value=None):
+        client.query("alice")
+    assert received_tokens == ["Bearer FILE-TOK"]
 
 
 def test_query_success(tmp_path) -> None:

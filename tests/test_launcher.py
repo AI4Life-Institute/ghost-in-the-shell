@@ -160,17 +160,120 @@ class TestAccountAwareLaunch:
         )
         assert not_found is None
 
-    def test_active_env_file_no_longer_injected(self, tmp_path):
-        # Phase 0.1 deprecation: even if active_env_file is provided, it
-        # MUST NOT appear in the launch command.
+class _StubVault:
+    """Minimal AccountVault double — only ``load().default`` is consulted."""
+
+    def __init__(self, default: str | None):
+        self._default = default
+
+    def load(self):
+        class _M:
+            pass
+        m = _M()
+        m.default = self._default
+        return m
+
+
+class TestDefaultAccountNative:
+    """add-default-account-native-and-refresh: default account uses ~/.claude/."""
+
+    def _launcher(self, tmp_path, default: str | None):
+        layout = AccountLayout(home=tmp_path)
+        return CodingCLILauncher(
+            session_map_path=tmp_path / "sm.json",
+            account_layout=layout,
+            account_vault=_StubVault(default),
+        )
+
+    def test_default_account_skips_injection(self, tmp_path):
+        launcher = self._launcher(tmp_path, default="personal")
+        cmd = launcher.build_launch_command(
+            cli="claude", session_id="s1", claude_account="personal"
+        )
+        assert "CLAUDE_CONFIG_DIR" not in cmd
+        assert cmd == "claude --resume s1"
+
+    def test_non_default_account_still_injects(self, tmp_path):
+        launcher = self._launcher(tmp_path, default="personal")
+        cmd = launcher.build_launch_command(
+            cli="claude", session_id="s1", claude_account="work"
+        )
+        expected_dir = str(tmp_path / ".claude-work")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={expected_dir} ")
+
+    def test_resolve_cli_default_account_no_override(self, tmp_path):
+        launcher = self._launcher(tmp_path, default="personal")
+        resolved = launcher.resolve_cli("claude", claude_account="personal")
+        assert resolved.config_dir is None
+        assert resolved.session_path is None
+
+    def test_no_default_set_preserves_injection(self, tmp_path):
+        launcher = self._launcher(tmp_path, default=None)
+        cmd = launcher.build_launch_command(
+            cli="claude", session_id="s1", claude_account="personal"
+        )
+        expected_dir = str(tmp_path / ".claude-personal")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={expected_dir} ")
+
+    def test_vault_load_failure_is_fail_safe(self, tmp_path):
+        class _BrokenVault:
+            def load(self):
+                raise RuntimeError("manifest corrupt")
+
+        layout = AccountLayout(home=tmp_path)
         launcher = CodingCLILauncher(
             session_map_path=tmp_path / "sm.json",
-            active_env_file=tmp_path / "active-env.sh",
+            account_layout=layout,
+            account_vault=_BrokenVault(),
         )
-        cmd = launcher.build_launch_command(cli="claude", session_id="s")
-        assert "active-env.sh" not in cmd
-        assert "[ -f" not in cmd
-        assert cmd == "claude --resume s"
+        cmd = launcher.build_launch_command(
+            cli="claude", session_id="s1", claude_account="personal"
+        )
+        # Fail-safe to pre-change isolation behavior
+        expected_dir = str(tmp_path / ".claude-personal")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={expected_dir} ")
+
+    def test_no_vault_preserves_injection(self, tmp_path):
+        # When the launcher is constructed without a vault (legacy/test path)
+        # default-translation cannot happen, so injection proceeds as before.
+        layout = AccountLayout(home=tmp_path)
+        launcher = CodingCLILauncher(
+            session_map_path=tmp_path / "sm.json",
+            account_layout=layout,
+        )
+        cmd = launcher.build_launch_command(
+            cli="claude", session_id="s1", claude_account="personal"
+        )
+        expected_dir = str(tmp_path / ".claude-personal")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={expected_dir} ")
+
+    def test_get_session_file_default_account_uses_native_dir(self, tmp_path):
+        launcher = self._launcher(tmp_path, default="personal")
+        # Place a JSONL in NATIVE dir, not isolated dir.
+        native_projects = tmp_path / ".claude" / "projects"
+        work_dir = "/data/projects/foo"
+        dir_hash = work_dir.replace("/", "-")
+        (native_projects / dir_hash).mkdir(parents=True)
+        jsonl = native_projects / dir_hash / "session-X.jsonl"
+        jsonl.write_text("{}\n")
+
+        found = launcher.get_session_file(
+            work_dir, "claude", "session-X", claude_account="personal"
+        )
+        assert found == str(jsonl)
+
+
+def test_active_env_file_no_longer_injected(tmp_path):
+    # Phase 0.1 deprecation: even if active_env_file is provided, it
+    # MUST NOT appear in the launch command.
+    launcher = CodingCLILauncher(
+        session_map_path=tmp_path / "sm.json",
+        active_env_file=tmp_path / "active-env.sh",
+    )
+    cmd = launcher.build_launch_command(cli="claude", session_id="s")
+    assert "active-env.sh" not in cmd
+    assert "[ -f" not in cmd
+    assert cmd == "claude --resume s"
 
 
 class TestSessionMap:

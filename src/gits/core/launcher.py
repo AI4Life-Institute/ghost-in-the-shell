@@ -76,6 +76,7 @@ class CodingCLILauncher:
         config_path: Path | None = None,
         active_env_file: Path | None = None,
         account_layout: object | None = None,
+        account_vault: object | None = None,
     ):
         self.session_map_path = session_map_path
         self.config_path = config_path or (session_map_path.parent / "config.json")
@@ -92,10 +93,20 @@ class CodingCLILauncher:
             from .account import AccountLayout
             account_layout = AccountLayout()
         self._account_layout = account_layout
+        # Per ``add-default-account-native-and-refresh``: when the binding's
+        # account name equals ``manifest.default``, we skip CLAUDE_CONFIG_DIR
+        # injection and use ~/.claude/ natively. The vault is optional —
+        # when None (test/legacy construction), no default-translation
+        # happens and behavior matches the original isolation rules.
+        self._account_vault = account_vault
         self._session_map: dict[str, str] = {}  # window_name -> session_id
         self._aliases: dict[str, dict] = {}     # alias_name -> alias config
         self._load_map()
         self._load_aliases()
+
+    def _effective_account(self, claude_account: str | None) -> str | None:
+        from .account import effective_account
+        return effective_account(claude_account, self._account_vault)
 
     def _load_map(self) -> None:
         if self.session_map_path.exists():
@@ -154,9 +165,11 @@ class CodingCLILauncher:
         # Account-aware override (Phase 0.5). Only applies when the resolved
         # base type is claude — codex/copilot/opencode have their own auth.
         # Defensive: only act on str account names (test fixtures sometimes
-        # pass MagicMock for legacy fields).
-        if isinstance(claude_account, str) and resolved.base_type == "claude":
-            account_dir = self._account_layout.account_dir(claude_account)
+        # pass MagicMock for legacy fields). Default account translates to
+        # None here so we use ~/.claude/ paths (no override applied).
+        effective = self._effective_account(claude_account) if isinstance(claude_account, str) else claude_account
+        if isinstance(effective, str) and resolved.base_type == "claude":
+            account_dir = self._account_layout.account_dir(effective)
             resolved = ResolvedCLI(
                 base_type=resolved.base_type,
                 cmd=resolved.cmd,
@@ -205,8 +218,12 @@ class CodingCLILauncher:
         else:
             base = resolved.cmd
 
-        if isinstance(claude_account, str) and resolved.base_type == "claude":
-            account_dir = self._account_layout.account_dir(claude_account)
+        # Default account → effective is None → no CLAUDE_CONFIG_DIR injected,
+        # so claude uses ~/.claude/ natively and its own keychain refresh loop
+        # stays warm (see ``add-default-account-native-and-refresh``).
+        effective = self._effective_account(claude_account) if isinstance(claude_account, str) else claude_account
+        if isinstance(effective, str) and resolved.base_type == "claude":
+            account_dir = self._account_layout.account_dir(effective)
             return f"CLAUDE_CONFIG_DIR={shlex.quote(str(account_dir))} {base}"
         return base
 
@@ -232,7 +249,7 @@ class CodingCLILauncher:
             claude_projects = (
                 Path(resolved.session_path).expanduser()
                 if resolved.session_path
-                else Path.home() / ".claude" / "projects"
+                else self._account_layout.legacy_claude_dir() / "projects"
             )
             dir_hash = work_dir.replace("/", "-")
             for candidate in (dir_hash, dir_hash.lstrip("-")):

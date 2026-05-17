@@ -207,6 +207,48 @@ export GITS_OAUTH_USAGE_URL=https://api.anthropic.com/api/oauth/usage   # 默认
 export GITS_OAUTH_BETA_HEADER=oauth-2025-04-20                          # 默认
 ```
 
+#### Default 账户走原生 `~/.claude/` + 其余账户每日 keepalive
+
+Per `add-default-account-native-and-refresh`：当 binding 的 `claude_account == manifest.default` 时，ghost **不**注入 `CLAUDE_CONFIG_DIR`，让 claude 走原生 `~/.claude/` 路径。非 default 账户仍走 `CLAUDE_CONFIG_DIR=~/.claude-<name>/` 隔离。
+
+**关于 keychain（empirically verified 2026-05-17）**：claude 为每个 `CLAUDE_CONFIG_DIR` 维护**独立**的 macOS keychain 条目——服务名是 `Claude Code-credentials-<sha256(path)[:8]>`，默认 `~/.claude/` 用无后缀的 `Claude Code-credentials`。所以多账户之间**不会**互相污染，每个账户有自己隔离的 keychain entry。（早期 README 里关于 keychain 全局污染的警告是错的，已废止。）
+
+ghost 利用这个事实做了两件事：
+
+1. **`gits account list` 现在读 keychain**：优先读 per-CONFIG_DIR 的 keychain entry（claude 写入刷新 token 的真实位置），fallback 到 `.credentials.json`。之前文件 token 老化导致显示 `stale` / `no credentials` 的问题已解决。
+2. **服务名选择**：`oauth_usage.py` 根据 `manifest.default` 选择服务名顺序——default 账户优先无后缀的 `Claude Code-credentials`，非 default 优先 sha256 后缀。
+
+**每日 keepalive — 进程内 scheduler（推荐）**
+
+非 default 账户需要周期性触发 `claude` 启动，让 claude 自带的 OAuth 刷新机制把 refresh token 续上。ghost daemon 内置 `TokenRefreshScheduler`，只要 daemon 在跑就**自动**每天执行——**跨机器移植无需任何外部 cron / launchd 设置**。状态持久化在 `~/.gits/token_refresh_state.json`，daemon 重启不会重复刷新。
+
+手动 CLI 入口（用于即时排查）：
+
+```bash
+# 手动跑一次（默认跳过 default 账户）
+gits account refresh
+
+# 只刷一个账户（包括 default）
+gits account refresh --account <name>
+```
+
+**可选：launchd 兜底**
+
+如果你的笔记本经常关机、ghost daemon 不长期在线，可以另装个 launchd plist 当 backstop：
+
+```bash
+gits account refresh-install     # macOS：写 plist + bootstrap
+gits account refresh-uninstall   # macOS：bootout + 删 plist
+# Linux 只打印 cron snippet，由用户自己加到 crontab
+```
+
+> **迁移辅助**：升级到本版本后，如果 `~/.claude-<default>/.credentials.json` 比 `~/.claude/.credentials.json` 新（启动日志会出现一条 WARN），跑：
+>
+> ```bash
+> gits account migrate-default-native          # dry-run，只打印计划
+> gits account migrate-default-native --apply  # 实际复制（会要 y/N 确认）
+> ```
+
 #### 切换 binding 的账户
 
 ```bash

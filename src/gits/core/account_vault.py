@@ -338,11 +338,16 @@ class AccountVault:
         partial: bool = False,
         when: str | None = None,
     ) -> Manifest:
-        """Write ``manifest.lastSwitch`` and bump the target's ``lastUsed`` and default.
+        """Write ``manifest.lastSwitch`` and bump the target's ``lastUsed``.
 
-        Per spec ``Default Account Auto-tracking``, every successful switch
-        also sets ``manifest.default = to``. Callers that need to record an
-        aborted switch should pass ``partial=True``.
+        Per ``add-default-account-native-and-refresh``: switching a single
+        binding does NOT mutate ``manifest.default``. The default account
+        is now a sticky, user-set property (set via the initial
+        ``gits account add`` or explicit ``gits account set-default``) —
+        not "wherever the last switch happened to land". Auto-tracking
+        the default broke the new "default account routes to native
+        ~/.claude/" rule by silently moving the default-routing target
+        every time a binding switched.
         """
         manifest = self.load()
         stamp = when or _now_iso()
@@ -358,7 +363,6 @@ class AccountVault:
             if entry.name == to:
                 entry.last_used = stamp
                 break
-        manifest.default = to
         self.save(manifest)
         return manifest
 

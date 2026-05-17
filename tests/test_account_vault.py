@@ -262,7 +262,10 @@ def test_vault_record_switch(vault: AccountVault) -> None:
     assert m.last_switch["binding_id"] == "b1"
     assert m.last_switch["to"] == "beta"
     assert m.last_switch["partial"] is False
-    assert m.default == "beta"
+    # Per add-default-account-native-and-refresh: record_switch must NOT
+    # mutate manifest.default. Default stays sticky on the user's
+    # primary account; only set_default() changes it.
+    assert m.default == "alpha"
     # beta lastUsed bumped
     beta = next(a for a in m.accounts if a.name == "beta")
     assert beta.last_used == "2026-04-28T12"

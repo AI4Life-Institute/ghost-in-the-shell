@@ -32,12 +32,42 @@ import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .account_vault import AccountVault
 
 logger = logging.getLogger(__name__)
 
 
 class AccountLayoutError(Exception):
     """Raised when an account-layout operation cannot complete safely."""
+
+
+def effective_account(
+    claude_account: str | None,
+    vault: AccountVault | None,
+) -> str | None:
+    """Translate a binding's ``claude_account`` for path/injection purposes.
+
+    Per the ``add-default-account-native-and-refresh`` change: when a binding's
+    account name equals the manifest default, we route it through native
+    ``~/.claude/`` paths (returning ``None``) so claude's own OAuth refresh
+    loop keeps the macOS keychain warm without ghost interference.
+
+    Fail-safe: any error (vault is None, manifest unreadable, etc.) preserves
+    the original ``claude_account`` so behavior degrades to the pre-change
+    isolation rules rather than silently breaking.
+    """
+    if claude_account is None or vault is None:
+        return claude_account
+    try:
+        default = vault.load().default
+    except Exception:
+        return claude_account
+    if default is not None and claude_account == default:
+        return None
+    return claude_account
 
 
 # ─────────────────────────────────────────────────────────────────────

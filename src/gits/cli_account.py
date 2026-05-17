@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -325,7 +326,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     # Count bindings per account (approximate — read state.json directly).
     binding_counts = _binding_count_per_account(settings)
 
-    client = UsageClient(layout=layout)
+    client = UsageClient(layout=layout, vault=vault)
     print(_format_header())
     for entry in manifest.accounts:
         usage_str = _format_usage(client.query(entry.name))
@@ -565,6 +566,255 @@ def cmd_import(args: argparse.Namespace) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Commands: refresh, refresh-install, refresh-uninstall, migrate-default-native
+# (per openspec change ``add-default-account-native-and-refresh``)
+# ─────────────────────────────────────────────────────────────────────
+
+#: launchd label and plist filename used for the daily refresh job.
+LAUNCHD_LABEL = "com.gits.token-refresh"
+
+
+def _plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
+
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def cmd_refresh(args: argparse.Namespace) -> None:
+    """``gits account refresh [--account <name>]``.
+
+    Invokes ``claude --print ping`` per account to exercise claude's own
+    OAuth refresh path, keeping non-default accounts' refresh tokens warm.
+    Exit code 0 if all attempted refreshes succeed (or no work to do);
+    1 if any failed.
+    """
+    from .core.token_refresh import refresh_account, refresh_all_non_default
+
+    settings = Settings()
+    layout = AccountLayout()
+    vault = AccountVault(settings.state_dir, layout=layout)
+
+    target = getattr(args, "account", None)
+    if target:
+        try:
+            manifest = vault.load()
+        except Exception as e:
+            print(f"[error] cannot load account manifest: {e}", file=sys.stderr)
+            sys.exit(1)
+        is_default = (manifest.default == target)
+        result = refresh_account(target, layout, is_default=is_default)
+        marker = "✓" if result.success else "✗"
+        suffix = f" ({result.duration_s:.1f}s)" if result.duration_s else ""
+        print(f"{marker} {result.account}{suffix}")
+        if not result.success:
+            tail = result.stderr_tail or result.skipped_reason or "(no detail)"
+            print(f"  {tail}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    results = refresh_all_non_default(vault, layout)
+    if not results:
+        print("[ok] no non-default accounts to refresh")
+        return
+
+    any_failed = False
+    for r in results:
+        marker = "✓" if r.success else "✗"
+        print(f"{marker} {r.account} ({r.duration_s:.1f}s)")
+        if not r.success:
+            any_failed = True
+            tail = r.stderr_tail or r.skipped_reason or "(no detail)"
+            print(f"  {tail}", file=sys.stderr)
+    print(f"[summary] {sum(1 for r in results if r.success)}/{len(results)} ok")
+    if any_failed:
+        sys.exit(1)
+
+
+_PLIST_TEMPLATE = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{gits_bin}</string>
+    <string>account</string>
+    <string>refresh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>{log_path}</string>
+  <key>StandardErrorPath</key>
+  <string>{log_path}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{path_env}</string>
+    <key>HOME</key>
+    <string>{home}</string>
+  </dict>
+</dict>
+</plist>
+"""
+
+
+def cmd_refresh_install(args: argparse.Namespace) -> None:
+    """``gits account refresh-install`` — schedule daily refresh.
+
+    On macOS: writes ``~/Library/LaunchAgents/com.gits.token-refresh.plist``
+    and bootstraps it with launchctl. On Linux: prints a cron snippet for
+    the user to install manually.
+    """
+    gits_bin = shutil.which("gits")
+    if not gits_bin:
+        print(
+            "[error] `gits` not found on PATH; cannot schedule. "
+            "Install gits globally first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not _is_macos():
+        print(
+            "[info] Linux scheduling is not auto-installed. Add this to your crontab:\n"
+            f"\n  0 4 * * * {gits_bin} account refresh >> ~/.gits/token-refresh.log 2>&1\n"
+        )
+        return
+
+    log_dir = Path.home() / ".gits"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "token-refresh.log"
+    plist_path = _plist_path()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Preserve a sane PATH for the launchd-spawned process; pull from the
+    # invoking shell so user-installed claude (e.g. ~/.local/bin) resolves.
+    path_env = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+    plist_path.write_text(_PLIST_TEMPLATE.format(
+        label=LAUNCHD_LABEL,
+        gits_bin=gits_bin,
+        log_path=str(log_path),
+        path_env=path_env,
+        home=str(Path.home()),
+    ))
+    plist_path.chmod(0o644)
+
+    # Bootstrap (re-bootstrap is idempotent if we bootout first)
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", domain, str(plist_path)],
+                   capture_output=True)
+    result = subprocess.run(
+        ["launchctl", "bootstrap", domain, str(plist_path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"[error] launchctl bootstrap failed (rc={result.returncode}):\n"
+            f"  stderr: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"[ok] installed daily refresh at 04:00 → {plist_path}")
+    print(f"     logs: {log_path}")
+
+
+def cmd_refresh_uninstall(args: argparse.Namespace) -> None:
+    """``gits account refresh-uninstall`` — remove the daily refresh job."""
+    if not _is_macos():
+        print("[info] no-op on Linux; remove the cron entry manually if present.")
+        return
+
+    plist_path = _plist_path()
+    if not plist_path.exists():
+        print("[ok] no refresh job installed; nothing to do.")
+        return
+
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", domain, str(plist_path)],
+                   capture_output=True)
+    plist_path.unlink()
+    print(f"[ok] uninstalled {plist_path}")
+
+
+def cmd_migrate_default_native(args: argparse.Namespace) -> None:
+    """``gits account migrate-default-native [--apply]``.
+
+    Compares ``~/.claude/.credentials.json`` vs ``~/.claude-<default>/.credentials.json``.
+    Default mode prints which is newer and what would be done. With
+    ``--apply``, copies the newer file over the older one (atomic
+    temp+rename, mode 0600). The macOS keychain is NOT touched — claude
+    will sync it on next invocation.
+    """
+    settings = Settings()
+    layout = AccountLayout()
+    vault = AccountVault(settings.state_dir, layout=layout)
+    try:
+        manifest = vault.load()
+    except Exception as e:
+        print(f"[error] cannot load manifest: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    default = manifest.default
+    if not default:
+        print("[ok] no default account set; nothing to migrate.")
+        return
+
+    native = layout.legacy_claude_dir() / ".credentials.json"
+    isolated = layout.account_dir(default) / ".credentials.json"
+
+    if not native.exists() and not isolated.exists():
+        print(f"[ok] neither {native} nor {isolated} exists; nothing to migrate.")
+        return
+    if not isolated.exists():
+        print(f"[ok] {isolated} missing; native is already authoritative.")
+        return
+    if not native.exists():
+        action = f"copy {isolated} → {native}"
+    else:
+        native_mt = native.stat().st_mtime
+        isolated_mt = isolated.stat().st_mtime
+        if native_mt > isolated_mt:
+            action = f"copy {native} → {isolated} (native is newer)"
+        elif isolated_mt > native_mt:
+            action = f"copy {isolated} → {native} (isolated is newer)"
+        else:
+            print(f"[ok] {native} and {isolated} have identical mtimes; no action.")
+            return
+
+    if not getattr(args, "apply", False):
+        print(f"[dry-run] would: {action}")
+        print("           re-run with --apply to perform the copy.")
+        return
+
+    answer = input(f"Apply: {action} ? [y/N] ").strip().lower()
+    if answer != "y":
+        print("[aborted] not applying.")
+        return
+
+    src, dst = (isolated, native) if isolated.stat().st_mtime > native.stat().st_mtime else (native, isolated)
+    if not native.exists():
+        src, dst = isolated, native
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
+    tmp.write_bytes(src.read_bytes())
+    tmp.chmod(0o600)
+    tmp.replace(dst)
+    print(f"[ok] copied {src} → {dst}")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Parser registration
 # ─────────────────────────────────────────────────────────────────────
 
@@ -642,12 +892,50 @@ def install_parser(parent_subparsers: argparse._SubParsersAction) -> None:
         )
         p_import.set_defaults(_handler=cmd_import)
 
+        p_refresh = ssub.add_parser(
+            "refresh",
+            help="Run `claude --print ping` per non-default account to refresh OAuth tokens",
+        )
+        p_refresh.add_argument(
+            "--account",
+            default=None,
+            help="Refresh a single account (including default); skips the all-accounts loop",
+        )
+        p_refresh.set_defaults(_handler=cmd_refresh)
+
+        p_install = ssub.add_parser(
+            "refresh-install",
+            help="Schedule daily refresh (launchd on macOS; cron snippet on Linux)",
+        )
+        p_install.set_defaults(_handler=cmd_refresh_install)
+
+        p_uninstall = ssub.add_parser(
+            "refresh-uninstall",
+            help="Remove the scheduled daily refresh job",
+        )
+        p_uninstall.set_defaults(_handler=cmd_refresh_uninstall)
+
+        p_migrate = ssub.add_parser(
+            "migrate-default-native",
+            help="Reconcile ~/.claude/.credentials.json with ~/.claude-<default>/ (dry-run by default)",
+        )
+        p_migrate.add_argument(
+            "--apply",
+            action="store_true",
+            help="Actually perform the copy (default is dry-run)",
+        )
+        p_migrate.set_defaults(_handler=cmd_migrate_default_native)
+
 
 def dispatch(args: argparse.Namespace) -> None:
     """Run the handler attached by ``set_defaults(_handler=...)``."""
     handler = getattr(args, "_handler", None)
     if handler is None:
-        print("usage: gits account <add|list|switch|remove|import>", file=sys.stderr)
+        print(
+            "usage: gits account <add|list|switch|remove|import|refresh|"
+            "refresh-install|refresh-uninstall|migrate-default-native>",
+            file=sys.stderr,
+        )
         sys.exit(1)
     handler(args)
 
