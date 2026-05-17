@@ -8,7 +8,7 @@
 
 约束（用户明确）：
 - 用 claude CLI 官方支持的 `CLAUDE_CONFIG_DIR` 环境变量做隔离
-- 配置目录命名 `claude-{account}`（如 `claude-sharon`、`claude-sharongoogle`）
+- 配置目录命名 `claude-{account}`（如 `claude-personal`、`claude-work`）
 - **严格隔离**：每账户的 `projects/`、`todos/`、`settings.json` 等子项是真实物理目录/文件，不与其它账户共享；跨账户使用同一 session 走显式 import 拷贝
 - 配额检测**主动调** `https://api.anthropic.com/api/oauth/usage`（OAuth Bearer 认证），不做被动模式匹配
 - 不持久化 `rateLimitedUntil` 等"猜测的"重置时间（API 是权威源，按需查询）
@@ -219,10 +219,10 @@ access token 取自 `~/.claude-{name}/.credentials.json` 的 `claudeAiOauth.acce
 
 **输出展示（list）**：
 ```
-* sharon       sharongoogle@ai4life.com    max    5h 26%   7d 4%    resets 1h32m    bindings 2
+* personal     alice@example.com           max    5h 26%   7d 4%    resets 1h32m    bindings 2
   work         work@example.com            pro    5h 0%    7d 12%   resets 4h05m    bindings 0
   legacy       sam@example.com             max    usage: stale credentials          bindings 1
-[default: sharon]
+[default: personal]
 ```
 
 **不做被动模式匹配**：旧方案的 `quota_patterns.yaml` + `QuotaPatternMatcher` + 200ms 反向信号 + 连续两帧 debounce 全部废除。CLI 输出 / JSONL 中的限额信息只是 UX 提示，不驱动 ghost 状态变更。

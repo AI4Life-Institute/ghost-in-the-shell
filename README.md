@@ -30,6 +30,9 @@
 - **终端截图** — 发 `/s` 立刻把当前终端画面截图发到手机
 - **权限确认变按钮** — CLI 弹出权限提示时，Discord 显示可点击的按钮，手机上一键批准或拒绝
 - **多 CLI 支持** — 支持 Claude Code、Codex CLI、OpenCode，每个频道可独立切换
+- **多 Claude 账户隔离** — `gits account add` 注册多个 Claude 账户（每个账户独立 `CLAUDE_CONFIG_DIR`），用 `/account-switch` 在 Discord 直接切换；下拉显示当前/默认账户和自定义 tag（如 "20x Max"、"6x Team"）
+- **OAuth token 自动续期** — 内置 daemon 内 24h scheduler 定期触发非默认账户的 token 刷新，跨机器无需 cron / launchd 配置；`gits account list` 直接读 keychain 显示实时配额
+- **Discord `/raw` 透传命令** — 给 claude 发斜杠命令（如 `/raw /status`）绕过 Discord 自己的斜杠拦截
 - **会话恢复** — 重新绑定时显示历史会话列表，可续接之前的对话
 - **tmux 实体终端** — 每个项目运行在真实的 tmux 窗口里，本地开发者仍可直接操作终端
 - **自动内存管理** — 空闲进程自动挂起（空闲阈值随可用内存动态调整：内存充足时 2 小时，内存紧张时最短 10 分钟），收到消息后自动恢复
