@@ -16,6 +16,8 @@ python3 -c "import secrets; print(''.join(secrets.choice('abcdefghijklmnopqrstuv
 
 The ID lives in the `id:` frontmatter field and is **prefixed into task filenames** for quick scan/sort. Vaults using Obsidian-style wiki links typically reference tasks as `[[<id>]]`; vaults using plain markdown can use any reference style — the ID itself is what's load-bearing, the link syntax is a per-vault choice.
 
+> **Filename form**: dash-separated, no spaces — `<YYYY-MM-DD>-<id>-<title-with-dashes>.md`. Butler also accepts the legacy space-separated form (`<YYYY-MM-DD> <id> <Title>.md`) on disk indefinitely, since older task pages predate the convention; new files use dashes.
+
 ## Directory layout
 
 ```
@@ -25,14 +27,14 @@ Projects/
     ├── README.md                                  ← project info (id, repo, paths, etc.)
     ├── tasks/                                     ← active / in-progress / under review
     │   └── <area>/YYYY-MM/                        ← area = subsystem (defined in project README)
-    │       ├── <YYYY-MM-DD> <id> <Title>.md           ← atomic task
-    │       └── <YYYY-MM-DD> <id> <Title>/             ← epic (folder)
+    │       ├── <YYYY-MM-DD>-<id>-<title>.md           ← atomic task
+    │       └── <YYYY-MM-DD>-<id>-<title>/             ← epic (folder)
     │           ├── README.md                          ← epic overview
     │           ├── spec.md                            ← locked before subtasks
-    │           └── <YYYY-MM-DD> <subid> <subtitle>.md ← subtasks
+    │           └── <YYYY-MM-DD>-<subid>-<subtitle>.md ← subtasks
     ├── archive/                                   ← completed / cancelled tasks (same shape)
     │   └── <area>/YYYY-MM/
-    │       └── <YYYY-MM-DD> <id> <Title>.md
+    │       └── <YYYY-MM-DD>-<id>-<title>.md
     └── docs/                                      ← optional: deep dives, design notes
 ```
 
@@ -111,7 +113,7 @@ Terminal states (`done`, `cancelled`) require `completed:` set to the date of tr
 ## Atomic vs epic
 
 - **Atomic task** = a single `.md` file. Use when the task is self-contained — no spec needed, no subtasks.
-- **Epic task** = a folder named `<YYYY-MM-DD> <id> <Title>/` containing `README.md` (overview), an optional `spec.md` (locked before any subtask dispatch), and one or more subtask `.md` files.
+- **Epic task** = a folder named `<YYYY-MM-DD>-<id>-<title>/` containing `README.md` (overview), an optional `spec.md` (locked before any subtask dispatch), and one or more subtask `.md` files.
 
 **Promotion rule:** start as atomic. If a task grows complex enough to need a spec or subtasks, promote it — move the `.md` file to `<...>/README.md` inside a new folder of the same name (minus `.md`).
 
@@ -204,6 +206,6 @@ The schema imposes these frontmatter coherence rules. A vault's lint tool should
 **New task:**
 
 1. Generate a 6-char ID
-2. Create the file at `Projects/<P>/tasks/<area>/<YYYY-MM>/<YYYY-MM-DD> <id> <title>.md` with the required frontmatter (`status: draft`)
+2. Create the file at `Projects/<P>/tasks/<area>/<YYYY-MM>/<YYYY-MM-DD>-<id>-<title>.md` with the required frontmatter (`status: draft`)
 3. Fill the body: Goal, Context, Acceptance criteria, Out-of-scope, Dispatch message, Test plan
 4. Dispatch via `ghost butler dispatch <task-id>` — see [dispatch lifecycle](dispatch-lifecycle.md)
