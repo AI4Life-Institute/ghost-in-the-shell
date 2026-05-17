@@ -136,12 +136,118 @@ def test_resolve_task_file_multi_match_halts(vault):
 
 
 def test_resolve_task_file_id_match_does_not_collide_on_substring(vault):
-    """A 6-char id needle requires word-boundaries (` abc123 `), so a longer
-    filename id containing the substring must NOT match."""
+    """A 6-char id needle requires separator-boundaries (space or dash), so
+    a longer filename id containing the substring must NOT match."""
     _make_task_file(vault, fname="2026-05-16 abc123x other.md", tid="abc123x")
     with pytest.raises(SystemExit) as exc:
         dispatch_task.resolve_task_file("abc123", str(vault))
     assert "no task file matches" in str(exc.value)
+
+
+# -- dash-form filename support (task [[elgcbn]]) ---------------------------
+
+
+def test_resolve_task_file_by_id_match_dash_form(vault):
+    """New dash-separated filename: ``2026-05-17-abc123-foo-bar.md``."""
+    p = _make_task_file(
+        vault, fname="2026-05-17-abc123-foo-bar.md", tid="abc123"
+    )
+    assert dispatch_task.resolve_task_file("abc123", str(vault)) == p
+
+
+def test_resolve_task_file_id_dash_form_does_not_collide_on_substring(vault):
+    """Same substring-collision guard must apply on dash-form filenames."""
+    _make_task_file(
+        vault, fname="2026-05-17-abc123x-other.md", tid="abc123x"
+    )
+    with pytest.raises(SystemExit) as exc:
+        dispatch_task.resolve_task_file("abc123", str(vault))
+    assert "no task file matches" in str(exc.value)
+
+
+def test_resolve_task_file_finds_tid_across_both_forms(vault):
+    """Same query resolves either form when only one exists."""
+    p_old = _make_task_file(
+        vault, fname="2026-05-16 aaa111 alpha.md", tid="aaa111"
+    )
+    p_new = _make_task_file(
+        vault, fname="2026-05-17-bbb222-beta.md", tid="bbb222"
+    )
+    assert dispatch_task.resolve_task_file("aaa111", str(vault)) == p_old
+    assert dispatch_task.resolve_task_file("bbb222", str(vault)) == p_new
+
+
+def test_resolve_task_file_fuzzy_match_dash_form(vault):
+    """Fuzzy (non-id) query treats `-` and ` ` interchangeably — so
+    ``dispatch "foo bar"`` finds ``2026-05-17-xyz789-foo-bar.md``."""
+    p = _make_task_file(
+        vault, fname="2026-05-17-xyz789-foo-bar.md", tid="xyz789"
+    )
+    assert dispatch_task.resolve_task_file("foo bar", str(vault)) == p
+
+
+def test_resolve_task_file_fuzzy_match_space_query_against_dash_form(vault):
+    """Inverse: dash-form query against old-form filename also works."""
+    p = _make_task_file(
+        vault, fname="2026-05-16 xyz789 do the thing.md", tid="xyz789"
+    )
+    assert dispatch_task.resolve_task_file("do-the-thing", str(vault)) == p
+
+
+# -- thread_title (task [[elgcbn]]) -----------------------------------------
+
+
+def test_thread_title_old_format():
+    """Legacy space-separated filename — behavior unchanged."""
+    assert (
+        dispatch_task.thread_title("/x/2026-05-17 abc123 Foo Bar Baz.md")
+        == "Foo Bar Baz"
+    )
+
+
+def test_thread_title_old_format_preserves_dashes_in_title():
+    """Old-form titles can contain literal dashes; they must be preserved
+    byte-for-byte (regression: this very task's old-form filename was
+    ``2026-05-17 elgcbn butler accepts dash-separated task filenames.md``)."""
+    assert (
+        dispatch_task.thread_title(
+            "/x/2026-05-17 elgcbn butler accepts dash-separated task filenames.md"
+        )
+        == "butler accepts dash-separated task filenames"
+    )
+
+
+def test_thread_title_new_format_lowercase_dash_to_space():
+    """New dash-separated filename — dashes become spaces, no case change."""
+    assert (
+        dispatch_task.thread_title("/x/2026-05-17-abc123-foo-bar-baz.md")
+        == "foo bar baz"
+    )
+
+
+def test_thread_title_new_format_real_filename():
+    """This very task's new-form filename (operator-confirmed: lowercase)."""
+    assert (
+        dispatch_task.thread_title(
+            "/v/Projects/Ghost/tasks/discord-bot/2026-05/"
+            "2026-05-17-elgcbn-butler-accepts-dash-separated-task-filenames.md"
+        )
+        == "butler accepts dash separated task filenames"
+    )
+
+
+def test_thread_title_unparseable_falls_back_to_basename():
+    """Anything that matches neither form returns the basename sans .md —
+    don't lose the filename, even if it's malformed."""
+    assert dispatch_task.thread_title("/x/weird-name.md") == "weird-name"
+    assert dispatch_task.thread_title("/x/no-extension") == "no-extension"
+
+
+def test_thread_title_new_format_single_word_slug():
+    """New-form with a single-word title still works."""
+    assert (
+        dispatch_task.thread_title("/x/2026-05-17-abc123-foo.md") == "foo"
+    )
 
 
 # ---------------------------------------------------------------------------

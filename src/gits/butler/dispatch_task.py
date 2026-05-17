@@ -182,24 +182,30 @@ def resolve_task_file(task_ref: str, vault_root: str) -> str:
     """Find a task .md by 6-char id (preferred) or filename fragment.
 
     Halts on 0 matches or >1 matches — silent ambiguity is the main thing
-    this codification prevents."""
+    this codification prevents.
+
+    Both branches treat ``-`` and `` `` as interchangeable separators so the
+    same query works against the legacy space-form (``2026-05-17 abc123
+    title.md``) and the current dash-form (``2026-05-17-abc123-title.md``)
+    filenames."""
     projects_dir = os.path.join(vault_root, "Projects")
 
     if re.fullmatch(r"[a-z0-9]{6}", task_ref):
-        needle = f" {task_ref} "
+        pat = re.compile(r"[ \-]" + re.escape(task_ref) + r"[ \-]")
         matches = [
             os.path.join(root, fn)
             for root, _, files in os.walk(projects_dir)
             for fn in files
-            if fn.endswith(".md") and needle in fn
+            if fn.endswith(".md") and pat.search(fn)
         ]
     else:
-        needle = task_ref.lower()
+        needle = re.sub(r"[ \-]+", " ", task_ref.lower())
         matches = [
             os.path.join(root, fn)
             for root, _, files in os.walk(projects_dir)
             for fn in files
-            if fn.endswith(".md") and needle in fn.lower()
+            if fn.endswith(".md")
+            and needle in re.sub(r"[ \-]+", " ", fn.lower())
         ]
 
     if len(matches) == 1:
@@ -225,11 +231,28 @@ def resolve_work_dir(project_name: str, vault_root: str) -> str:
     return _resolve_placeholder(m.group(1).strip(), vault_root)
 
 
+_NEW_FORM_FNAME = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9]{6}-(.+)$")
+_OLD_FORM_FNAME = re.compile(r"^\d{4}-\d{2}-\d{2} [a-z0-9]{6} (.+)$")
+
+
 def thread_title(task_path: str) -> str:
-    """Strip date prefix, id, and .md for the Discord thread name."""
+    """Strip date prefix, id, and .md for the Discord thread name.
+
+    Handles both filename forms:
+      - Old (legacy):  ``2026-05-17 abc123 Foo Bar.md`` → ``"Foo Bar"``
+      - New (current): ``2026-05-17-abc123-foo-bar.md`` → ``"foo bar"``
+
+    The new form intentionally returns lowercase with ``-`` → `` `` only,
+    no Title Case — the dash-slug carries no casing information so any
+    transformation would be a fabrication. Old-form titles containing
+    literal dashes (e.g. ``... abc123 dash-separated names.md``) are
+    preserved byte-for-byte, since old-form titles never collapsed."""
     name = re.sub(r"\.md$", "", os.path.basename(task_path))
-    parts = name.split(" ", 2)
-    return parts[2] if len(parts) >= 3 else name
+    if m := _NEW_FORM_FNAME.match(name):
+        return m.group(1).replace("-", " ")
+    if m := _OLD_FORM_FNAME.match(name):
+        return m.group(1)
+    return name
 
 
 # ── home channel ─────────────────────────────────────────────────────────────
