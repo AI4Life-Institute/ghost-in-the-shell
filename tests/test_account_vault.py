@@ -253,6 +253,20 @@ def test_vault_update_last_used(vault: AccountVault) -> None:
     assert m.accounts[0].last_used == "2026-04-28T10:00:00"
 
 
+def test_vault_set_tags(vault: AccountVault) -> None:
+    vault.add(AccountEntry(name="alpha", config_dir="/x"))
+    m = vault.set_tags("alpha", ["20x Max", "primary"])
+    assert m.accounts[0].tags == ["20x Max", "primary"]
+    # Clear
+    m = vault.set_tags("alpha", [])
+    assert m.accounts[0].tags == []
+
+
+def test_vault_set_tags_unknown_account(vault: AccountVault) -> None:
+    with pytest.raises(AccountVaultError):
+        vault.set_tags("ghost", ["x"])
+
+
 def test_vault_record_switch(vault: AccountVault) -> None:
     vault.add(AccountEntry(name="alpha", config_dir="/x"))
     vault.add(AccountEntry(name="beta", config_dir="/y"))

@@ -566,6 +566,45 @@ def cmd_import(args: argparse.Namespace) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Commands: set-default, set-tags
+# ─────────────────────────────────────────────────────────────────────
+
+
+def cmd_set_default(args: argparse.Namespace) -> None:
+    """``gits account set-default <name>``."""
+    settings = Settings()
+    layout = AccountLayout()
+    vault = AccountVault(settings.state_dir, layout=layout)
+    try:
+        vault.set_default(args.name)
+    except AccountVaultError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[ok] manifest.default = {args.name!r}")
+    print("     Restart ghost (`pm2 restart ghost-in-the-shell`) for the change to take effect.")
+
+
+def cmd_set_tags(args: argparse.Namespace) -> None:
+    """``gits account set-tags <name> [<tag>...]``.
+
+    Replaces the account's tag list. Pass zero tags to clear.
+    Tags surface in the ``/account-switch`` autocomplete.
+    """
+    settings = Settings()
+    layout = AccountLayout()
+    vault = AccountVault(settings.state_dir, layout=layout)
+    try:
+        vault.set_tags(args.name, args.tags or [])
+    except AccountVaultError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        sys.exit(1)
+    if args.tags:
+        print(f"[ok] {args.name} tags = {args.tags}")
+    else:
+        print(f"[ok] {args.name} tags cleared")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Commands: refresh, refresh-install, refresh-uninstall, migrate-default-native
 # (per openspec change ``add-default-account-native-and-refresh``)
 # ─────────────────────────────────────────────────────────────────────
@@ -926,6 +965,23 @@ def install_parser(parent_subparsers: argparse._SubParsersAction) -> None:
         )
         p_migrate.set_defaults(_handler=cmd_migrate_default_native)
 
+        p_setdef = ssub.add_parser(
+            "set-default",
+            help="Set the manifest default account (routes through native ~/.claude/)",
+        )
+        p_setdef.add_argument("name", help="Account name to make default")
+        p_setdef.set_defaults(_handler=cmd_set_default)
+
+        p_settags = ssub.add_parser(
+            "set-tags",
+            help="Replace an account's tags (shown in /account-switch autocomplete)",
+        )
+        p_settags.add_argument("name", help="Account name")
+        p_settags.add_argument(
+            "tags", nargs="*", help="Tags (zero or more; clears if empty)",
+        )
+        p_settags.set_defaults(_handler=cmd_set_tags)
+
 
 def dispatch(args: argparse.Namespace) -> None:
     """Run the handler attached by ``set_defaults(_handler=...)``."""
@@ -933,7 +989,8 @@ def dispatch(args: argparse.Namespace) -> None:
     if handler is None:
         print(
             "usage: gits account <add|list|switch|remove|import|refresh|"
-            "refresh-install|refresh-uninstall|migrate-default-native>",
+            "refresh-install|refresh-uninstall|migrate-default-native|"
+            "set-default|set-tags>",
             file=sys.stderr,
         )
         sys.exit(1)

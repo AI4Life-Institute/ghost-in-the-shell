@@ -1196,13 +1196,19 @@ class DiscordAdapter(PlatformAdapter):
             for a in manifest.accounts:
                 if current and current.lower() not in a.name.lower():
                     continue
-                tags = []
+                # Combine state tags (current/default) + user-set tags from
+                # manifest (e.g. "20x Max", "6x Team") into a single label.
+                tags: list[str] = []
                 if a.name == binding_account:
                     tags.append("current")
                 if a.name == manifest.default:
                     tags.append("default")
+                user_tags = list(getattr(a, "tags", []) or [])
+                tags.extend(user_tags)
                 suffix = f" ({', '.join(tags)})" if tags else ""
-                choices.append(app_commands.Choice(name=a.name + suffix, value=a.name))
+                # Discord caps choice display at 100 chars; keep it sane.
+                label = (a.name + suffix)[:100]
+                choices.append(app_commands.Choice(name=label, value=a.name))
                 if len(choices) >= 25:
                     break
             return choices

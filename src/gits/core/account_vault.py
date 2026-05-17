@@ -317,6 +317,21 @@ class AccountVault:
         self.save(manifest)
         return manifest
 
+    def set_tags(self, name: str, tags: list[str]) -> Manifest:
+        """Replace an account's ``tags`` list. Useful for labelling plan tier.
+
+        Per ``add-default-account-native-and-refresh``: tags surface in the
+        ``/account-switch`` autocomplete so users can distinguish 20x Max
+        vs 6x Team accounts at a glance.
+        """
+        manifest = self.load()
+        for entry in manifest.accounts:
+            if entry.name == name:
+                entry.tags = list(tags)
+                self.save(manifest)
+                return manifest
+        raise AccountVaultError(f"no such account '{name}'")
+
     def update_last_used(self, name: str, when: str | None = None) -> Manifest:
         """Stamp an account's ``lastUsed`` field. ``when`` defaults to now."""
         manifest = self.load()
