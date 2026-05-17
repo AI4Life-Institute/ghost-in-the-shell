@@ -143,6 +143,89 @@ it intentionally ignores any thread/channel info on the task page itself.
 Your dispatched work goes under your own channel regardless of which project
 the task belongs to.
 
+### Post-dispatch: monitor for executor replies
+
+Dispatch is not fire-and-forget. After a task lands in a Discord thread, the
+executor will eventually reply (plan → question → diff), and the butler
+session needs to *notice* and surface those replies to the operator with the
+right urgency. The recipe below is dispatch's downstream half — the two
+belong together. It is a **session-level pattern**, not a CLI verb; there is
+no `ghost butler monitor` command.
+
+> **Lifecycle rule.** Session-internal automation should be lifecycle-tied
+> to observable need — not "always on in case." Run the monitor iff at least
+> one task is in a `dispatched*` state; stop it when the last one transitions
+> out. Generalizes beyond this recipe — same rule applies to background
+> agents, watchers, and any other always-on poll.
+
+#### When to start / stop the monitor
+
+| Trigger | Action |
+|---|---|
+| Session start: grep `Projects/*/tasks/**/*.md` for `status: dispatched` finds matches | `CronCreate` the monitor; persist returned job-id to `.vault-session/monitor-cron-id` |
+| `ghost butler dispatch` succeeds AND `.vault-session/monitor-cron-id` is absent | Same — start monitor cron and persist its id |
+| Monitor poll observes the last `dispatched*` task transitioned out (→ `review` / `done` / `cancelled`) | Self-terminates: `CronDelete <that-job-id>`, remove `.vault-session/monitor-cron-id`, exit (baked into the prompt below) |
+
+Monitor scope is the current Claude session; concurrent vault sessions each
+run their own. Race on `.vault-session/poll-state.json` is theoretical edge
+case (YAGNI for v1).
+
+Invoke via Claude Code's `/loop` skill at 1-minute interval — `/loop` wraps
+`CronCreate` underneath, so if `/loop` is not loaded you can call
+`CronCreate` directly with the same prompt body and a `*/1 * * * *`
+schedule. Capture the returned job-id into `.vault-session/monitor-cron-id`
+so the monitor can self-delete on its final poll.
+
+#### Monitor prompt (paste-ready)
+
+The `[butler:<your-butler-user>]` substring below is operator-specific —
+substitute the user returned by `ghost butler whoami` at session-start time
+(e.g. `[butler:weiliu]` in `vault-weiliu/`, `[butler:kathy]` in
+`vault-kathy/`).
+
+````
+Scan all task pages under Projects/*/tasks/**/*.md whose frontmatter
+`status` starts with `dispatched`. For each: extract the thread id from
+the `thread:` frontmatter URL, run `ghost butler read-thread <tid>
+--limit 20`, and identify the latest non-bot message. Classify each task
+as one of: **waiting-on-me** (latest substantive message has no
+`[butler:<your-butler-user>]` prefix — i.e. executor responded and I
+haven't replied), **waiting-on-executor** (latest substantive message
+has `[butler:<your-butler-user>]` prefix — I dispatched / replied,
+executor hasn't responded yet), or **idle** (no messages in >12h).
+
+If the scan finds **0 tasks** in `dispatched*` state AND a monitor cron
+is currently running (its job-id stored at
+`.vault-session/monitor-cron-id`), invoke `CronDelete <that-job-id>`,
+remove the file, and exit — polling has no remaining purpose.
+(Demonstrates the lifecycle-tied rule: no dispatched task → no monitor.)
+
+Otherwise, print a compact dashboard:
+
+```
+=== thread monitor [HH:MM UTC] ===
+Total active dispatched: N    waiting-on-me: M    waiting-on-executor: K
+- [[id]] (status, area) → who-on, last-msg <Hh ago>: "<first-80-chars-of-last-msg>"
+...
+```
+
+If any task is **newly** in waiting-on-me state (compared to the prior
+snapshot — store snapshots at `.vault-session/poll-state.json`, creating
+the dir if needed; key by tid, value `{last_msg_id, last_who, last_ts}`),
+flag with a loud header `⚠️ NEW: <id> needs reply` so I notice. If no
+state change since last check, print just `=== thread monitor [HH:MM UTC]
+=== no change` and stop. Do NOT take any action on the threads — just
+report.
+````
+
+#### See also
+
+- The `ghost butler dispatch` section above — the upstream half.
+- `docs/dispatch-lifecycle.md` — full dispatch → plan → greenlight →
+  acceptance → archive flow.
+- Future improvement (out of scope here): ghost daemon push notifications
+  would replace this polling design.
+
 ## When to use this skill
 
 - The user asks to message a Discord channel or thread from this worktree
