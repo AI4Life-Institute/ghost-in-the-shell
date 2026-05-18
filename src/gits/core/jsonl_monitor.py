@@ -254,6 +254,14 @@ class JsonlMonitor:
         # can be cheap (no event-loop hop).
         self._on_jsonl_line: Callable[[str, str], None] | None = None
 
+        # Idle-timer throttle: outbound POSTs call session_mgr.touch_active so
+        # the idle-suspend heuristic sees outbound-only work as activity. Each
+        # touch triggers a state.json save, and chatty sessions produce many
+        # chunks/sec — coalesce to at most one touch per channel per window.
+        # 5s vs the 70-min idle threshold loses ≤0.1% precision.
+        self._TOUCH_THROTTLE = 5.0
+        self._last_touch_at: dict[str, float] = {}
+
     def on_message(self, callback: Callable[[str, str], Awaitable[None]]) -> None:
         """Register callback for new assistant messages.
 
@@ -268,6 +276,13 @@ class JsonlMonitor:
         logged — a misbehaving callback must never break message delivery.
         """
         self._on_jsonl_line = callback
+
+    async def _touch_active_throttled(self, channel_id: str) -> None:
+        now = time.time()
+        if now - self._last_touch_at.get(channel_id, 0.0) < self._TOUCH_THROTTLE:
+            return
+        self._last_touch_at[channel_id] = now
+        await self._session_mgr.touch_active(channel_id)
 
     def start(self) -> None:
         """Start the JSONL monitoring loop."""
@@ -577,6 +592,7 @@ class JsonlMonitor:
                 for chunk in chunks:
                     try:
                         await self._on_message(binding.channel_id, chunk)
+                        await self._touch_active_throttled(binding.channel_id)
                         logger.info(
                             "JSONL forwarded to Discord ch=%s: %s",
                             binding.channel_id, chunk[:80],
@@ -790,6 +806,7 @@ class JsonlMonitor:
                 for chunk in chunks:
                     try:
                         await self._on_message(binding.channel_id, chunk)
+                        await self._touch_active_throttled(binding.channel_id)
                     except Exception:
                         logger.exception("OpenCode monitor callback error")
 

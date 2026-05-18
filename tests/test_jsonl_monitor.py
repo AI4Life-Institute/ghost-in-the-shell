@@ -238,6 +238,8 @@ class TestExtractAssistantContent:
 def session_mgr():
     mgr = MagicMock()
     mgr.list_bindings.return_value = []
+    # touch_active is awaited by JsonlMonitor after every successful outbound POST
+    mgr.touch_active = AsyncMock()
     return mgr
 
 
@@ -1769,3 +1771,259 @@ class TestHookNonInteractiveFilter:
     def test_interactive_codex_proceeds(self, tmp_path):
         """Interactive codex (no -q/--quiet) → hook writes session_map."""
         assert self._run_hook(tmp_path, "codex", []) is False
+
+
+# -- Idle-timer refresh on outbound POST (task q4r8nm) -----------------------
+
+
+class TestTouchActiveOnOutbound:
+    """Outbound Discord POSTs must refresh the idle-suspend timer.
+
+    Without this, an outbound-heavy session (PM butler driving crons, file
+    edits, PR merges) gets idle-suspended every ~70 min even while busy,
+    because `touch_active` was historically only called on inbound messages.
+    """
+
+    @pytest.mark.asyncio
+    async def test_success_calls_touch_active(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """A successful forward refreshes the binding's idle timer."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        monitor.on_message(AsyncMock())
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        # Prime offset
+        await monitor._poll_once()
+        session_mgr.touch_active.assert_not_called()
+
+        # Append new content → outbound forward should fire touch_active
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "hello"}]},
+            }) + "\n")
+
+        await monitor._poll_once()
+        session_mgr.touch_active.assert_awaited_once_with("ch1")
+
+    @pytest.mark.asyncio
+    async def test_failed_post_does_not_touch_active(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """If _on_message raises, touch_active must NOT fire — refreshing the
+        idle timer on a failed POST would mask a broken Discord bridge."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        monitor.on_message(AsyncMock(side_effect=RuntimeError("discord down")))
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()
+
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "x"}]},
+            }) + "\n")
+
+        await monitor._poll_once()
+        session_mgr.touch_active.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_throttle_coalesces_burst(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """A burst of chunks inside the throttle window collapses to one touch.
+
+        Otherwise every chunk would re-write state.json (touch_active does an
+        atomic save), which would thrash disk on chatty sessions.
+        """
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        monitor.on_message(AsyncMock())
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()
+
+        # ~3000 chars → split into 2 chunks (MAX_MESSAGE_LENGTH=1900), and
+        # write ten such messages — well over the chunks-per-poll headroom.
+        with open(jsonl_file, "a") as f:
+            for _ in range(10):
+                f.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "A" * 3000}]},
+                }) + "\n")
+
+        await monitor._poll_once()
+        # Many chunks within one ~instant poll → exactly one touch.
+        assert session_mgr.touch_active.await_count == 1
+        session_mgr.touch_active.assert_awaited_with("ch1")
+
+    @pytest.mark.asyncio
+    async def test_throttle_releases_after_window(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """A second touch after the throttle window elapses fires again."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        monitor.on_message(AsyncMock())
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+        # Drop the throttle to keep the test fast (functionally identical).
+        monitor._TOUCH_THROTTLE = 0.05
+
+        await monitor._poll_once()
+
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "first"}]},
+            }) + "\n")
+        await monitor._poll_once()
+
+        await asyncio.sleep(0.1)  # cross the throttle window
+
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "second"}]},
+            }) + "\n")
+        await monitor._poll_once()
+
+        assert session_mgr.touch_active.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_per_channel_throttle_independent(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """Two channels touched in the same instant both get touch_active —
+        the throttle is per-channel, not global."""
+        f_a = tmp_path / "sess-a.jsonl"
+        f_b = tmp_path / "sess-b.jsonl"
+        _make_jsonl_file(f_a, [])
+        _make_jsonl_file(f_b, [])
+
+        binding_a = _make_binding(channel_id="chA", cli_session_id="sess-a")
+        binding_b = _make_binding(channel_id="chB", cli_session_id="sess-b")
+        session_mgr.list_bindings.return_value = [binding_a, binding_b]
+        monitor.on_message(AsyncMock())
+
+        def _find(b):
+            return f_a if b.channel_id == "chA" else f_b
+        monitor._find_jsonl_file = MagicMock(side_effect=_find)
+
+        await monitor._poll_once()
+
+        for f, txt in ((f_a, "alpha"), (f_b, "bravo")):
+            with open(f, "a") as fh:
+                fh.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": txt}]},
+                }) + "\n")
+
+        await monitor._poll_once()
+        assert session_mgr.touch_active.await_count == 2
+        touched = {c.args[0] for c in session_mgr.touch_active.await_args_list}
+        assert touched == {"chA", "chB"}
+
+    @pytest.mark.asyncio
+    async def test_integration_advances_last_active_at(self, tmp_path):
+        """End-to-end through a real SessionManager: last_active_at advances
+        after an outbound forward."""
+        from gits.core.session import SessionManager
+
+        real_mgr = SessionManager(state_dir=tmp_path)
+        await real_mgr.bind(
+            platform="discord",
+            channel_id="chREAL",
+            window_id="@1",
+            window_name="test",
+            work_dir=str(tmp_path),
+        )
+        # Backdate so the advance is unambiguous.
+        binding = real_mgr.get_binding("chREAL")
+        binding.last_active_at = time.time() - 3600
+        before = binding.last_active_at
+
+        monitor = JsonlMonitor(session_mgr=real_mgr, poll_interval=0.05)
+        jsonl_file = tmp_path / "sess-real.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+
+        # Inject a binding the monitor will actually poll. (The real mgr's
+        # binding lacks cli_session_id; patch _find_jsonl_file to bypass.)
+        fake_b = _make_binding(channel_id="chREAL")
+        real_mgr.list_bindings = MagicMock(return_value=[fake_b])
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+        monitor.on_message(AsyncMock())
+
+        await monitor._poll_once()  # prime
+
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "ping"}]},
+            }) + "\n")
+        await monitor._poll_once()
+
+        assert real_mgr.get_binding("chREAL").last_active_at > before
+
+    @pytest.mark.asyncio
+    async def test_helper_unit_throttle(self, monitor, session_mgr):
+        """Direct unit test of the throttle helper — both call sites (JSONL
+        and OpenCode) route through it, so this pins the contract."""
+        monitor._TOUCH_THROTTLE = 1000.0  # effectively disable to test sequencing
+
+        await monitor._touch_active_throttled("chX")
+        await monitor._touch_active_throttled("chX")  # throttled
+        await monitor._touch_active_throttled("chY")  # different channel → fires
+        assert session_mgr.touch_active.await_count == 2
+        called_channels = [
+            c.args[0] for c in session_mgr.touch_active.await_args_list
+        ]
+        assert called_channels == ["chX", "chY"]
+
+    @pytest.mark.asyncio
+    async def test_opencode_path_also_touches(
+        self, monitor, session_mgr, tmp_path, monkeypatch,
+    ):
+        """OpenCode forwards are also outbound Discord POSTs — same bug, same
+        fix as the JSONL path. Verifies the wiring at line ~809."""
+        # Build the directory chain the method expects under a fake $HOME.
+        fake_home = tmp_path / "home"
+        oc_dir = fake_home / ".local" / "share" / "opencode"
+        oc_dir.mkdir(parents=True)
+        (oc_dir / "opencode.db").touch()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        # Stub the SQLite reader — first poll is snapshot (returns []), second
+        # returns new text. The method tracks per-session timestamps internally.
+        reads = iter([
+            ([], 0),
+            (["opencode reply"], 1),
+        ])
+        monkeypatch.setattr(
+            JsonlMonitor, "_read_opencode_db",
+            staticmethod(lambda *a, **kw: next(reads)),
+        )
+
+        binding = _make_binding(channel_id="chOC", cli_session_id="sess-oc")
+        binding.coding_cli = "opencode"
+        monitor.on_message(AsyncMock())
+
+        await monitor._check_opencode_binding(binding)  # snapshot
+        session_mgr.touch_active.assert_not_called()
+
+        await monitor._check_opencode_binding(binding)  # new content → touch
+        session_mgr.touch_active.assert_awaited_once_with("chOC")
