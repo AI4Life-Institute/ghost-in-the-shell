@@ -477,6 +477,101 @@ def test_happy_path_writes_all_four_frontmatter_fields(vault, monkeypatch):
     assert fm["dispatch_msg_id"] == "MID-POINTER"
     assert fm["status"] == "dispatched (plan-phase)"
     assert fm["dispatched"]  # today's date — don't pin
+    # owner stamped from worktree identity (vault fixture sets branch
+    # "test/work", so identity.resolve_user yields "test").
+    assert fm["owner"] == "test"
+
+
+def test_dispatch_writes_owner_from_explicit_branch(vault, monkeypatch):
+    """Same flow but spoof the branch as a multi-segment butler name
+    (e.g. `weiliu-algo-data/work`) — the dash-suffixed user must round-trip
+    unmangled into the task page's owner field."""
+    task_path = _full_task(vault)
+
+    def fake_git(*args, cwd=None):
+        if "--show-toplevel" in args:
+            return str(vault)
+        if "--abbrev-ref" in args:
+            return "weiliu-algo-data/work"
+        return None
+    monkeypatch.setattr(dispatch_task.identity, "run_git", fake_git)
+
+    rest = _RestRecorder([
+        (200, {"id": "bot"}),
+        (201, {"id": "123456789012345678", "name": "x"}),
+        (201, {"id": "MID-BIND"}),
+        (201, {"id": "MID-POINTER"}),
+        (200, [{"id": "MID-BIND"}, {"id": "MID-POINTER"}]),
+    ])
+    _install_recorder(monkeypatch, rest)
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+
+    dispatch_task.dispatch_task("abc123", "plan", cwd=str(vault))
+    fm = dispatch_task.parse_frontmatter(task_path)
+    assert fm["owner"] == "weiliu-algo-data"
+
+
+def test_dispatch_refuses_when_owner_unresolvable(vault, monkeypatch):
+    """If resolve_user returns (None, None) — e.g. no /work branch, no
+    vault-<name> dir, no BUTLER_USER — refuse cleanly BEFORE creating
+    the thread (no side effects)."""
+    _full_task(vault)
+
+    def fake_git(*args, cwd=None):
+        if "--show-toplevel" in args:
+            return str(vault)
+        # branch with no /work suffix → resolver yields None
+        if "--abbrev-ref" in args:
+            return "main"
+        return None
+    monkeypatch.setattr(dispatch_task.identity, "run_git", fake_git)
+    # toplevel basename also lacks vault- prefix (it's a pytest tmp dir).
+    # Make sure BUTLER_USER env doesn't leak in from the test runner.
+    monkeypatch.delenv("BUTLER_USER", raising=False)
+
+    rest = _RestRecorder([
+        (200, {"id": "bot"}),  # only preflight should fire
+    ])
+    _install_recorder(monkeypatch, rest)
+
+    with pytest.raises(SystemExit) as exc:
+        dispatch_task.dispatch_task("abc123", "plan", cwd=str(vault))
+    assert "owner identity" in str(exc.value)
+    # No thread create call should have happened.
+    assert not any(
+        c[1] == "POST" and "/threads" in c[0] for c in rest.calls
+    )
+
+
+def test_dispatch_owner_rollback_when_writeback_fails(vault, monkeypatch):
+    """Acceptance #3: writeback-side rollback also reverts `owner:`.
+    Because writeback is atomic (.tmp + rename), the all-or-nothing
+    contract gives this for free — verify the original file (which has
+    no `owner:` line) is byte-for-byte preserved."""
+    task_path = _full_task(vault)
+    orig = open(task_path).read()
+    assert "owner:" not in orig  # baseline
+
+    rest = _RestRecorder([
+        (200, {"id": "bot"}),
+        (201, {"id": "123456789012345678", "name": "x"}),
+        (201, {"id": "MID-BIND"}),
+        (201, {"id": "MID-POINTER"}),
+        (200, {"id": "123456789012345678"}),  # archive
+    ])
+    _install_recorder(monkeypatch, rest)
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+
+    def boom(*a, **kw):
+        raise OSError("simulated writeback failure")
+    monkeypatch.setattr(dispatch_task, "writeback_frontmatter_atomic", boom)
+
+    with pytest.raises(SystemExit):
+        dispatch_task.dispatch_task("abc123", "plan", cwd=str(vault))
+    # File on disk is exactly as before — no `owner:` line snuck in.
+    after = open(task_path).read()
+    assert after == orig
+    assert "owner:" not in after
 
 
 def test_impl_phase_writes_dispatched_status(vault, monkeypatch):
@@ -509,6 +604,7 @@ def test_lint_passes_when_all_fields_present_and_thread_readable(tmp_path, monke
         'thread: "[t](https://discord.com/channels/G/123456789012345678)"\n'
         "dispatched: 2026-05-16\n"
         "dispatch_msg_id: MID-POINTER\n"
+        "owner: weiliu-algo-data\n"
         "---\n\nbody\n"
     )
     rest = _RestRecorder([(200, [{"id": "a"}, {"id": "b"}])])
@@ -533,6 +629,46 @@ def test_lint_flags_missing_frontmatter_fields(tmp_path, monkeypatch):
     failures = dispatch_task.lint(str(p), "TID", "dispatched (plan-phase)")
     msgs = " | ".join(failures)
     assert "thread" in msgs and "dispatched" in msgs and "dispatch_msg_id" in msgs
+    assert "owner" in msgs  # new — dispatch-time lint hard-fails on missing owner
+
+
+def test_lint_flags_only_missing_owner(tmp_path, monkeypatch):
+    """Everything else present, only owner missing — must still fail."""
+    p = tmp_path / "task.md"
+    p.write_text(
+        "---\n"
+        "status: dispatched\n"
+        'thread: "[t](https://discord.com/channels/G/123456789012345678)"\n'
+        "dispatched: 2026-05-18\n"
+        "dispatch_msg_id: MID\n"
+        "---\n\nbody\n"
+    )
+    monkeypatch.setattr(
+        dispatch_task, "api", lambda *a, **kw: (200, [{"id": "a"}, {"id": "b"}]),
+    )
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+    failures = dispatch_task.lint(str(p), "123456789012345678", "dispatched")
+    assert any("owner" in f for f in failures)
+    assert not any("thread" in f and "owner" not in f for f in failures)
+
+
+def test_lint_passes_when_owner_is_present(tmp_path, monkeypatch):
+    p = tmp_path / "task.md"
+    p.write_text(
+        "---\n"
+        "status: dispatched\n"
+        'thread: "[t](https://discord.com/channels/G/123456789012345678)"\n'
+        "dispatched: 2026-05-18\n"
+        "dispatch_msg_id: MID\n"
+        "owner: weiliu-algo-data\n"
+        "---\n\nbody\n"
+    )
+    monkeypatch.setattr(
+        dispatch_task, "api", lambda *a, **kw: (200, [{"id": "a"}, {"id": "b"}]),
+    )
+    monkeypatch.setattr(dispatch_task.time, "sleep", lambda *_: None)
+    failures = dispatch_task.lint(str(p), "123456789012345678", "dispatched")
+    assert failures == []
 
 
 def test_lint_flags_wrong_status(tmp_path, monkeypatch):
