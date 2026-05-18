@@ -218,6 +218,186 @@ state change since last check, print just `=== thread monitor [HH:MM UTC]
 report.
 ````
 
+#### Upgrade: CEO-mode autonomous driver
+
+When the operator explicitly says "you're the CEO" (or one of the
+trigger phrases below), the read-only monitor above evolves into an
+**autonomous driver**: same lifecycle, same dynamic enumeration, with
+an action layer on top — auto-ack tactical executor questions,
+auto-merge green PRs, auto-dispatch dependent tasks. Without an
+explicit trigger, default behavior stays monitor-only.
+
+> **Why this section exists** (2026-05-18 lesson). An earlier
+> session-only driver prompt hardcoded a list of thread IDs at
+> cron-creation time. As new tasks dispatched throughout the night,
+> their thread IDs never entered the cron's view, so the driver
+> silently skipped ~6 executors waiting on plan-phase Qs for 7+
+> hours. The fix is **dynamic enumeration via grep on `^status:
+> dispatched` in task frontmatter** at every fire — never hardcode
+> thread IDs in the prompt.
+
+##### Trigger phrases
+
+| Language | Phrase examples |
+|---|---|
+| English | "you're the CEO", "drive autonomously", "auto-merge what's green", "I'm going to sleep — keep moving" |
+| Chinese | "你是 CEO, 自己做主", "能自己做主就自己做主", "我要睡觉了, 你推进", "自动驱动" |
+
+##### Lifecycle & monitor↔driver transition
+
+Driver inherits the monitor's lifecycle rule (run iff at least one task
+is `dispatched*`; self-delete when none remain) and adds a CEO-mode
+on/off transition. The driver **replaces** the monitor — they do not
+coexist; the 10-min driver cadence already covers the monitor's report
+work plus actions.
+
+| Trigger | Action |
+|---|---|
+| Operator says a CEO-mode trigger phrase AND ≥1 task is `dispatched*` | If a monitor cron is running, `CronDelete <monitor-job-id>` and remove `.vault-session/monitor-cron-id`. Then `CronCreate` the driver (prompt below, 10-min schedule); persist returned job-id to `.vault-session/driver-cron-id`. Initialise `.vault-session/driver-state.json`. |
+| Operator says "退出 CEO 模式" / "back to monitor" / "stop driver" | `CronDelete <driver-job-id>`, remove `.vault-session/driver-cron-id`. If ≥1 task is still `dispatched*`, recreate the monitor cron per the section above. |
+| Driver's own scan finds 0 tasks in `dispatched*` state | Self-terminate: `CronDelete <driver-job-id>`, remove the file, exit. (Same rule as monitor — no dispatched task → no driver.) |
+
+##### Cadence
+
+`*/10 * * * *`, or `3-59/10 * * * *` to offset from the top of the hour.
+10 min keeps polling cost trivial and leaves room for operator messages
+on Discord to land between fires; a 1-min cadence (the monitor's)
+over-polls when actions are involved. Operators with stronger latency
+needs can override the cron expression.
+
+##### Quality bar for auto-merge
+
+ALL of the following must hold before the driver merges a PR:
+
+- `gh pr view <N> --json statusCheckRollup` shows every **required**
+  check green (advisory checks may remain in-progress).
+- `mergeable: MERGEABLE` (no conflicts).
+- Diff ≤ 10 files AND ≤ 500 LOC. Exception: a lockfile-only catch-up
+  from a freshly merged neighbour PR — flag it in
+  `<vault-root>/log.md` and merge.
+- For UI / code PRs: open added test files and **read the
+  assertions** — stub bodies (`assert True`, empty `it("...", () => {})`)
+  fail the bar; escalate.
+- For docs / audit PRs: open the changed files and read the content,
+  not just the file count.
+- Scope deviation from the task spec ≤ 20%.
+- No schema-loss or data-loss surface — any `DROP TABLE`,
+  column-remove, or destructive migration: escalate.
+
+See `[[feedback-ceo-mode-merge-autonomy]]` memory for the original
+rationale.
+
+##### Per-fire workflow (paste-ready)
+
+The substring `[butler:<your-butler-user>]` below is operator-specific
+— substitute the user returned by `ghost butler whoami` at
+session-start time.
+
+````
+Silent unless an action is taken or an escalation is needed.
+
+STEP 1 — Enumerate in-flight tasks DYNAMICALLY (the KEY FIX):
+  in_flight=$(grep -lr "^status: dispatched" Projects/*/tasks/ 2>/dev/null)
+  for f in $in_flight; do
+    extract `id:` and `thread:` from frontmatter
+  done
+  # NEVER hardcode thread IDs in this prompt — they go stale within hours.
+
+STEP 2 — Check open PRs from every source repo bound to this vault.
+  Source-repo list is the placeholder table in <vault-root>/MACHINES.md
+  (e.g. <ghost-repo>, <ai4stock-repo>, <vibo-repo>, <stock-arena-repo>);
+  resolve each to its GitHub org/repo via that table.
+  For each bound repo:
+    gh -R <org>/<repo> pr list --state open \
+      --json number,title,mergeable,statusCheckRollup,headRefName,additions,deletions,files
+    For each open PR:
+      - If the quality bar above holds → gh pr merge <N> --squash --delete-branch
+      - If CONFLICTING → dispatch a rebase task to that branch
+      - If CI red AND cause is a lockfile cascade from a just-merged neighbour PR
+        → dispatch a rebase task
+
+STEP 3 — For each in-flight task's thread:
+  ghost butler read-thread <tid> --limit 5
+  Filter out 🔧 tool-call streaming + scan-agent "no new gaps" noise.
+  If the executor surfaced plan-phase questions:
+    - Check the task page for an `## Operator answers` section
+      (pre-baked defaults).
+    - If pre-baked → ack with a short pointer: "spec updated, re-read .md, go".
+    - If not pre-baked AND the questions are tactical (not strategic) →
+      ack the executor's own recommended defaults inline; cite the
+      escalation rule.
+    - If strategic OR spend-bearing OR a hard block → ESCALATE (see below).
+  If the executor reports STOP / unrecoverable → ESCALATE.
+  If the executor opened a PR → it will get picked up in STEP 2 on the
+  next fire.
+
+STEP 4 — Push-forward (dependency chain):
+  If a PR just merged AND a task with status `draft` exists whose
+  `parent_id` matches the merged task's id:
+    ghost butler dispatch <dependent-id>
+  (Example: M1 w3g3hs merges → immediately dispatch M2 zxvm49.)
+
+STEP 5 — Vault hygiene:
+  Read .vault-session/driver-state.json; update merge_count_since_last_commit
+  and last_fire_ts. If merge_count_since_last_commit ≥ 3 OR
+  (now - last_vault_commit_ts) > 1h:
+    cd <vault-root> && git add -A && git commit -m "..." && git push
+    reset merge_count_since_last_commit = 0; set last_vault_commit_ts = now
+  Don't let task-page status flips and memory updates pile up uncommitted.
+
+STEP 6 — Heartbeat (always, even on no-op):
+  Append one line to .vault-session/driver-heartbeat.log:
+    [<ISO8601 now>] fire | pr_open=N | in_flight=M | actions=K
+  Meta-fix for the 2026-05-18 silent-failure mode — operators can
+  `tail -20` to confirm the driver is alive.
+````
+
+##### Hard guardrails (never, even in CEO mode)
+
+- ❌ Merge a PR with any **required** check red.
+- ❌ Merge a PR with `CONFLICTING` / `DIRTY` mergeable status.
+- ❌ Push directly to `master` / `main` — always via PR.
+- ❌ Force-push to a branch you don't own (no force-with-lease on
+  `master` / `main`).
+- ❌ Delete branches that still have unpushed work.
+- ❌ Skip operator escalation for: scope > 20% deviation, schema loss,
+  security / privacy surface, hard stop from an executor.
+- ❌ Touch the operator's canonical worktree (`git -C` for **read**
+  only; never write).
+- ❌ Bypass vault hooks (`block-source-repo-mutations`,
+  `block-long-thread-message`, `block-spaces-in-md-filenames`).
+- ❌ Re-litigate decisions the operator already made — consult
+  `<vault-root>/log.md` and your memory index before acting.
+
+##### Escalation format
+
+When the driver must surface to the operator, emit one line:
+
+```
+🚨 ESCALATE: <task-id> — <reason>; my recommendation: <action>; awaiting your call
+```
+
+…and append the same line to `<vault-root>/log.md`. Do not proceed past the escalation point on the affected task until the operator answers (other tasks may continue in parallel). Per `[[feedback-operator-never-runs-commands]]`, phrase the recommendation as a decision (A/B/C choices), not as a shell command the operator should run.
+
+##### Output rules
+
+- **0 actions taken AND no new substantive thread activity AND no PRs to merge**: output absolutely nothing. The STEP 6 heartbeat line is still appended.
+- **Actions taken**: one line per action in `⚙️ <action> on <target>` form.
+- **Escalation needed**: the 🚨 ESCALATE block above + the `log.md` entry + stop on the escalated task.
+
+##### Future improvements
+
+- Trigger phrases above also live in the
+  `[[feedback-ceo-mode-merge-autonomy]]` memory and in vault
+  `CLAUDE.md`; consolidating to a single source is future work —
+  flagged here so the drift risk is visible.
+
+##### See also
+
+- `#### Monitor prompt (paste-ready)` above — the read-only baseline this section upgrades.
+- `ghost butler dispatch <task-id>` — the upstream half.
+- `docs/dispatch-lifecycle.md` — full plan → greenlight → acceptance flow.
+
 #### See also
 
 - The `ghost butler dispatch` section above — the upstream half.
