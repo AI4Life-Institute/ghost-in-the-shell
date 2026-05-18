@@ -199,6 +199,13 @@ def cmd_read_thread(args: argparse.Namespace) -> None:
     discord_cli.cmd_thread_read(args)
 
 
+def cmd_backfill_owners(args: argparse.Namespace) -> None:
+    """One-shot ``owner:`` repair for legacy task pages — see :mod:`gits.butler.backfill`."""
+    from . import backfill as _bf
+
+    _bf.cmd_backfill_owners(args)
+
+
 # ---------------------------------------------------------------------------
 # argparse registration + dispatch
 # ---------------------------------------------------------------------------
@@ -305,6 +312,27 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--after", help="Only return messages after this message ID")
     sp.add_argument("--json", action="store_true", help="Output raw JSON")
     sp.set_defaults(func=cmd_read_thread)
+
+    sp = verbs.add_parser(
+        "backfill-owners",
+        help=(
+            "Repair legacy task pages: for each task in this vault past "
+            "`draft` with no `owner:`, derive owner from the first "
+            "`[butler:USER]` message in its thread and write it back. "
+            "Dry-run by default; pass --apply to commit."
+        ),
+        description=(
+            "Scans Projects/*/{tasks,archive}/**/*.md under the caller's "
+            "vault root. Idempotent — re-running skips already-owned tasks. "
+            "Scope is the caller's vault only; cd into a sibling worktree to "
+            "repair it."
+        ),
+    )
+    sp.add_argument(
+        "--apply", action="store_true",
+        help="Actually write owner: into task pages (default: dry-run)",
+    )
+    sp.set_defaults(func=cmd_backfill_owners)
 
 
 def dispatch(args: argparse.Namespace) -> None:

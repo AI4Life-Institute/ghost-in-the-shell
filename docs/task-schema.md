@@ -71,6 +71,7 @@ status: draft                    # see lifecycle below
 created: YYYY-MM-DD
 dispatched: null                 # set on dispatch
 dispatch_msg_id: null            # set on dispatch
+owner: null                      # set on dispatch (butler that dispatched it)
 completed: null                  # set on terminal state (done | cancelled)
 personas: [<persona-1>, <persona-2>, ...]
 test_script: <filename of .test.sh alongside, or null if none>
@@ -81,6 +82,7 @@ Field semantics worth pinning down:
 
 - **`thread:`** — leave `null` (or omit) at author time. The dispatch tool fills it atomically with a markdown link of the form `"[<title>](https://discord.com/channels/<guild_id>/<thread_id>)"`.
 - **`dispatched:`, `dispatch_msg_id:`** — also written by the dispatch tool. Don't pre-fill.
+- **`owner:`** — name of the butler that dispatched the task (from `ghost butler whoami`'s `outgoing_prefix_user`, e.g. `weiliu-algo-data`, `kathy`). Auto-filled by `ghost butler dispatch`; don't pre-fill manually. **Permanent record of who dispatched** — re-assigning a task to a different butler is operator-driven and out of scope of this field.
 - **`completed:`** — set to today's ISO date when status flips to `done` or `cancelled`. Both terminal states get it.
 - **`personas:`** — required for any substantive task. If the field is omitted entirely, the default is `[senior engineer]`; lint warns on missing.
 
@@ -193,6 +195,7 @@ The schema imposes these frontmatter coherence rules. A vault's lint tool should
 - `status: done` or `cancelled` ⇒ `completed:` present
 - `status: done` and `test_script:` not `null` ⇒ the named test file exists alongside the task `.md`
 - `personas:` is set (warn if missing — schema requires it for substantive tasks)
+- `owner:` is set on any task with `status` ≥ `dispatched (plan-phase)` (warn if missing — populated automatically by `ghost butler dispatch`; legacy rows can be repaired with `ghost butler backfill-owners`)
 - `area:` is one of the project's declared `areas:` in its README
 
 ## Creating a new project / task

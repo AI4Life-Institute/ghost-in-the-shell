@@ -11,7 +11,8 @@ rather than shelling out to ``ghost butler``/``ghost discord`` subcommands.
 
 Task-page schema fields (hardcoded here pending G-2 [[6n0iua]] which moves
 the spec to ``ghost/docs/task-schema.md``):
-  id, project, status, personas, cli, thread, dispatched, dispatch_msg_id
+  id, project, status, personas, cli, thread, dispatched, dispatch_msg_id,
+  owner
 """
 
 from __future__ import annotations
@@ -403,7 +404,7 @@ def lint(task_path: str, tid: str, expected_status: str) -> list[str]:
     failures: list[str] = []
     fm = parse_frontmatter(task_path)
 
-    for field in ("thread", "dispatched", "dispatch_msg_id"):
+    for field in ("thread", "dispatched", "dispatch_msg_id", "owner"):
         if not fm.get(field):
             failures.append(f"frontmatter `{field}:` missing or empty")
 
@@ -476,6 +477,15 @@ def dispatch_task(
 
     work_dir = resolve_work_dir(project, vault_root)
     preflight(fm)
+    owner, _ = identity.resolve_user(cwd=cwd)
+    if owner is None:
+        sys.exit(
+            "ghost butler dispatch: cannot determine owner identity.\n"
+            "  Same chain as `ghost butler whoami`. Provide one of:\n"
+            "    BUTLER_USER=<name> env var\n"
+            "    cd into a personal worktree "
+            "(<name>/work branch or vault-<name> dir)"
+        )
     channel_id, guild_id = read_home_channel(cwd=cwd)
 
     title = thread_title(task_path)
@@ -528,6 +538,7 @@ def dispatch_task(
         "thread": f'"[{title}]({thread_url})"',
         "dispatched": today,
         "dispatch_msg_id": pointer_msg_id,
+        "owner": owner,
         "status": status_value,
     }
     try:
@@ -547,8 +558,9 @@ def dispatch_task(
     print(f"  thread:  {tid}")
     print(f"  bound:   {work_dir} (cli: {cli})")
     print(f"  channel: {channel_id}")
+    print(f"  owner:   {owner}")
     print(f"  phase:   {phase}  (status → {status_value!r})")
-    print("  frontmatter: thread, dispatched, dispatch_msg_id, status updated")
+    print("  frontmatter: thread, dispatched, dispatch_msg_id, owner, status updated")
     if failures:
         print()
         print("✗ lint FAILED:")
