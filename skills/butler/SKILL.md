@@ -152,6 +152,11 @@ right urgency. The recipe below is dispatch's downstream half — the two
 belong together. It is a **session-level pattern**, not a CLI verb; there is
 no `ghost butler monitor` command.
 
+The dashboard this section produces is **Claude-facing triage**. For the
+operator-facing periodic digest convention — different audience, lower
+cadence, same lifecycle — see `### Operator status reports` below. The
+two run in parallel.
+
 > **Lifecycle rule.** Session-internal automation should be lifecycle-tied
 > to observable need — not "always on in case." Run the monitor iff at least
 > one task is in a `dispatched*` state; stop it when the last one transitions
@@ -395,16 +400,215 @@ When the driver must surface to the operator, emit one line:
 ##### See also
 
 - `#### Monitor prompt (paste-ready)` above — the read-only baseline this section upgrades.
+- `### Operator status reports` below — operator-facing periodic digest; runs alongside the driver (orthogonal lifecycles).
 - `ghost butler dispatch <task-id>` — the upstream half.
 - `docs/dispatch-lifecycle.md` — full plan → greenlight → acceptance flow.
 
 #### See also
 
 - The `ghost butler dispatch` section above — the upstream half.
+- `### Operator status reports` below — operator-facing companion to this
+  Claude-internal monitor; runs in parallel on a separate cron.
 - `docs/dispatch-lifecycle.md` — full dispatch → plan → greenlight →
   acceptance → archive flow.
 - Future improvement (out of scope here): ghost daemon push notifications
   would replace this polling design.
+
+### Operator status reports
+
+The monitor recipe above produces a **Claude-internal triage dashboard** —
+it tells *me* which threads need a reply and explicitly says "Do NOT take
+any action — just report." That dashboard is for Claude, not the human;
+surfacing it on every poll would drown the operator in micro-events.
+
+While tasks are in flight, send the operator a **separate, lower-cadence
+digest** — a concise structured status report on a fixed schedule, instead
+of pinging on every executor event. Operator's own words on the day this
+convention was set (2026-05-19):
+
+> *"你不用把每一次小的进展跟我说,你每10分钟给我一个status update — 你做了
+> 什么,还没做什么,下一步要做什么,有什么要等我批准的。"*
+
+> **Lifecycle rule.** Same as the monitor: run iff at least one task is
+> `dispatched*`; self-terminate when the last one transitions out. The
+> digest is **orthogonal** to the monitor and to the CEO-mode driver — it
+> keeps firing whichever of those is active, because the digest's audience
+> (human) is different from theirs (Claude).
+
+#### When to start / stop the digest
+
+| Trigger | Action |
+|---|---|
+| Session start: grep `Projects/*/tasks/**/*.md` for `status: dispatched` finds matches AND `.vault-session/operator-digest-cron-id` is absent | `CronCreate` the digest (prompt below, schedule `7-59/10 * * * *`); persist returned job-id to `.vault-session/operator-digest-cron-id` |
+| `ghost butler dispatch` succeeds AND `.vault-session/operator-digest-cron-id` is absent | Same — start digest cron and persist its id |
+| Digest's own scan finds 0 tasks in `dispatched*` state | Self-terminate: `CronDelete <that-job-id>`, remove `.vault-session/operator-digest-cron-id`, exit (baked into the prompt below) |
+| Monitor↔driver transition (operator says CEO-mode trigger, or "back to monitor") | Digest cron is **untouched** — it's orthogonal to the monitor/driver swap. |
+
+The digest cron runs **in parallel** with the monitor (and with the
+CEO-mode driver if active). Each writes a different state file, so there
+is no contention:
+
+| Cron | State file | Cadence | Audience |
+|---|---|---|---|
+| Monitor | `.vault-session/poll-state.json` | `*/1 * * * *` | Claude (triage) |
+| CEO driver | `.vault-session/driver-state.json` | `*/10 * * * *` or `3-59/10 * * * *` | Claude (actions) |
+| **Operator digest** | `.vault-session/operator-digest-state.json` | `7-59/10 * * * *` | **operator** |
+
+The `7-` offset keeps the digest off the top of the hour *and* clear of
+the driver's `3-` offset when both are active. Invoke via `CronCreate`
+directly (mirroring how `/loop` wraps it for the monitor); persist the
+returned job-id into `.vault-session/operator-digest-cron-id` so the
+digest can self-delete on its final fire.
+
+The digest is fundamentally a **second cron**, not a fold into the monitor.
+Folding forces "emit-on-every-Nth-fire" state inside the monitor and
+entangles two different audiences' cadences; the separation is cheaper.
+(An advanced executor may fold if the duplication becomes a measurable
+cost — document the local choice if you do.)
+
+#### Format — four parts, emoji-labelled
+
+The emoji structure is the **invariant**. Prose around the emojis matches
+the operator's language; the layout is identical in any language.
+
+- ✅ **Done** — what completed since the last digest (status flips, merged
+  PRs, executor confirmations).
+- ⏳ **In progress** — what's running but not yet done; one short line per
+  task.
+- ▶️ **Next** — what happens next (roughly who, roughly when).
+- 🟡 **Awaiting operator** — anything blocked on an operator decision,
+  phrased as an **A/B/C choice**, never as a shell command (per
+  `[[feedback-operator-never-runs-commands]]`). If nothing is blocked, say
+  so explicitly: "🟡 **Awaiting operator** — none."
+
+**No-change case.** If the signature of `{task-id → {status,
+last_substantive_msg_id}}` is byte-for-byte identical to the prior
+digest's signature, send a single line — not a padded block:
+
+```
+=== status digest [HH:MM UTC] === no change since last report
+```
+
+The "substantive" filter is the same one the CEO-mode driver applies:
+skip 🔧 tool-call streaming and scan-agent "no new gaps" noise. Without
+this filter, one tool-call flip would defeat no-change detection and
+spam the operator.
+
+**First fire.** No prior state exists. Emit a full block treating every
+in-flight task as "▶️ **Next**" with **Done** empty, then seed
+`operator-digest-state.json` so subsequent fires can compute deltas.
+
+**Multiple tasks.** One short line per task per part. Surface blockers
+prominently — put 🟡 entries at the top of **Awaiting operator**, ordered
+oldest-blocked first.
+
+**Language detection.** Read the home channel's recent activity once per
+fire (`ghost butler read-thread <home-channel-id> --limit 10`; the verb
+accepts channel ids — it is a thin passthrough to `ghost discord thread
+read`). Take the most recent operator-authored message (i.e. NOT
+`[butler:...]`-prefixed) within the last 24h; use its language. Fall back
+to English if none.
+
+#### Digest prompt (paste-ready)
+
+The substring `[butler:<your-butler-user>]` and the `<home-channel-id>`
+below are operator-specific — substitute the values returned by
+`ghost butler whoami` at session-start time.
+
+````
+Operator-facing periodic status digest. Silent unless ≥1 task is
+`dispatched*`. This is NOT the Claude-internal monitor dashboard (see
+`#### Monitor prompt (paste-ready)` above); the two run in parallel and
+serve different audiences.
+
+STEP 1 — Enumerate in-flight tasks DYNAMICALLY (never hardcode ids):
+  in_flight=$(grep -lr "^status: dispatched" Projects/*/tasks/ 2>/dev/null)
+  If empty AND `.vault-session/operator-digest-cron-id` exists:
+    CronDelete <its contents>; rm that file; exit.
+    (Same lifecycle rule as the monitor — no dispatched task → no digest.)
+  If empty AND no cron-id file: exit silently (defensive).
+
+STEP 2 — Parse each in-flight task page's frontmatter for `id`, `status`,
+`thread`, `personas`. Extract the thread id from the `thread:` URL.
+
+STEP 3 — Per task, fetch recent thread activity:
+  ghost butler read-thread <tid> --limit 10
+  Filter out 🔧 tool-call streaming and scan-agent "no new gaps" noise;
+  the last surviving message is the task's `last_substantive_msg_id`.
+
+STEP 4 — Compute the digest signature:
+  sig = sha256(sorted([(id, status, last_substantive_msg_id) ...]))
+  Load `.vault-session/operator-digest-state.json` (create empty {} if
+  missing). Compare sig against `state.last_signature`.
+
+STEP 5 — Compose the digest payload (operator's language, emoji invariant):
+
+  If sig == state.last_signature:
+    payload = "=== status digest [HH:MM UTC] === no change since last report"
+  Else if state is empty (first fire):
+    Full block; every task under ▶️ Next; Done is empty.
+  Else (delta against state.snapshot):
+    - status flip / PR merge / executor confirmation → ✅ Done
+    - executor produced a new substantive message → ⏳ In progress
+    - executor surfaced a question OR status == `dispatched-blocked`
+      → 🟡 Awaiting operator, phrased as A/B/C; cite the task-page
+      section that frames the decision
+    - dispatched but otherwise unchanged → one summary line under
+      ⏳ In progress
+    ▶️ Next: one short line per task — roughly who, roughly when.
+    If nothing is blocked: "🟡 **Awaiting operator** — none."
+    Surface 🟡 entries oldest-blocked first.
+
+STEP 6 — Detect operator language:
+  ghost butler read-thread <home-channel-id> --limit 10
+  Find the most recent message NOT prefixed `📨 **[butler:` within the
+  last 24h. Use its language for the prose around the emojis. Default to
+  English if none.
+
+STEP 7 — Post to home channel:
+  printf '%s' "<payload>" | ghost butler send -
+  (No target → defaults to bound home channel. The `-` means stdin.)
+
+STEP 8 — Persist state atomically (write-to-tmp + rename):
+  state.last_signature  = sig
+  state.last_report_ts  = <ISO8601 now>
+  state.snapshot        = {id: {status, last_substantive_msg_id} ...}
+  → `.vault-session/operator-digest-state.json`
+
+STEP 9 — Output to Claude's own stdout: nothing.
+  The operator's digest is the side-effect; this cron is silent to Claude.
+````
+
+#### Example digest (full block)
+
+```
+=== status digest 23:47 UTC ===
+✅ Done
+- [[a3kqp2]] (auth-rewrite) — plan greenlit; executor moved to impl
+
+⏳ In progress
+- [[s7r2qx]] (discord-bot) — executor writing the new SKILL.md section
+- [[zxvm49]] (data-ingest) — CI running on PR #142
+
+▶️ Next
+- s7r2qx → executor opens PR; I review and merge if green
+- zxvm49 → if CI passes, auto-merge per CEO-mode quality bar
+
+🟡 Awaiting operator
+- [[m1w3g3]] (billing) — drop legacy `tax_id` column in the migration?
+  (A) drop now, (B) keep one release, (C) escalate to legal.
+  See task page §"Open questions".
+```
+
+#### See also
+
+- `#### Monitor prompt (paste-ready)` above — Claude-internal triage
+  dashboard; this digest is its operator-facing counterpart.
+- `#### Upgrade: CEO-mode autonomous driver` above — the digest keeps
+  firing alongside the driver (orthogonal lifecycles).
+- `ghost butler dispatch <task-id>` — the upstream half.
+- Future improvement (out of scope here): ghost daemon push notifications
+  would let the digest react to events instead of polling.
 
 ## When to use this skill
 
