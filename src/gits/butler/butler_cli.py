@@ -301,6 +301,18 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
         help="'plan' (default; asks for plan first) or "
              "'impl' (greenlight, asks for diff)",
     )
+    sp.add_argument(
+        "--account",
+        default=None,
+        metavar="<name|auto>",
+        help=(
+            "Claude account for the dispatched binding. 'auto' (or omitted) "
+            "picks the least-loaded launchable account via "
+            "gits.core.account_load.pick_account; an explicit name pins. "
+            "Resolution precedence: this flag > task-page `account:` "
+            "frontmatter > auto."
+        ),
+    )
     sp.set_defaults(func=cmd_dispatch)
 
     sp = verbs.add_parser(

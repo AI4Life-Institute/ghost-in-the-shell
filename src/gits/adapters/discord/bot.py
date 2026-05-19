@@ -22,6 +22,7 @@ from typing import Any
 # encoder (`ghost butler` CLI). Override via GITS_DISPATCH_PREFIX_PATTERN
 # env var is honored there.
 from ...butler.prefix import VAULT_DISPATCH_RE as _VAULT_DISPATCH_RE
+from ...core.account import validate_account_name
 
 import discord
 from discord import app_commands
@@ -437,23 +438,37 @@ class DiscordAdapter(PlatformAdapter):
         args = parts[1:]
 
         if cmd == "/bind":
-            # Parse positionals (path, cli) and flags (--fresh, --resume=<id>).
+            # Parse positionals (path, cli) and flags
+            # (--fresh, --resume=<id>, --account=<name>).
             positionals: list[str] = []
             explicit_fresh = False
             resume_id: str | None = None
+            account_arg: str | None = None
             for tok in args:
                 if tok == "--fresh":
                     explicit_fresh = True
                 elif tok.startswith("--resume="):
                     resume_id = tok[len("--resume="):]
+                elif tok.startswith("--account="):
+                    account_arg = tok[len("--account="):]
                 else:
                     positionals.append(tok)
+
+            if account_arg is not None:
+                try:
+                    validate_account_name(account_arg)
+                except ValueError as e:
+                    try:
+                        await message.reply(f"⚠️ Invalid `--account` value: {e}")
+                    except Exception:
+                        logger.debug("Failed to reply to butler /bind")
+                    return True
 
             if not positionals:
                 try:
                     await message.reply(
                         "⚠️ `/bind` requires a path: "
-                        "`/bind <path> [cli] [--fresh|--resume=<id>]`"
+                        "`/bind <path> [cli] [--fresh|--resume=<id>] [--account=<name>]`"
                     )
                 except Exception:
                     logger.debug("Failed to reply to butler /bind")
@@ -541,6 +556,7 @@ class DiscordAdapter(PlatformAdapter):
                     cli=cli,
                     fresh=fresh,
                     session_id=resume_id,
+                    account=account_arg,
                 )
             except Exception:
                 logger.exception("butler /bind failed")

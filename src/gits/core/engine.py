@@ -407,6 +407,7 @@ class Engine:
         cli: str | None = None,
         fresh: bool = False,
         session_id: str | None = None,
+        account: str | None = None,
     ) -> None:
         """Handle /bind — bind channel to a project directory.
 
@@ -414,6 +415,10 @@ class Engine:
         session picker with buttons.  Otherwise starts a fresh session
         immediately.  Pass ``fresh=True`` to skip session discovery entirely.
         Pass ``session_id`` to resume a specific session directly.
+
+        ``account`` (per task [[gbraq8]]) pins the claude account name
+        used for this binding, overriding ``manifest.default``. ``None``
+        keeps the legacy "use default" behavior.
         """
         track("cmd_bind", platform=platform_for(channel_id), cli=cli or "default")
         if path:
@@ -452,6 +457,7 @@ class Engine:
                     "cli": cli,
                     "sessions": sessions,
                     "mode": mode,
+                    "account": account,
                     "created_at": time.time(),
                 }
                 msg = self._build_session_picker_message(
@@ -474,14 +480,14 @@ class Engine:
                     )
                     await self._create_bind(
                         channel_id, str(p), window_name, cli, interaction,
-                        mode=mode,
+                        mode=mode, account=account,
                     )
                 return
             else:
                 # No sessions found — start fresh (or resume if session_id provided)
                 await self._create_bind(
                     channel_id, str(p), window_name, cli, interaction,
-                    mode=mode, session_id=session_id,
+                    mode=mode, session_id=session_id, account=account,
                 )
         else:
             await self._reply(
@@ -547,6 +553,7 @@ class Engine:
         interaction: Any,
         session_id: str | None = None,
         mode: str | None = None,
+        account: str | None = None,
     ) -> None:
         """Create a tmux window, binding, and reply with confirmation.
 
@@ -559,9 +566,14 @@ class Engine:
         is persisted on the binding and ``CLAUDE_CONFIG_DIR`` is injected
         into the launch command so claude reads/writes
         ``~/.claude-{name}/`` instead of ``~/.claude/``.
+
+        ``account`` (per task [[gbraq8]]) overrides
+        ``manifest.default`` for this binding. The dispatch
+        load-balancer resolves the concrete name at dispatch time and
+        passes it via ``--account=<name>`` on ``/bind``.
         """
         p = Path(work_dir)
-        claude_account = self._default_claude_account()
+        claude_account = account or self._default_claude_account()
         cmd = self.launcher.build_launch_command(
             cli=cli, session_id=session_id, claude_account=claude_account,
         )
@@ -2469,6 +2481,7 @@ class Engine:
             interaction=None,
             session_id=session.session_id,
             mode=pending.get("mode"),
+            account=pending.get("account"),
         )
 
         # Send confirmation via adapter since we have no interaction object
@@ -2527,6 +2540,7 @@ class Engine:
             interaction=None,
             session_id=None,
             mode=pending.get("mode"),
+            account=pending.get("account"),
         )
 
         # After the CLI initialises, auto-inject context as the first message
@@ -2591,6 +2605,7 @@ class Engine:
             cli=pending["cli"],
             interaction=None,
             mode=pending.get("mode"),
+            account=pending.get("account"),
         )
 
         # Send confirmation via adapter

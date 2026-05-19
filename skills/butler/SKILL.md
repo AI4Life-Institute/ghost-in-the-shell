@@ -68,13 +68,33 @@ candidate paths and exits non-zero; ask the user which one they meant.
 ### Invocation
 
 ```
-ghost butler dispatch <task-id> [--phase plan|impl]
+ghost butler dispatch <task-id> [--phase plan|impl] [--account <name|auto>]
 ```
 
 - `<task-id>` — 6-char task id (preferred — unique) or a fuzzy filename
   fragment (substring match against task file basenames).
 - `--phase` — defaults to `plan`. Use `impl` only when the user has explicitly
   green-lit a previous plan-phase response.
+- `--account` — defaults to `auto` (omitted is the same). Pin a Claude
+  account by name to force the dispatched binding onto it, or leave as
+  `auto` to let the local-JSONL load-balancer
+  (`gits.core.account_load.pick_account`) choose the least-loaded
+  launchable one. Resolution precedence: this flag > the task page's
+  `account:` frontmatter field > auto-pick. The resolved concrete name
+  is appended to the `/bind` message as `--account=<name>`; the engine
+  never sees `auto`. When the task page's `account:` was `null`, the
+  resolved name is written back into frontmatter alongside `thread:` /
+  `dispatched:`.
+
+The auto-picker uses *local* JSONL transcripts only — no OAuth Usage
+API. It compares cost-weighted utilization (`load / weight`) across the
+5h and 7d windows and picks the lowest, with tiebreaks by live binding
+count then oldest `last_used`. It **skips any account with no
+resolvable credential** (no readable `.credentials.json` and no macOS
+keychain entry), so dispatch never lands on an account claude can't
+launch. Set per-account capacity with `gits account set-weight <name>
+<N>` (e.g. `20` for Max 20x, `6` for Team 6x) — without this the picker
+assumes 1.0 and `gits account list` warns.
 
 Run from inside any vault-like worktree. The orchestrator resolves the repo
 root from cwd via `git rev-parse --show-toplevel`.

@@ -337,6 +337,14 @@ def cmd_list(args: argparse.Namespace) -> None:
     if manifest.default:
         print(f"\n[current: {manifest.default}]")
     print(f"[bindings: {sum(binding_counts.values())} total across {len(binding_counts)} accounts]")
+    unset = [a.name for a in manifest.accounts if not a.weight]
+    if unset and len(manifest.accounts) > 1:
+        print(
+            f"[warn] no `weight` set for: {', '.join(unset)}.\n"
+            f"       Multi-account dispatch load-balancing assumes 1.0 — "
+            f"set actual plan tier with `gits account set-weight <name> <N>` "
+            f"(e.g. 20 for Max 20x, 6 for Team 6x)."
+        )
 
 
 def _binding_count_per_account(settings: Settings) -> dict[str, int]:
@@ -357,14 +365,16 @@ def _binding_count_per_account(settings: Settings) -> dict[str, int]:
 
 
 def _format_header() -> str:
-    return f"{'  name':<14} {'email':<30} {'tier':<6} {'5h':<6} {'7d':<6} {'resets':<10} bindings"
+    return f"{'  name':<14} {'email':<30} {'tier':<6} {'weight':<7} {'5h':<6} {'7d':<6} {'resets':<10} bindings"
 
 
 def _format_row(prefix: str, entry: AccountEntry, usage: str, bcount: int) -> str:
+    w = f"{entry.weight:g}" if entry.weight else "unset"
     return (
         f"{prefix} {entry.name:<12} "
         f"{(entry.email or '-'):<30} "
         f"{(entry.subscription_type or '-'):<6} "
+        f"{w:<7} "
         f"{usage:<24} {bcount}"
     )
 
@@ -602,6 +612,23 @@ def cmd_set_tags(args: argparse.Namespace) -> None:
         print(f"[ok] {args.name} tags = {args.tags}")
     else:
         print(f"[ok] {args.name} tags cleared")
+
+
+def cmd_set_weight(args: argparse.Namespace) -> None:
+    """``gits account set-weight <name> <weight>``.
+
+    Per task [[gbraq8]]: sets the account's capacity weight used by
+    the dispatch load-balancer (``utilization = load / weight``).
+    """
+    settings = Settings()
+    layout = AccountLayout()
+    vault = AccountVault(settings.state_dir, layout=layout)
+    try:
+        vault.set_weight(args.name, args.weight)
+    except AccountVaultError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[ok] {args.name} weight = {args.weight:g}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -982,6 +1009,19 @@ def install_parser(parent_subparsers: argparse._SubParsersAction) -> None:
         )
         p_settags.set_defaults(_handler=cmd_set_tags)
 
+        p_setw = ssub.add_parser(
+            "set-weight",
+            help=(
+                "Set account capacity weight for dispatch load-balancing "
+                "(e.g. 20 for Max 20x, 6 for Team 6x)"
+            ),
+        )
+        p_setw.add_argument("name", help="Account name")
+        p_setw.add_argument(
+            "weight", type=float, help="Capacity weight (positive number)"
+        )
+        p_setw.set_defaults(_handler=cmd_set_weight)
+
 
 def dispatch(args: argparse.Namespace) -> None:
     """Run the handler attached by ``set_defaults(_handler=...)``."""
@@ -990,7 +1030,7 @@ def dispatch(args: argparse.Namespace) -> None:
         print(
             "usage: gits account <add|list|switch|remove|import|refresh|"
             "refresh-install|refresh-uninstall|migrate-default-native|"
-            "set-default|set-tags>",
+            "set-default|set-tags|set-weight>",
             file=sys.stderr,
         )
         sys.exit(1)
