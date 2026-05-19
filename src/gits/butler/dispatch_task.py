@@ -12,7 +12,7 @@ rather than shelling out to ``ghost butler``/``ghost discord`` subcommands.
 Task-page schema fields (hardcoded here pending G-2 [[6n0iua]] which moves
 the spec to ``ghost/docs/task-schema.md``):
   id, project, status, personas, cli, thread, dispatched, dispatch_msg_id,
-  owner
+  owner, account
 """
 
 from __future__ import annotations
@@ -391,6 +391,56 @@ def _post_message(channel_id: str, content: str) -> str | None:
     return resp.get("id") if isinstance(resp, dict) else None
 
 
+# ── account resolution ──────────────────────────────────────────────────────
+
+
+_EMPTY_FM_VALUES = {"", "null", "None", "[]"}
+
+
+def _normalize_fm_account(raw: str | None) -> str | None:
+    """Treat ``null``/``None``/``[]``/empty as "no value"."""
+    if raw is None:
+        return None
+    v = raw.strip().strip('"').strip("'").strip()
+    if v in _EMPTY_FM_VALUES:
+        return None
+    return v
+
+
+def _pick_account_or_none() -> str | None:
+    """Resolve ``--account auto``: pick least-loaded launchable account.
+
+    Returns ``None`` when the multi-account vault is uninitialized, has
+    ≤1 account, or no account passes the credential gate — caller
+    omits ``--account=`` from the ``/bind`` message and the engine
+    keeps legacy ``manifest.default`` behavior.
+    """
+    try:
+        from ..config import Settings
+        from ..core.account import AccountLayout
+        from ..core.account_load import pick_account
+        from ..core.account_vault import AccountVault
+    except Exception as e:  # pragma: no cover — import wiring
+        print(
+            f"ghost butler dispatch: account picker imports failed ({e}); "
+            f"continuing without --account",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        settings = Settings()
+        layout = AccountLayout()
+        vault = AccountVault(settings.state_dir, layout=layout)
+        return pick_account(vault, layout=layout)
+    except Exception as e:
+        print(
+            f"ghost butler dispatch: account picker failed ({e}); "
+            f"continuing without --account",
+            file=sys.stderr,
+        )
+        return None
+
+
 # ── lint ─────────────────────────────────────────────────────────────────────
 
 
@@ -454,6 +504,7 @@ def dispatch_task(
     phase: str,
     cwd: str | None = None,
     send_decorated=None,
+    account: str | None = None,
 ) -> None:
     """Orchestrate the full dispatch. ``send_decorated`` is injected by
     :mod:`gits.butler.butler_cli` to avoid a circular import; signature is
@@ -491,11 +542,38 @@ def dispatch_task(
     title = thread_title(task_path)
     pointer = build_pointer_message(fm, task_path, phase)
 
+    # Account resolution: flag > frontmatter > auto-picker.
+    # `--account auto` (or omitted) ⇒ auto-picker; any other value pins.
+    fm_account = _normalize_fm_account(fm.get("account"))
+    flag = (account or "").strip() or None
+    if flag and flag != "auto":
+        resolved_account: str | None = flag
+        account_source = "flag"
+    elif fm_account:
+        resolved_account = fm_account
+        account_source = "frontmatter"
+    else:
+        resolved_account = _pick_account_or_none()
+        account_source = "auto" if resolved_account else "auto (no candidate)"
+
+    # Validate any concrete name before sending it on /bind.
+    if resolved_account:
+        try:
+            from ..core.account import validate_account_name
+            validate_account_name(resolved_account)
+        except Exception as e:
+            sys.exit(
+                f"ghost butler dispatch: invalid account name "
+                f"{resolved_account!r} (source: {account_source}): {e}"
+            )
+
     # Step 1: create thread (no rollback target yet on failure)
     tid = _create_thread(channel_id, title)
 
     # Step 2: post /bind as the first message (decorated). Rollback on failure.
     bind_msg = f"/bind {work_dir} {cli}"
+    if resolved_account:
+        bind_msg += f" --account={resolved_account}"
     try:
         bind_mid = send_decorated(tid, bind_msg, cwd=cwd)
     except SystemExit as e:
@@ -541,6 +619,10 @@ def dispatch_task(
         "owner": owner,
         "status": status_value,
     }
+    # Only write `account:` back when the frontmatter slot was empty —
+    # operator-pinned accounts on the task page are preserved verbatim.
+    if resolved_account and fm_account is None:
+        updates["account"] = resolved_account
     try:
         writeback_frontmatter_atomic(task_path, updates)
     except Exception as e:
@@ -560,7 +642,13 @@ def dispatch_task(
     print(f"  channel: {channel_id}")
     print(f"  owner:   {owner}")
     print(f"  phase:   {phase}  (status → {status_value!r})")
+    if resolved_account:
+        print(f"  account: {resolved_account} (source: {account_source})")
+    else:
+        print("  account: (legacy default — no --account on /bind)")
     print("  frontmatter: thread, dispatched, dispatch_msg_id, owner, status updated")
+    if resolved_account and fm_account is None:
+        print("               + account")
     if failures:
         print()
         print("✗ lint FAILED:")
@@ -577,4 +665,4 @@ def dispatch_task(
 
 def cmd_dispatch(args: argparse.Namespace) -> None:
     """argparse entrypoint; thin wrapper around :func:`dispatch_task`."""
-    dispatch_task(args.task_ref, args.phase)
+    dispatch_task(args.task_ref, args.phase, account=getattr(args, "account", None))

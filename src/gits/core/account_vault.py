@@ -52,6 +52,13 @@ class AccountEntry:
     config_dir: str = ""
     last_used: str | None = None
     tags: list[str] = field(default_factory=list)
+    #: Capacity weight for load-balancing in
+    #: :func:`gits.core.account_load.pick_account`. Operator sets via
+    #: ``gits account set-weight``; typical values match plan tier
+    #: (e.g. ``20`` for Max 20x, ``6`` for Team 6x). ``None`` means
+    #: unset — treated as ``1.0`` by ``effective_weight`` and warned in
+    #: ``gits account list``.
+    weight: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -62,10 +69,12 @@ class AccountEntry:
             "config_dir": self.config_dir,
             "lastUsed": self.last_used,
             "tags": list(self.tags),
+            "weight": self.weight,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AccountEntry:
+        w = d.get("weight")
         return cls(
             name=d["name"],
             email=d.get("email"),
@@ -74,6 +83,7 @@ class AccountEntry:
             config_dir=d.get("config_dir", ""),
             last_used=d.get("lastUsed"),
             tags=list(d.get("tags", [])),
+            weight=float(w) if isinstance(w, (int, float)) else None,
         )
 
 
@@ -328,6 +338,26 @@ class AccountVault:
         for entry in manifest.accounts:
             if entry.name == name:
                 entry.tags = list(tags)
+                self.save(manifest)
+                return manifest
+        raise AccountVaultError(f"no such account '{name}'")
+
+    def set_weight(self, name: str, weight: float) -> Manifest:
+        """Set an account's capacity ``weight`` (must be > 0).
+
+        Used by the dispatch load-balancer (per task [[gbraq8]]):
+        ``utilization = load / weight``. Operator-maintained — when a
+        plan tier changes (Max 20x → Team 6x etc.) re-run ``gits account
+        set-weight``. No auto-detection of plan tier.
+        """
+        if not isinstance(weight, (int, float)) or not (weight > 0):
+            raise AccountVaultError(
+                f"weight must be a positive number, got {weight!r}"
+            )
+        manifest = self.load()
+        for entry in manifest.accounts:
+            if entry.name == name:
+                entry.weight = float(weight)
                 self.save(manifest)
                 return manifest
         raise AccountVaultError(f"no such account '{name}'")
