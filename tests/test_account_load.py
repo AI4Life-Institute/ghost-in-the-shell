@@ -232,6 +232,65 @@ def test_pick_account_default_can_use_keychain_when_native_missing(tmp_path):
     assert pick == "def"
 
 
+def test_pick_account_isolated_keychain_only_passes_gate(tmp_path):
+    """Regression: an isolated (non-default) account whose token lives ONLY
+    in the macOS keychain — no `.credentials.json` file at all — must pass
+    the credential gate. The previous version checked the keychain only for
+    the default account and only under the no-suffix service, so isolated
+    keychain-only accounts (the common case on real hosts) were wrongly
+    skipped and the picker could never balance off the default.
+
+    Setup makes 'iso' the only correct choice:
+      - 'def' has a credential file AND heavy load.
+      - 'iso' has NO file, only a keychain entry under the suffix-keyed
+        service `Claude Code-credentials-<sha256(config_dir)[:8]>`, and
+        zero load.
+    Pre-fix: 'iso' was skipped (no file, wrong-service keychain check) →
+    picker returned 'def'. Post-fix: 'iso' passes the gate → picker
+    returns 'iso'.
+    """
+    import hashlib as _h
+    vault, layout = _vault_with(
+        tmp_path, [("def", 1.0), ("iso", 1.0)], default="def",
+    )
+    _make_creds(layout, "def")
+    # Load 'def' up so any working gate must pick 'iso'.
+    _write_jsonl(
+        layout.projects_dir("def") / "h" / "s.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=1_000_000)],
+        mtime=_FAKE_NOW - 100,
+    )
+    expected_suffix = _h.sha256(
+        str(layout.account_dir("iso")).encode()
+    ).hexdigest()[:8]
+    expected_iso_service = f"Claude Code-credentials-{expected_suffix}"
+
+    queried: list[str] = []
+
+    def _fake_exists(service: str) -> bool:
+        queried.append(service)
+        # Only the suffix-keyed service for 'iso' has an entry. The
+        # no-suffix `Claude Code-credentials` is NOT present (matches
+        # the real sharon/sharon-team setup the operator described).
+        return service == expected_iso_service
+
+    with patch(
+        "gits.core.account_load._macos_keychain_entry_exists",
+        side_effect=_fake_exists,
+    ):
+        pick = pick_account(vault, layout=layout, now=_FAKE_NOW)
+
+    assert expected_iso_service in queried, (
+        f"never checked the suffix-keyed service; queried={queried!r}"
+    )
+    assert pick == "iso", (
+        f"expected 'iso' (keychain-only, zero load); got {pick!r}. "
+        f"This is the PR #4 regression — credential gate dropped the "
+        f"keychain-only isolated account and the picker fell back to "
+        f"the loaded default."
+    )
+
+
 def test_pick_account_tiebreak_by_bindings(tmp_path):
     vault, layout = _vault_with(
         tmp_path, [("a", 1.0), ("b", 1.0)], default="a",

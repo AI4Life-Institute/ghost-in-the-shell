@@ -25,14 +25,20 @@ Locked operator decisions (PoC 2026-05-19; see task [[gbraq8]]):
   cheaper than they actually are. ``weight`` is the lever the operator
   turns when this matters in practice.
 * **Credential gate.** ``pick_account()`` skips any account with no
-  resolvable credential — i.e. neither a readable ``.credentials.json``
-  nor (for the manifest default, which routes through native
-  ``~/.claude/``) a macOS keychain entry under
-  ``Claude Code-credentials``. A stale/expired token is fine because
-  the claude CLI refreshes on launch; only a fully-absent credential
+  resolvable credential. A stale/expired token is fine because the
+  claude CLI refreshes on launch; only a fully-absent credential
   disqualifies, so we never route a task to an account claude can't
-  launch. We check entry *existence* only — never read the secret and
-  never call the OAuth usage API.
+  launch. For each account we accept any of: a readable
+  ``~/.claude-<name>/.credentials.json``; for the manifest default,
+  a readable native ``~/.claude/.credentials.json``; or a macOS
+  keychain entry under either ``Claude Code-credentials`` (default
+  account's no-suffix service) or
+  ``Claude Code-credentials-<sha256(config_dir)[:8]>`` (the
+  suffix-keyed service used by isolated ``CLAUDE_CONFIG_DIR`` accounts).
+  Service-name derivation mirrors
+  ``gits.core.oauth_usage.UsageClient._keychain_service_candidates``.
+  We check entry *existence* only — never read the secret and never
+  call the OAuth usage API.
 * **No mid-task rebalancing.** A binding's account is sticky once
   chosen; ``gits account switch`` is the operator-driven path.
 """
@@ -40,13 +46,13 @@ Locked operator decisions (PoC 2026-05-19; see task [[gbraq8]]):
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import logging
 import os
 import subprocess
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 
 from .account import AccountLayout
@@ -71,7 +77,7 @@ W_OUTPUT = 5.0
 W_CACHE_CREATE = 1.25
 W_CACHE_READ = 0.1
 
-_KEYCHAIN_SERVICE = "Claude Code-credentials"
+_KEYCHAIN_DEFAULT_SERVICE = "Claude Code-credentials"
 _USAGE_MARKER = b'"usage"'  # cheap pre-filter before json.loads
 
 
@@ -103,8 +109,39 @@ def _parse_iso_ts(ts: str) -> float | None:
         return None
 
 
-def _macos_keychain_entry_exists() -> bool:
-    """Best-effort: does ``security find-generic-password -s <SERVICE>`` find one?
+def _keychain_service_candidates(
+    name: str, *, default: str | None, layout: AccountLayout,
+) -> list[str]:
+    """Return keychain service names to check for ``name``, in priority order.
+
+    Mirrors ``gits.core.oauth_usage.UsageClient._keychain_service_candidates``:
+
+    * The **default** account routes through native ``~/.claude/`` → claude
+      uses the no-suffix service ``Claude Code-credentials``. We still
+      include the suffix-keyed name as a fallback in case the account was
+      previously isolated.
+    * **Isolated** accounts (``~/.claude-<name>/``) → claude uses
+      ``Claude Code-credentials-<sha256(config_dir)[:8]>``. We include the
+      no-suffix name as a fallback so we surface a live token wherever it
+      lives.
+
+    Reusing this hash logic — not reinventing it — is required because
+    every isolated account on a real machine stores its token under the
+    suffix-keyed service, and a default-only keychain check would skip
+    every isolated account whose credential is keychain-only (no
+    ``.credentials.json`` file).
+    """
+    config_dir = str(layout.account_dir(name))
+    suffix = hashlib.sha256(config_dir.encode()).hexdigest()[:8]
+    suffix_svc = f"Claude Code-credentials-{suffix}"
+    default_svc = _KEYCHAIN_DEFAULT_SERVICE
+    if name == default:
+        return [default_svc, suffix_svc]
+    return [suffix_svc, default_svc]
+
+
+def _macos_keychain_entry_exists(service: str) -> bool:
+    """Best-effort: does ``security find-generic-password -s <service>`` find one?
 
     Existence check only — we deliberately omit ``-w`` so the secret is
     never dumped to stdout. Non-darwin or any subprocess failure returns
@@ -114,7 +151,7 @@ def _macos_keychain_entry_exists() -> bool:
         return False
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE],
+            ["security", "find-generic-password", "-s", service],
             capture_output=True, timeout=3,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -129,11 +166,21 @@ def _has_credential(
     """Return True iff ``name``'s claude credentials are resolvable.
 
     A stale token is fine (claude CLI refreshes on launch); only a
-    fully-absent credential disqualifies. Order:
+    fully-absent credential disqualifies. Per-account checks, in order:
 
-    1. ``~/.claude-<name>/.credentials.json`` readable.
+    1. Isolated ``~/.claude-<name>/.credentials.json`` readable.
     2. If ``name == default``: native ``~/.claude/.credentials.json``
-       readable, OR the macOS keychain entry exists.
+       readable.
+    3. macOS keychain entry exists under any candidate service for this
+       account (default-routed → no-suffix ``Claude Code-credentials``
+       preferred; isolated → suffix-keyed
+       ``Claude Code-credentials-<sha256(config_dir)[:8]>`` preferred).
+
+    The keychain check runs for **every** account, not just the default
+    — every isolated account on a real machine stores its token under
+    the suffix-keyed service, and on hosts where claude never wrote a
+    ``.credentials.json`` (default install path on darwin) the keychain
+    is the only credential.
     """
     try:
         iso = layout.credentials_file(name)
@@ -148,7 +195,10 @@ def _has_credential(
                 return True
         except OSError:
             pass
-        if _macos_keychain_entry_exists():
+    for service in _keychain_service_candidates(
+        name, default=default, layout=layout,
+    ):
+        if _macos_keychain_entry_exists(service):
             return True
     return False
 
@@ -298,17 +348,6 @@ def account_load_dual(
 # ─────────────────────────────────────────────────────────────────────
 # Picker
 # ─────────────────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class AccountScore:
-    name: str
-    util_5h: float
-    util_7d: float
-    score: float
-    weight: float
-    bindings: int
-    last_used: str | None
 
 
 def pick_account(
