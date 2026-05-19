@@ -48,6 +48,12 @@ def fake_engine(tmp_path):
     eng.switch_account = lambda *a, **kw: Engine.switch_account(eng, *a, **kw)
     eng._do_switch = lambda *a, **kw: Engine._do_switch(eng, *a, **kw)
     eng._auto_import_session = lambda *a, **kw: Engine._auto_import_session(eng, *a, **kw)
+    # _do_switch's respawn step now goes through _send_relaunch_in_pane
+    # (added in commit e3ad188 — stale-CWD guard). Bind the real helper so
+    # the call propagates to tmux.send_text; otherwise the spec-mock
+    # AsyncMock swallows it and the two respawn-path tests below see
+    # neither the send_text await nor the configured side_effect.
+    eng._send_relaunch_in_pane = lambda *a, **kw: Engine._send_relaunch_in_pane(eng, *a, **kw)
     eng._ensure_window_alive = AsyncMock(return_value=False)
     return eng
 
