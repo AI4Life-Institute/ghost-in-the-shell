@@ -3,7 +3,8 @@
 Per openspec change ``add-multi-account-hotswap``. Five commands:
 
 * ``add <name> [--capture-current]`` — register a new account.
-* ``list`` — show every account with live OAuth Usage data.
+* ``list`` — show every account with the dispatcher's load-balanced
+  ranking (the exact rule ``--account=auto`` uses to pick).
 * ``switch <name> --binding <id>`` — change a binding's claude account.
 * ``remove <name>`` — delete an account dir + manifest entry.
 * ``import <session_id> --to <name> [--from <name>] [--force]`` — copy a
@@ -30,7 +31,6 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import UTC
 from pathlib import Path
 
 from .config import Settings
@@ -39,6 +39,7 @@ from .core.account import (
     AccountLayoutError,
     is_ghost_managed,
 )
+from .core.account_load import AccountRank, rank_accounts
 from .core.account_vault import (
     AccountEntry,
     AccountVault,
@@ -49,7 +50,6 @@ from .core.account_vault import (
     extract_account_metadata,
     import_session,
 )
-from .core.oauth_usage import Usage, UsageClient, UsageError
 
 logger = logging.getLogger(__name__)
 
@@ -443,7 +443,12 @@ def cmd_fix_hooks(args: argparse.Namespace) -> None:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    """``gits account list``."""
+    """``gits account list`` — show the dispatcher's load-balanced ranking.
+
+    Columns mirror the rule ``ghost butler dispatch --account=auto`` uses
+    to pick: score = (5h load + 7d load) / weight, lowest wins, subject
+    to the credential gate. Runs offline — no network calls.
+    """
     settings = Settings()
     layout = AccountLayout()
     vault = AccountVault(settings.state_dir, layout=layout)
@@ -452,21 +457,29 @@ def cmd_list(args: argparse.Namespace) -> None:
         return
 
     manifest = vault.load()
-
-    # Count bindings per account (approximate — read state.json directly).
     binding_counts = _binding_count_per_account(settings)
+    ranked = rank_accounts(
+        vault, live_binding_counts=binding_counts, layout=layout,
+    )
+    by_name = {row.name: row for row in ranked}
 
-    client = UsageClient(layout=layout, vault=vault)
     print(_format_header())
     for entry in manifest.accounts:
-        usage_str = _format_usage(client.query(entry.name))
-        bcount = binding_counts.get(entry.name, 0)
+        row = by_name.get(entry.name)
+        if row is None:
+            continue
         prefix = "*" if entry.name == manifest.default else " "
-        print(_format_row(prefix, entry, usage_str, bcount))
+        print(_format_row(prefix, row))
 
     if manifest.default:
         print(f"\n[current: {manifest.default}]")
     print(f"[bindings: {sum(binding_counts.values())} total across {len(binding_counts)} accounts]")
+    if any(row.rank is None for row in ranked):
+        print(
+            "[note] `—` in the pick? column = account excluded from auto-dispatch "
+            "(no resolvable credential — `.credentials.json` missing and no "
+            "macOS keychain entry). Run `claude --resume` under that account to refresh."
+        )
     unset = [a.name for a in manifest.accounts if not a.weight]
     if unset and len(manifest.accounts) > 1:
         print(
@@ -494,65 +507,56 @@ def _binding_count_per_account(settings: Settings) -> dict[str, int]:
     return counts
 
 
+def _human_count(n: float) -> str:
+    """Render a token-load count as ``947K`` / ``322M`` / ``1.6B`` etc.
+
+    Raw integer when ``n < 1000``; otherwise scaled with one decimal,
+    trailing ``.0`` stripped (so ``322M`` not ``322.0M``).
+    """
+    if n < 0:
+        n = 0.0
+    if n < 1000:
+        return f"{int(round(n))}"
+    if n < 1e6:
+        scaled, suffix = n / 1e3, "K"
+    elif n < 1e9:
+        scaled, suffix = n / 1e6, "M"
+    else:
+        scaled, suffix = n / 1e9, "B"
+    out = f"{scaled:.1f}"
+    if out.endswith(".0"):
+        out = out[:-2]
+    return f"{out}{suffix}"
+
+
+def _format_pick(rank: int | None, top_rank: int | None) -> str:
+    if rank is None:
+        return "—"
+    if top_rank is not None and rank == top_rank:
+        return f"#{rank} ←"
+    return f"#{rank}"
+
+
 def _format_header() -> str:
-    return f"{'  name':<14} {'email':<30} {'tier':<6} {'weight':<7} {'5h':<6} {'7d':<6} {'resets':<10} bindings"
-
-
-def _format_row(prefix: str, entry: AccountEntry, usage: str, bcount: int) -> str:
-    w = f"{entry.weight:g}" if entry.weight else "unset"
     return (
-        f"{prefix} {entry.name:<12} "
-        f"{(entry.email or '-'):<30} "
-        f"{(entry.subscription_type or '-'):<6} "
-        f"{w:<7} "
-        f"{usage:<24} {bcount}"
+        f"{'  name':<14} {'tier':<5} {'weight':<7} "
+        f"{'5h load':<9} {'7d load':<9} {'score':<9} "
+        f"{'pick?':<7} bindings"
     )
 
 
-def _format_usage(result: Usage | UsageError) -> str:
-    if isinstance(result, UsageError):
-        if result.kind == "stale_credentials":
-            return "stale (run claude --resume)"
-        if result.kind == "rate_limited":
-            return "api rate limited"
-        if result.kind == "missing_credentials":
-            return "no credentials"
-        if result.kind == "api_unsupported":
-            return "api unsupported"
-        if result.kind in ("unavailable_5xx", "unavailable_network"):
-            return "unavailable"
-        return f"err: {result.kind}"
-    parts = []
-    if result.five_hour and result.five_hour.utilization is not None:
-        parts.append(f"5h {result.five_hour.utilization:.0f}%")
-    if result.seven_day and result.seven_day.utilization is not None:
-        parts.append(f"7d {result.seven_day.utilization:.0f}%")
-    if result.five_hour and result.five_hour.resets_at:
-        parts.append(f"resets {_human_resets_at(result.five_hour.resets_at)}")
-    return "  ".join(parts) or "ok"
-
-
-def _human_resets_at(iso_ts: str) -> str:
-    """Convert ISO 8601 timestamp to a relative duration like '1h32m'."""
-    try:
-        from datetime import datetime
-        # Strip subsecond fractional digits if Python's older fromisoformat is fussy.
-        if iso_ts.endswith("Z"):
-            iso_ts = iso_ts[:-1] + "+00:00"
-        dt = datetime.fromisoformat(iso_ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        delta = dt - datetime.now(UTC)
-        total = int(delta.total_seconds())
-        if total <= 0:
-            return "now"
-        h = total // 3600
-        m = (total % 3600) // 60
-        if h:
-            return f"in {h}h{m:02d}m"
-        return f"in {m}m"
-    except Exception:
-        return iso_ts
+def _format_row(prefix: str, row: AccountRank) -> str:
+    tier = row.tier or "—"
+    weight = f"{row.weight:g}"
+    return (
+        f"{prefix} {row.name:<12} "
+        f"{tier:<5} {weight:<7} "
+        f"{_human_count(row.load_5h):<9} "
+        f"{_human_count(row.load_7d):<9} "
+        f"{_human_count(row.score):<9} "
+        f"{_format_pick(row.rank, 1):<7} "
+        f"{row.bindings}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1056,7 +1060,8 @@ def install_parser(parent_subparsers: argparse._SubParsersAction) -> None:
         p_fixhooks.set_defaults(_handler=cmd_fix_hooks)
 
         p_list = ssub.add_parser(
-            "list", help="List all accounts with live OAuth Usage data and binding counts"
+            "list",
+            help="List all accounts with load-balanced dispatch ranking (offline; no network)",
         )
         p_list.set_defaults(_handler=cmd_list)
 

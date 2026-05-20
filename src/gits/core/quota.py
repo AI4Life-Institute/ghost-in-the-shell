@@ -1,10 +1,13 @@
 """QuotaPatternMatcher — classify CLI output as quota-exhaustion signals.
 
 .. deprecated:: 0.3
-    Passive output pattern matching is replaced by the active OAuth Usage API
-    query in ``gits.core.oauth_usage``. This module is preserved for V1
-    transition compatibility but is no longer wired into engine startup.
-    See openspec change ``add-multi-account-hotswap``.
+    The primary quota signal is now ``gits.core.account_load`` —
+    cost-weighted local-JSONL scanning that powers
+    ``ghost butler dispatch --account=auto`` and ``ghost account list``.
+    Passive output pattern matching survives as a defensive fallback for
+    edge cases the JSONL scanner can't see (CLI emits a rate-limit line
+    before any usage record lands). See openspec change
+    ``add-multi-account-hotswap``.
 
 Loads regex patterns from ``~/.gits/quota_patterns.yaml`` (with sensible
 defaults if the file is missing) and exposes a synchronous ``classify`` method

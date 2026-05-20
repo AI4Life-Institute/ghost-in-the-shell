@@ -4,14 +4,15 @@ Scans ``~/.claude-<name>/projects/**/*.jsonl`` for ``assistant`` events
 whose ``timestamp`` falls inside a rolling window and sums cost-weighted
 tokens to produce a per-account "load" number. Used by
 ``ghost butler dispatch`` to spread task dispatches across accounts so a
-single one doesn't absorb all load and hit its 5h/7d caps.
+single one doesn't absorb all load and hit its 5h/7d caps. Also surfaces
+the same ranking to ``ghost account list`` / Discord ``/accounts`` so
+the operator sees exactly what ``--account=auto`` would pick right now.
 
-Locked operator decisions (PoC 2026-05-19; see task [[gbraq8]]):
+Locked operator decisions (PoC 2026-05-19; see task [[gbraq8]],
+broadened by [[4h3v7j]] to ban all OAuth Usage API calls from ghost):
 
-* **No OAuth Usage API.** ``gits/core/oauth_usage.py`` queries
-  ``api.anthropic.com/api/oauth/usage`` which is reverse-engineered;
-  the operator treats programmatic third-party use as a ban risk.
-  This module is zero-network — JSONL only.
+* **Zero network.** No programmatic Anthropic Usage API calls from
+  anywhere in ghost — ban-risk concern. This module is JSONL-only.
 * **JSONL-only blindspot.** Usage from other machines or claude.ai web
   is invisible. Accepted: dispatched CLI sessions run on the
   orchestrator machine, so local JSONL is authoritative for the
@@ -35,10 +36,7 @@ Locked operator decisions (PoC 2026-05-19; see task [[gbraq8]]):
   account's no-suffix service) or
   ``Claude Code-credentials-<sha256(config_dir)[:8]>`` (the
   suffix-keyed service used by isolated ``CLAUDE_CONFIG_DIR`` accounts).
-  Service-name derivation mirrors
-  ``gits.core.oauth_usage.UsageClient._keychain_service_candidates``.
-  We check entry *existence* only — never read the secret and never
-  call the OAuth usage API.
+  We check entry *existence* only — never read the secret.
 * **No mid-task rebalancing.** A binding's account is sticky once
   chosen; ``gits account switch`` is the operator-driven path.
 """
@@ -53,6 +51,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from .account import AccountLayout
@@ -114,8 +113,6 @@ def _keychain_service_candidates(
 ) -> list[str]:
     """Return keychain service names to check for ``name``, in priority order.
 
-    Mirrors ``gits.core.oauth_usage.UsageClient._keychain_service_candidates``:
-
     * The **default** account routes through native ``~/.claude/`` → claude
       uses the no-suffix service ``Claude Code-credentials``. We still
       include the suffix-keyed name as a fallback in case the account was
@@ -125,8 +122,7 @@ def _keychain_service_candidates(
       no-suffix name as a fallback so we surface a live token wherever it
       lives.
 
-    Reusing this hash logic — not reinventing it — is required because
-    every isolated account on a real machine stores its token under the
+    Every isolated account on a real machine stores its token under the
     suffix-keyed service, and a default-only keychain check would skip
     every isolated account whose credential is keychain-only (no
     ``.credentials.json`` file).
@@ -346,8 +342,107 @@ def account_load_dual(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Picker
+# Ranking + picker
 # ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class AccountRank:
+    """One row in the dispatcher's ranked view of available accounts.
+
+    ``rank`` is ``None`` when the account fails the credential gate —
+    such rows are still emitted (so the UI can show them as ``—``) but
+    are excluded from the picker. Eligible rows carry ``rank=1, 2, …``
+    in score-asc order (same tiebreak rules as :func:`pick_account`).
+    """
+
+    name: str
+    tier: str | None
+    weight: float
+    load_5h: float
+    load_7d: float
+    score: float
+    rank: int | None
+    bindings: int
+    last_used: str
+
+
+def rank_accounts(
+    vault: AccountVault,
+    *,
+    live_binding_counts: Mapping[str, int] | None = None,
+    layout: AccountLayout | None = None,
+    now: float | None = None,
+) -> list[AccountRank]:
+    """Return the full ranked account table the dispatcher would consult.
+
+    Every account in the manifest appears in the result, including ones
+    the credential gate excludes (those have ``rank=None``). Eligible
+    rows are ranked ``1, 2, …`` by score ascending, tiebreaking on live
+    bindings, then ``last_used``, then name — identical to
+    :func:`pick_account`. Result ordering: eligible rows first (by
+    rank), then credential-gated rows by name.
+
+    Returns ``[]`` if the vault isn't initialized or the manifest can't
+    be loaded. Single-account manifests return a 1-row table (whereas
+    :func:`pick_account` returns ``None`` — single-account installs
+    fall through to ``manifest.default`` at the dispatch layer).
+    """
+    if not vault.is_initialized():
+        return []
+    try:
+        manifest = vault.load()
+    except Exception:
+        return []
+    accounts = list(manifest.accounts)
+    if not accounts:
+        return []
+
+    layout = layout or AccountLayout()
+    default = manifest.default
+    binding_counts: Mapping[str, int] = live_binding_counts or {}
+
+    eligible: list[tuple[float, int, str, str, AccountEntry, float, float]] = []
+    gated: list[AccountRank] = []
+    for entry in accounts:
+        load_5h, load_7d = account_load_dual(
+            entry.name, WINDOW_5H, WINDOW_7D, now=now, layout=layout,
+        )
+        weight = effective_weight(entry)
+        score = (load_5h + load_7d) / weight
+        bindings = binding_counts.get(entry.name, 0)
+        last_used = entry.last_used or ""
+        if _has_credential(entry.name, default=default, layout=layout):
+            eligible.append((score, bindings, last_used, entry.name, entry, load_5h, load_7d))
+        else:
+            gated.append(AccountRank(
+                name=entry.name,
+                tier=entry.subscription_type,
+                weight=weight,
+                load_5h=load_5h,
+                load_7d=load_7d,
+                score=score,
+                rank=None,
+                bindings=bindings,
+                last_used=last_used,
+            ))
+
+    eligible.sort()
+    ranked: list[AccountRank] = []
+    for i, (score, bindings, last_used, _name, entry, l5, l7) in enumerate(eligible, start=1):
+        ranked.append(AccountRank(
+            name=entry.name,
+            tier=entry.subscription_type,
+            weight=effective_weight(entry),
+            load_5h=l5,
+            load_7d=l7,
+            score=score,
+            rank=i,
+            bindings=bindings,
+            last_used=last_used,
+        ))
+    gated.sort(key=lambda r: r.name)
+    return ranked + gated
 
 
 def pick_account(
@@ -359,16 +454,12 @@ def pick_account(
 ) -> str | None:
     """Pick the lowest-utilization account with launchable credentials.
 
-    Returns ``None`` when:
+    Thin wrapper over :func:`rank_accounts`. Returns ``None`` when:
 
     * the multi-account vault isn't initialized,
     * the manifest has 0 or 1 account (single-account install — caller
       keeps legacy behavior),
     * or every account fails the credential gate.
-
-    Score = ``util_5h + util_7d`` where each ``util = load / weight``.
-    Tiebreak: fewer live bindings, then oldest ``last_used``, then
-    name ascending (deterministic).
     """
     if not vault.is_initialized():
         return None
@@ -376,28 +467,15 @@ def pick_account(
         manifest = vault.load()
     except Exception:
         return None
-    accounts = list(manifest.accounts)
-    if len(accounts) <= 1:
+    if len(manifest.accounts) <= 1:
         return None
-
-    layout = layout or AccountLayout()
-    default = manifest.default
-    binding_counts: Mapping[str, int] = live_binding_counts or {}
-
-    scored: list[tuple[float, int, str, str]] = []
-    for entry in accounts:
-        if not _has_credential(entry.name, default=default, layout=layout):
-            continue
-        load_5h, load_7d = account_load_dual(
-            entry.name, WINDOW_5H, WINDOW_7D, now=now, layout=layout,
-        )
-        weight = effective_weight(entry)
-        score = (load_5h + load_7d) / weight
-        bindings = binding_counts.get(entry.name, 0)
-        last_used = entry.last_used or ""
-        scored.append((score, bindings, last_used, entry.name))
-
-    if not scored:
-        return None
-    scored.sort()
-    return scored[0][3]
+    ranked = rank_accounts(
+        vault,
+        live_binding_counts=live_binding_counts,
+        layout=layout,
+        now=now,
+    )
+    for row in ranked:
+        if row.rank == 1:
+            return row.name
+    return None
