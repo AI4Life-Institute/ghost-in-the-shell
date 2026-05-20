@@ -315,6 +315,37 @@ class Engine:
             except Exception:
                 logger.warning("Failed to auto-install hook for alias %s", alias, exc_info=True)
 
+        # Self-heal every managed Claude account (task 3ead61). Accounts are
+        # isolated CLAUDE_CONFIG_DIRs registered in the account vault — they
+        # are NOT covered by the alias loop above, which is how `sharon-team`
+        # ended up hookless and silently broke its dispatch mirror. _install_hook
+        # is idempotent, so this is a cheap no-op for already-hooked accounts.
+        # Per-account failures are loud-logged but never crash boot.
+        try:
+            if self.account_vault.is_initialized():
+                for entry in self.account_vault.list():
+                    try:
+                        # quiet=True: a per-account "already installed" line on
+                        # every daemon restart would just spam pm2 out.log.
+                        # Failures are still surfaced via logger.warning below.
+                        rc = _install_hook(config_dir=entry.config_dir, quiet=True)
+                        if rc != 0:
+                            logger.warning(
+                                "account-hook self-heal: install for account %s "
+                                "returned rc=%s — run `gits account fix-hooks %s`",
+                                entry.name, rc, entry.name,
+                            )
+                    except Exception:
+                        logger.warning(
+                            "account-hook self-heal failed for account %s — "
+                            "run `gits account fix-hooks %s`",
+                            entry.name, entry.name, exc_info=True,
+                        )
+        except Exception:
+            logger.warning(
+                "account-hook self-heal: could not enumerate accounts", exc_info=True
+            )
+
     # ------------------------------------------------------------------
     # Message handler (plain text forwarding)
     # ------------------------------------------------------------------
