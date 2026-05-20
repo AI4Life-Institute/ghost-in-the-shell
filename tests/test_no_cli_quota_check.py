@@ -29,9 +29,9 @@ ALLOWED_FILES = {
     ],
     # cli_account.py — `gits account add` runs `claude auth login` with
     # CLAUDE_CONFIG_DIR set to the new per-account directory. This is the
-    # ONLY place the new account-management code spawns claude. Quota
-    # detection in the new design uses the OAuth Usage API (see
-    # gits.core.oauth_usage) — never a `claude` subprocess.
+    # ONLY place the new account-management code spawns claude. Quota /
+    # load detection in the new design reads local JSONL transcripts (see
+    # gits.core.account_load) — never a `claude` subprocess.
     "cli_account.py": [
         "cmd_add",
     ],

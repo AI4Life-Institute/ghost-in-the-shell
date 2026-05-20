@@ -2047,8 +2047,10 @@ class Engine:
     # ------------------------------------------------------------------
 
     async def handle_accounts_list(self, channel_id: str, interaction: Any) -> None:
-        """``/accounts`` Discord handler — list accounts with live OAuth Usage data."""
-        from .oauth_usage import UsageClient
+        """``/accounts`` — mirror ``gits account list`` (load-balanced ranking)."""
+        from gits.cli_account import _format_header, _format_row
+
+        from .account_load import rank_accounts
 
         manifest = self.account_vault.load()
         if not manifest.accounts:
@@ -2060,7 +2062,7 @@ class Engine:
             return
 
         # Determine which account this channel's binding currently uses (for
-        # the "current channel" highlight).
+        # the "current channel" highlight, distinct from the manifest default).
         binding = self.session_mgr.get_binding(channel_id)
         current = (
             binding.claude_account
@@ -2074,44 +2076,38 @@ class Engine:
             if isinstance(b.claude_account, str):
                 binding_counts[b.claude_account] = binding_counts.get(b.claude_account, 0) + 1
 
-        client = UsageClient(layout=self.account_layout, vault=self.account_vault)
-        lines: list[str] = []
-        for a in manifest.accounts:
-            arrow = "→" if a.name == current else " "
-            current_tag = " *current*" if a.name == manifest.default else ""
-            usage = client.query(a.name)
-            usage_str = self._format_usage_for_discord(usage)
-            email = a.email or "—"
-            tier = a.subscription_type or "—"
-            count = binding_counts.get(a.name, 0)
-            lines.append(
-                f"{arrow} `{a.name}`{current_tag} · {tier} · {email} · {usage_str} · "
-                f"{count} binding{'s' if count != 1 else ''}"
-            )
-        body = "\n".join(lines)
-        await self._reply(interaction, f"**Claude Accounts**\n{body}")
+        ranked = rank_accounts(
+            self.account_vault,
+            live_binding_counts=binding_counts,
+            layout=self.account_layout,
+        )
+        by_name = {row.name: row for row in ranked}
 
-    @staticmethod
-    def _format_usage_for_discord(result: Any) -> str:
-        from .oauth_usage import UsageError
-        if isinstance(result, UsageError):
-            if result.kind == "stale_credentials":
-                return "stale (run `claude --resume`)"
-            if result.kind == "rate_limited":
-                return "api rate limited"
-            if result.kind == "missing_credentials":
-                return "no credentials"
-            if result.kind == "api_unsupported":
-                return "api unsupported"
-            if result.kind in ("unavailable_5xx", "unavailable_network"):
-                return "unavailable"
-            return f"err: {result.kind}"
-        parts: list[str] = []
-        if result.five_hour and result.five_hour.utilization is not None:
-            parts.append(f"5h {result.five_hour.utilization:.0f}%")
-        if result.seven_day and result.seven_day.utilization is not None:
-            parts.append(f"7d {result.seven_day.utilization:.0f}%")
-        return " · ".join(parts) or "ok"
+        lines: list[str] = [_format_header()]
+        for a in manifest.accounts:
+            row = by_name.get(a.name)
+            if row is None:
+                continue
+            if a.name == current:
+                prefix = "→"
+            elif a.name == manifest.default:
+                prefix = "*"
+            else:
+                prefix = " "
+            lines.append(_format_row(prefix, row))
+
+        body = "\n".join(lines)
+        footer_parts: list[str] = []
+        if manifest.default:
+            footer_parts.append(f"current: {manifest.default}")
+        if any(row.rank is None for row in ranked):
+            footer_parts.append("`—` rows excluded from auto-dispatch (no resolvable credential)")
+        footer = ("\n" + " · ".join(footer_parts)) if footer_parts else ""
+
+        await self._reply(
+            interaction,
+            f"**Claude Accounts**\n```\n{body}\n```{footer}",
+        )
 
     async def handle_account_switch(
         self, channel_id: str, target: str, interaction: Any

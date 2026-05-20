@@ -14,9 +14,11 @@ from gits.core.account import AccountLayout
 from gits.core.account_load import (
     WINDOW_5H,
     WINDOW_7D,
+    AccountRank,
     account_load,
     account_load_dual,
     pick_account,
+    rank_accounts,
 )
 from gits.core.account_vault import AccountEntry, AccountVault, Manifest
 
@@ -301,3 +303,92 @@ def test_pick_account_tiebreak_by_bindings(tmp_path):
         live_binding_counts={"a": 2, "b": 0},
     )
     assert pick == "b"
+
+
+# ─── rank_accounts ───────────────────────────────────────────────────────
+
+
+def test_rank_accounts_full_table_shape(tmp_path):
+    vault, layout = _vault_with(
+        tmp_path, [("alpha", 1.0), ("beta", 2.0)], default="alpha",
+    )
+    _make_creds(layout, "alpha"); _make_creds(layout, "beta")
+    # alpha heavier than beta → beta should rank #1
+    _write_jsonl(
+        layout.projects_dir("alpha") / "h" / "s.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=1_000_000)],
+        mtime=_FAKE_NOW - 100,
+    )
+    ranked = rank_accounts(vault, layout=layout, now=_FAKE_NOW)
+
+    assert [r.name for r in ranked] == ["beta", "alpha"]
+    assert all(isinstance(r, AccountRank) for r in ranked)
+    assert ranked[0].rank == 1
+    assert ranked[1].rank == 2
+    # weight surfaced from the AccountEntry
+    assert ranked[0].weight == 2.0
+    assert ranked[1].weight == 1.0
+    # score = (load_5h + load_7d) / weight — alpha must be much higher
+    assert ranked[1].score > ranked[0].score
+
+
+def test_rank_accounts_credential_gated_row_has_no_rank(tmp_path):
+    vault, layout = _vault_with(
+        tmp_path, [("creds", 1.0), ("nocreds", 1.0)], default="creds",
+    )
+    _make_creds(layout, "creds")  # nocreds intentionally has none
+    with patch(
+        "gits.core.account_load._macos_keychain_entry_exists",
+        return_value=False,
+    ):
+        ranked = rank_accounts(vault, layout=layout, now=_FAKE_NOW)
+
+    by_name = {r.name: r for r in ranked}
+    assert by_name["creds"].rank == 1
+    assert by_name["nocreds"].rank is None
+    # gated row still carries load/score numbers so the UI can show them
+    assert by_name["nocreds"].load_5h == pytest.approx(0.0)
+
+
+def test_rank_accounts_single_account_returns_one_row(tmp_path):
+    vault, layout = _vault_with(tmp_path, [("solo", 1.0)], default="solo")
+    _make_creds(layout, "solo")
+    ranked = rank_accounts(vault, layout=layout, now=_FAKE_NOW)
+
+    assert len(ranked) == 1
+    assert ranked[0].name == "solo"
+    assert ranked[0].rank == 1
+    # pick_account preserves the legacy ≤1-account contract — None.
+    assert pick_account(vault, layout=layout, now=_FAKE_NOW) is None
+
+
+def test_rank_accounts_uninitialized_vault_returns_empty(tmp_path):
+    layout = AccountLayout(home=tmp_path)
+    vault = AccountVault(tmp_path / ".gits", layout=layout)
+    assert rank_accounts(vault, layout=layout, now=_FAKE_NOW) == []
+
+
+def test_pick_account_matches_rank_one(tmp_path):
+    """Round-trip — the dispatcher and the CLI table walk the same code path.
+
+    Acceptance criterion from task [[4h3v7j]]: ``--account=auto`` must
+    pick the same account ``ghost account list`` shows as ``#1``.
+    """
+    vault, layout = _vault_with(
+        tmp_path, [("a", 1.0), ("b", 1.0), ("c", 1.0)], default="a",
+    )
+    for name in ("a", "b", "c"):
+        _make_creds(layout, name)
+    _write_jsonl(
+        layout.projects_dir("a") / "h" / "s.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=500_000)],
+        mtime=_FAKE_NOW - 100,
+    )
+    _write_jsonl(
+        layout.projects_dir("b") / "h" / "s.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=2_000_000)],
+        mtime=_FAKE_NOW - 100,
+    )
+    ranked = rank_accounts(vault, layout=layout, now=_FAKE_NOW)
+    rank_one = next(r for r in ranked if r.rank == 1)
+    assert pick_account(vault, layout=layout, now=_FAKE_NOW) == rank_one.name
