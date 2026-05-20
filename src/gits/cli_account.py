@@ -161,7 +161,7 @@ def cmd_add(args: argparse.Namespace) -> None:
         except AccountVaultError as e:
             print(f"[error] {e}", file=sys.stderr)
             sys.exit(1)
-        _propagate_hooks(layout, name)
+        hooks_ok = _propagate_hooks(layout, name)
         print(f"[ok] account '{name}' registered from pre-loaded credentials at {target}")
         if entry.subscription_type:
             print(f"     subscriptionType: {entry.subscription_type}")
@@ -169,6 +169,9 @@ def cmd_add(args: argparse.Namespace) -> None:
             print(f"     email: {entry.email}")
         if entry.org_id:
             print(f"     orgId: {entry.org_id}")
+        if not hooks_ok:
+            _warn_hook_propagation_failed(name)
+            sys.exit(1)
         return
 
     # ── Path 2 & 3: standard flow ─────────────────────────────────────
@@ -256,9 +259,10 @@ def cmd_add(args: argparse.Namespace) -> None:
         print(f"[error] {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Hooks propagation: replicate ghost-owned hooks from ~/.claude/settings.json
-    # into the new account's settings.json (best-effort; non-fatal).
-    _propagate_hooks(layout, name)
+    # Hooks propagation: replicate the ghost-owned SessionStart hook into the
+    # new account's settings.json. A failure here silently breaks the dispatch
+    # mirror for the account, so it must be surfaced loudly (see below).
+    hooks_ok = _propagate_hooks(layout, name)
 
     # Auto-migrate existing bindings (only on first --capture-current).
     if capture_current:
@@ -274,6 +278,10 @@ def cmd_add(args: argparse.Namespace) -> None:
     if entry.subscription_type:
         print(f"     subscriptionType: {entry.subscription_type}")
 
+    if not hooks_ok:
+        _warn_hook_propagation_failed(name)
+        sys.exit(1)
+
 
 def _cleanup_account_dir(target: Path) -> None:
     """Remove a partially-created account directory after a failed add."""
@@ -285,19 +293,48 @@ def _cleanup_account_dir(target: Path) -> None:
             logger.warning("could not clean up partial dir at %s", target)
 
 
-def _propagate_hooks(layout: AccountLayout, name: str) -> None:
-    """Best-effort: install ghost hooks into the new account's settings.json.
+def _propagate_hooks(layout: AccountLayout, name: str) -> bool:
+    """Install the ghost ``SessionStart`` hook into a new account's settings.json.
 
-    Reuses the existing ``_install_hook(config_dir=...)`` from ``__main__``.
-    Failures are logged but do not abort the add flow.
+    Reuses the existing idempotent ``_install_hook(config_dir=...)`` from
+    ``__main__``. Returns ``True`` when the hook is installed afterwards,
+    ``False`` on any failure. The caller (:func:`cmd_add`) is responsible
+    for surfacing a failure loudly — see :func:`_warn_hook_propagation_failed`.
     """
     try:
         from .__main__ import _install_hook
-        rc = _install_hook(config_dir=str(layout.account_dir(name)))
+        rc = _install_hook(config_dir=str(layout.account_dir(name)), quiet=True)
         if rc != 0:
             logger.warning("hook propagation to account %s returned rc=%s", name, rc)
+            return False
+        return True
     except Exception as e:
         logger.warning("hook propagation to account %s failed: %s", name, e)
+        return False
+
+
+def _warn_hook_propagation_failed(name: str) -> None:
+    """Print a loud, operator-visible warning that hook propagation failed.
+
+    Called by :func:`cmd_add` when :func:`_propagate_hooks` could not install
+    the ``SessionStart`` hook. The account *is* registered — but until the
+    hook is installed, dispatched sessions on it will not mirror to Discord,
+    which is exactly the silent breakage this task exists to prevent.
+    """
+    bar = "━" * 64
+    print(
+        f"\n[warn] {bar}\n"
+        f"[warn] account {name!r} was registered, but its Claude SessionStart\n"
+        f"[warn] hook could NOT be installed in settings.json.\n"
+        f"[warn]\n"
+        f"[warn] Dispatched sessions on {name!r} will NOT mirror to Discord\n"
+        f"[warn] until this is repaired. The account IS registered — do not\n"
+        f"[warn] re-run `gits account add`. Repair with:\n"
+        f"[warn]\n"
+        f"[warn]     gits account fix-hooks {name}\n"
+        f"[warn] {bar}",
+        file=sys.stderr,
+    )
 
 
 async def _migrate_bindings(settings: Settings, target_account: str) -> int:
@@ -305,6 +342,99 @@ async def _migrate_bindings(settings: Settings, target_account: str) -> int:
     from .core.session import SessionManager
     mgr = SessionManager(state_dir=settings.state_dir)
     return await mgr.migrate_legacy_bindings(target_account)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Command: gits account fix-hooks
+# ─────────────────────────────────────────────────────────────────────
+
+
+def cmd_fix_hooks(args: argparse.Namespace) -> None:
+    """``gits account fix-hooks [<name>...]``.
+
+    Ensure the Claude ``SessionStart`` hook is installed in each account's
+    ``settings.json`` — the hook is what wires the dispatch mirror chain
+    (Claude session start → ``gits hook`` → daemon sets ``cli_session_id``
+    → ``jsonl_monitor`` forwards output to Discord). A missing hook breaks
+    that chain silently.
+
+    With no names, processes every account in the manifest; otherwise only
+    the named accounts. Exit code 0 if every targeted account ends with the
+    hook installed (whether already-ok or repaired); non-zero if at least
+    one install failed.
+    """
+    from .__main__ import _install_hook, _is_hook_installed
+
+    settings = Settings()
+    layout = AccountLayout()
+    vault = AccountVault(settings.state_dir, layout=layout)
+
+    if not vault.is_initialized() or not vault.list():
+        print("No accounts configured. Run `gits account add <name>` first.")
+        return
+
+    requested: list[str] = list(getattr(args, "names", None) or [])
+    if requested:
+        unknown = [n for n in requested if vault.get(n) is None]
+        if unknown:
+            print(
+                f"[error] no such account(s): {', '.join(unknown)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Preserve caller order, de-duplicated.
+        seen: set[str] = set()
+        targets: list[AccountEntry] = []
+        for n in requested:
+            if n not in seen:
+                seen.add(n)
+                entry = vault.get(n)
+                if entry is not None:
+                    targets.append(entry)
+    else:
+        targets = vault.list()
+
+    repaired = already = failed = 0
+    for entry in targets:
+        settings_file = Path(entry.config_dir).expanduser() / "settings.json"
+
+        # Decide the current state *before* calling _install_hook so we can
+        # report already-ok vs repaired (the installer collapses both to 0).
+        current: object = {}
+        unreadable = False
+        if settings_file.exists():
+            try:
+                current = json.loads(settings_file.read_text())
+            except (OSError, json.JSONDecodeError):
+                unreadable = True
+
+        if (
+            not unreadable
+            and isinstance(current, dict)
+            and _is_hook_installed(current)
+        ):
+            print(f"{entry.name}: hook already installed in {settings_file}")
+            already += 1
+            continue
+
+        rc = _install_hook(config_dir=entry.config_dir, quiet=True)
+        if rc == 0:
+            print(f"{entry.name}: installed hook in {settings_file}")
+            repaired += 1
+        else:
+            print(
+                f"{entry.name}: [error] could not install hook in {settings_file}",
+                file=sys.stderr,
+            )
+            failed += 1
+
+    if failed:
+        print(
+            f"[error] {repaired} repaired, {already} already-ok, {failed} failed",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"[ok] {repaired} repaired, {already} already-ok")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -911,6 +1041,20 @@ def install_parser(parent_subparsers: argparse._SubParsersAction) -> None:
         )
         p_add.set_defaults(_handler=cmd_add)
 
+        p_fixhooks = ssub.add_parser(
+            "fix-hooks",
+            help=(
+                "Ensure the Claude SessionStart hook is installed in every "
+                "account's settings.json (self-heal for the dispatch mirror)"
+            ),
+        )
+        p_fixhooks.add_argument(
+            "names",
+            nargs="*",
+            help="Account name(s) to repair (default: all accounts)",
+        )
+        p_fixhooks.set_defaults(_handler=cmd_fix_hooks)
+
         p_list = ssub.add_parser(
             "list", help="List all accounts with live OAuth Usage data and binding counts"
         )
@@ -1028,7 +1172,7 @@ def dispatch(args: argparse.Namespace) -> None:
     handler = getattr(args, "_handler", None)
     if handler is None:
         print(
-            "usage: gits account <add|list|switch|remove|import|refresh|"
+            "usage: gits account <add|fix-hooks|list|switch|remove|import|refresh|"
             "refresh-install|refresh-uninstall|migrate-default-native|"
             "set-default|set-tags|set-weight>",
             file=sys.stderr,

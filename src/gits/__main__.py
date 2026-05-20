@@ -1259,11 +1259,16 @@ def _is_hook_installed(settings: dict) -> bool:
     return False
 
 
-def _install_hook(config_dir: str | None = None) -> int:
+def _install_hook(config_dir: str | None = None, quiet: bool = False) -> int:
     """Install the gits hook into Claude's settings.json. Returns 0 on success.
 
     *config_dir* overrides the default ``~/.claude`` directory so the hook
     can be installed for aliases that use a custom ``CLAUDE_CONFIG_DIR``.
+
+    *quiet* suppresses the two informational stdout lines ("Hook already
+    installed" / "Hook installed successfully") so callers that report
+    their own per-account status (e.g. ``gits account fix-hooks``) own the
+    output. Errors are still printed to stderr regardless.
     """
     from pathlib import Path
 
@@ -1281,8 +1286,18 @@ def _install_hook(config_dir: str | None = None) -> int:
             print(f"Error reading {settings_file}: {e}", file=sys.stderr)
             return 1
 
+    # A settings.json that parses to something other than an object (e.g. a
+    # bare array) is corrupt; refuse rather than crash in _is_hook_installed.
+    if not isinstance(settings, dict):
+        print(
+            f"Error: {settings_file} is not a JSON object; refusing to modify",
+            file=sys.stderr,
+        )
+        return 1
+
     if _is_hook_installed(settings):
-        print(f"Hook already installed in {settings_file}")
+        if not quiet:
+            print(f"Hook already installed in {settings_file}")
         return 0
 
     gits_path = _find_gits_path()
@@ -1304,7 +1319,8 @@ def _install_hook(config_dir: str | None = None) -> int:
         print(f"Error writing {settings_file}: {e}", file=sys.stderr)
         return 1
 
-    print(f"Hook installed successfully in {settings_file}")
+    if not quiet:
+        print(f"Hook installed successfully in {settings_file}")
     return 0
 
 
