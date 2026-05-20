@@ -367,6 +367,24 @@ class AccountRank:
     last_used: str
 
 
+def format_pick_token(rank: int | None, top: int = 1) -> str:
+    """Render the dispatcher's pick indicator for a ranked row.
+
+    Single source of truth for the ``#1 ←`` / ``#N`` / ``—`` vocabulary
+    that both the CLI table (``gits account list``) and the Discord
+    ``/account-switch`` autocomplete surface to the operator.
+
+    * ``rank is None`` (credential gate excluded) → ``—``
+    * ``rank == top`` (default top=1; dispatcher's pick) → ``#<rank> ←``
+    * other eligible rows → ``#<rank>``
+    """
+    if rank is None:
+        return "—"
+    if rank == top:
+        return f"#{rank} ←"
+    return f"#{rank}"
+
+
 def rank_accounts(
     vault: AccountVault,
     *,

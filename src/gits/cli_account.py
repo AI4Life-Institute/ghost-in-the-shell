@@ -39,7 +39,7 @@ from .core.account import (
     AccountLayoutError,
     is_ghost_managed,
 )
-from .core.account_load import AccountRank, rank_accounts
+from .core.account_load import AccountRank, format_pick_token, rank_accounts
 from .core.account_vault import (
     AccountEntry,
     AccountVault,
@@ -529,14 +529,6 @@ def _human_count(n: float) -> str:
     return f"{out}{suffix}"
 
 
-def _format_pick(rank: int | None, top_rank: int | None) -> str:
-    if rank is None:
-        return "—"
-    if top_rank is not None and rank == top_rank:
-        return f"#{rank} ←"
-    return f"#{rank}"
-
-
 def _format_header() -> str:
     return (
         f"{'  name':<14} {'tier':<5} {'weight':<7} "
@@ -554,7 +546,7 @@ def _format_row(prefix: str, row: AccountRank) -> str:
         f"{_human_count(row.load_5h):<9} "
         f"{_human_count(row.load_7d):<9} "
         f"{_human_count(row.score):<9} "
-        f"{_format_pick(row.rank, 1):<7} "
+        f"{format_pick_token(row.rank):<7} "
         f"{row.bindings}"
     )
 

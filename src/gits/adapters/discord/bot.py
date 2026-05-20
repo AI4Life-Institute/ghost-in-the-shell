@@ -6,9 +6,11 @@ and thread lifecycle.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,11 @@ from typing import Any
 # env var is honored there.
 from ...butler.prefix import VAULT_DISPATCH_RE as _VAULT_DISPATCH_RE
 from ...core.account import validate_account_name
+from ...core.account_load import (
+    AccountRank,
+    format_pick_token,
+    rank_accounts,
+)
 
 import discord
 from discord import app_commands
@@ -39,6 +46,89 @@ from ..base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# /account-switch autocomplete — dispatcher rank cache + label composer
+# ─────────────────────────────────────────────────────────────────────
+#
+# Autocomplete callbacks fire per-keystroke and Discord enforces a ~3s
+# response budget. ``rank_accounts()`` does a JSONL transcript scan
+# across every account (plus a macOS keychain subprocess per credential
+# check), which is too slow to repeat on every keystroke for a healthy
+# multi-account install. Mitigations (operator-locked, task [[wn0yqz]]):
+#
+# * The scan runs off-thread via ``asyncio.to_thread`` so the bot event
+#   loop never blocks regardless of scan duration.
+# * Result is process-global TTL-cached for ``_RANK_CACHE_TTL_SECONDS``.
+#   The cache is single-slot (one bot process == one engine == one
+#   vault), keyed by nothing. Staleness up to 5s on a rolling-window
+#   load metric is operationally invisible; operator's typing cadence
+#   is sub-second.
+
+_RANK_CACHE_TTL_SECONDS = 5.0
+_RANK_CACHE: dict[str, tuple[float, list[AccountRank]]] = {}
+
+
+def _cached_rank_accounts(vault, layout, binding_counts) -> list[AccountRank]:
+    """TTL-memoized ``rank_accounts`` for the autocomplete hot path."""
+    now = time.monotonic()
+    cached = _RANK_CACHE.get("v1")
+    if cached is not None and now - cached[0] < _RANK_CACHE_TTL_SECONDS:
+        return cached[1]
+    ranked = rank_accounts(
+        vault, live_binding_counts=binding_counts, layout=layout,
+    )
+    _RANK_CACHE["v1"] = (now, ranked)
+    return ranked
+
+
+def _clear_rank_cache() -> None:
+    """Test hook — drop the autocomplete TTL cache."""
+    _RANK_CACHE.clear()
+
+
+def _compose_autocomplete_label(
+    name: str,
+    rank_token: str,
+    state_tags: list[str],
+    user_tags: list[str],
+    *,
+    limit: int = 100,
+) -> str:
+    """Compose a ``/account-switch`` Choice label fitting Discord's 100-char cap.
+
+    Format: ``<name> <rank_token>[ (<tags>)]`` where tags is the union of
+    ``state_tags`` (``current``, ``default``) and ``user_tags`` (manifest
+    user tags like ``20x Max``). When the composed label exceeds ``limit``,
+    drop in this order (spec [[wn0yqz]] — rank is the whole point of this
+    UX surface and is never dropped):
+
+    1. Drop ``user_tags`` first; rank + state tags retained.
+    2. If still over, truncate ``name`` with an ellipsis; rank + state
+       tags retained.
+    """
+
+    def _build(tags: list[str], display_name: str) -> str:
+        suffix = f" ({', '.join(tags)})" if tags else ""
+        return f"{display_name} {rank_token}{suffix}"
+
+    full = _build(state_tags + user_tags, name)
+    if len(full) <= limit:
+        return full
+    no_user = _build(state_tags, name)
+    if len(no_user) <= limit:
+        return no_user
+    # Still over — truncate the name. Reserve space for " <rank>[ (state)]"
+    # and one ellipsis character.
+    state_suffix = f" ({', '.join(state_tags)})" if state_tags else ""
+    fixed = f" {rank_token}{state_suffix}"
+    keep = limit - len(fixed) - 1  # -1 for the ellipsis
+    if keep < 1:
+        # Pathological — rank + state tags alone exceed the limit. Best
+        # effort: keep at least one name char + ellipsis, accept overflow.
+        keep = 1
+    return f"{name[:keep]}…{fixed}"
 
 
 def _build_cli_choices() -> list[app_commands.Choice]:
@@ -1193,41 +1283,79 @@ class DiscordAdapter(PlatformAdapter):
         ) -> list[app_commands.Choice[str]]:
             if not self._check_interaction_access(interaction):
                 return []
-            if not self._engine:
-                return []
-            try:
-                manifest = self._engine.account_vault.load()
-            except Exception:
-                return []
-            # Find this binding's currently-assigned account so the dropdown
-            # can tag it. Falls back gracefully if no binding exists.
-            binding_account: str | None = None
-            try:
-                binding = self._engine.session_mgr.get_binding(str(interaction.channel_id))
-                if binding is not None:
-                    binding_account = getattr(binding, "claude_account", None)
-            except Exception:
-                pass
-            choices: list[app_commands.Choice[str]] = []
-            for a in manifest.accounts:
-                if current and current.lower() not in a.name.lower():
-                    continue
-                # Combine state tags (current/default) + user-set tags from
-                # manifest (e.g. "20x Max", "6x Team") into a single label.
-                tags: list[str] = []
-                if a.name == binding_account:
-                    tags.append("current")
-                if a.name == manifest.default:
-                    tags.append("default")
-                user_tags = list(getattr(a, "tags", []) or [])
-                tags.extend(user_tags)
-                suffix = f" ({', '.join(tags)})" if tags else ""
-                # Discord caps choice display at 100 chars; keep it sane.
-                label = (a.name + suffix)[:100]
-                choices.append(app_commands.Choice(name=label, value=a.name))
-                if len(choices) >= 25:
-                    break
-            return choices
+            return await self._build_account_switch_choices(
+                str(interaction.channel_id), current,
+            )
+
+    async def _build_account_switch_choices(
+        self, channel_id: str, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Build the /account-switch autocomplete dropdown.
+
+        Layered on top of ``rank_accounts`` (task [[wn0yqz]]) so the
+        operator sees the dispatcher's pick (``#1 ←``), eligible ranks
+        (``#2``, ``#3``…), and credential-gated rows (``—``) at a
+        glance — the same rule ``ghost butler dispatch --account=auto``
+        uses to pick. Extracted from the autocomplete callback so it's
+        unit-testable without standing up a real Discord interaction.
+        """
+        if not self._engine:
+            return []
+        try:
+            manifest = self._engine.account_vault.load()
+        except Exception:
+            return []
+        # This binding's currently-assigned account → "current" tag.
+        binding_account: str | None = None
+        try:
+            binding = self._engine.session_mgr.get_binding(channel_id)
+            if binding is not None:
+                binding_account = getattr(binding, "claude_account", None)
+        except Exception:
+            pass
+        # Per-account binding counts feed the dispatcher's tiebreak —
+        # same input the /accounts table uses, keeping the two surfaces
+        # aligned on which row gets the picker arrow.
+        binding_counts: dict[str, int] = {}
+        try:
+            for b in self._engine.session_mgr.list_bindings():
+                acct = getattr(b, "claude_account", None)
+                if isinstance(acct, str):
+                    binding_counts[acct] = binding_counts.get(acct, 0) + 1
+        except Exception:
+            pass
+        # Dispatcher-truth rank. Scan runs off-thread + TTL-cached so
+        # per-keystroke cost is bounded — see _RANK_CACHE_TTL_SECONDS.
+        try:
+            ranked = await asyncio.to_thread(
+                _cached_rank_accounts,
+                self._engine.account_vault,
+                self._engine.account_layout,
+                binding_counts,
+            )
+        except Exception:
+            ranked = []
+        by_name: dict[str, AccountRank] = {r.name: r for r in ranked}
+
+        choices: list[app_commands.Choice[str]] = []
+        for a in manifest.accounts:
+            if current and current.lower() not in a.name.lower():
+                continue
+            state_tags: list[str] = []
+            if a.name == binding_account:
+                state_tags.append("current")
+            if a.name == manifest.default:
+                state_tags.append("default")
+            user_tags = list(getattr(a, "tags", []) or [])
+            row = by_name.get(a.name)
+            rank_token = format_pick_token(row.rank if row else None)
+            label = _compose_autocomplete_label(
+                a.name, rank_token, state_tags, user_tags,
+            )
+            choices.append(app_commands.Choice(name=label, value=a.name))
+            if len(choices) >= 25:
+                break
+        return choices
 
     def _register_forward_command(
         self, tree: app_commands.CommandTree, name: str, description: str
