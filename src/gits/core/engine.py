@@ -2560,23 +2560,47 @@ class Engine:
         if not self._adapter:
             return
 
-        details = "\n".join(result.details) if result.details else "No details"
-        # Find a channel to report to (first binding)
         bindings = self.session_mgr.list_bindings()
-        if bindings:
-            channel_id = bindings[0].channel_id
+        if not bindings:
+            return
+        channel_id = bindings[0].channel_id
+
+        # Lazy-recovery shape: total/recovered/failed are all 0 and the
+        # detail line begins with "Lazy recovery". Surface a clean operator
+        # message instead of "0 | 0 | 0" which reads as "recovery did nothing".
+        is_lazy = (
+            result.total == 0
+            and result.recovered == 0
+            and result.failed == 0
+            and result.details
+            and result.details[0].startswith("Lazy recovery")
+        )
+        if is_lazy:
             await self._adapter.send_message(
                 channel_id,
                 OutgoingMessage(
                     text=(
-                        f"**tmux Recovery Report**\n"
-                        f"Total: {result.total} | "
-                        f"Recovered: {result.recovered} | "
-                        f"Failed: {result.failed}\n"
-                        f"```\n{details}\n```"
+                        f"**tmux Recovery (lazy)**\n"
+                        f"{result.details[0]} "
+                        f"({len(bindings)} persisted bindings)"
                     )
                 ),
             )
+            return
+
+        details = "\n".join(result.details) if result.details else "No details"
+        await self._adapter.send_message(
+            channel_id,
+            OutgoingMessage(
+                text=(
+                    f"**tmux Recovery Report**\n"
+                    f"Total: {result.total} | "
+                    f"Recovered: {result.recovered} | "
+                    f"Failed: {result.failed}\n"
+                    f"```\n{details}\n```"
+                )
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Session picker button handlers
