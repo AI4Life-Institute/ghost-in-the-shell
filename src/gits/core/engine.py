@@ -8,16 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import secrets
 import shlex
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ..adapters.base import Button, IncomingMessage, OutgoingMessage, SelectOption
 from ..config import Settings
 from ..telemetry import platform_for, track
-from .account import AccountLayout, SwitchResult
+from .account import AccountLayout, SwitchResult, effective_account
 from .account_vault import AccountVault
 from .guard import GuardHandler
 from .health import HealthMonitor
@@ -31,6 +34,7 @@ from .session import SessionManager
 from .subscription import SubscriptionVault, SwitchPrimitive
 from .terminal_parser import PromptInfo, parse_status_line
 from .tmux import TmuxController
+from .usage_panel import format_usage_panel
 
 logger = logging.getLogger(__name__)
 
@@ -2196,6 +2200,131 @@ class Engine:
         await self.session_mgr.mark_first_interaction(channel_id)
         await self.tmux.send_text(binding.window_id, command, submit_keys=submit)
         await self._reply(interaction, f"Forwarded: `{command}`")
+
+    # ------------------------------------------------------------------
+    # /usage — capture full panel from throwaway claude session
+    # ------------------------------------------------------------------
+
+    async def handle_usage(self, channel_id: str, interaction: Any) -> None:
+        """Capture the full ``/usage`` panel via a throwaway claude session.
+
+        Spawns a fresh tmux session (separate from the gits server's
+        windows so blast-radius / fd-cap impact is bounded) running claude
+        with ``CLAUDE_CONFIG_DIR`` set to the channel's bound account,
+        sends ``/usage``, captures the pane after settle, trims spawn
+        noise, posts as a code-fenced Discord message (or attachment if
+        the trimmed panel doesn't fit inline). The bound session is not
+        touched.
+        """
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            await self._reply(interaction, "Not bound. Use /bind first.")
+            return
+
+        eff = effective_account(binding.claude_account, self.account_vault)
+        env = os.environ.copy()
+        if eff is not None:
+            account_dir = self.account_layout.account_dir(eff)
+            if not account_dir.exists():
+                await self._reply(
+                    interaction,
+                    f"Account `{eff}` not configured locally.",
+                )
+                return
+            env["CLAUDE_CONFIG_DIR"] = str(account_dir)
+            account_label = eff
+        else:
+            env.pop("CLAUDE_CONFIG_DIR", None)
+            try:
+                account_label = self.account_vault.load().default or "default"
+            except Exception:
+                account_label = "default"
+
+        session_name = f"gits-usage-{channel_id}-{secrets.token_hex(3)}"
+
+        try:
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        "tmux", "new-session", "-d", "-s", session_name,
+                        "-x", "200", "-y", "60", "claude",
+                    ],
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                )
+            except subprocess.CalledProcessError as e:
+                stderr = (e.stderr or b"").decode(errors="replace").strip()
+                short = stderr.splitlines()[-1] if stderr else f"exit {e.returncode}"
+                await self._reply(
+                    interaction,
+                    f"Could not spawn capture session: {short}. "
+                    "Tmux fd cap may be hit — see system logs.",
+                )
+                return
+            except OSError as e:
+                await self._reply(
+                    interaction,
+                    f"Could not spawn capture session: {e}. "
+                    "Tmux fd cap may be hit — see system logs.",
+                )
+                return
+
+            await asyncio.sleep(7)
+            await asyncio.to_thread(
+                subprocess.run,
+                ["tmux", "send-keys", "-t", session_name, "/usage", "Enter"],
+                check=False,
+                capture_output=True,
+            )
+            await asyncio.sleep(4)
+            cap = await asyncio.to_thread(
+                subprocess.run,
+                ["tmux", "capture-pane", "-t", session_name, "-p"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            raw = cap.stdout or ""
+
+            result = format_usage_panel(raw, account_label, datetime.now())
+            if not result.body:
+                await self._reply(
+                    interaction,
+                    f"Capture timed out — `claude` may have rendered a "
+                    f"login prompt for `{account_label}`. Try "
+                    "re-authenticating.",
+                )
+                return
+
+            if result.inline:
+                await self._reply(
+                    interaction,
+                    f"{result.header}\n```\n{result.body}\n```",
+                )
+            else:
+                try:
+                    import io
+
+                    import discord  # local import — keeps engine import graph platform-agnostic for the inline path
+
+                    await interaction.followup.send(
+                        content=result.header,
+                        file=discord.File(
+                            io.BytesIO(result.body.encode()),
+                            filename="usage.txt",
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Failed to send /usage attachment")
+        finally:
+            await asyncio.to_thread(
+                subprocess.run,
+                ["tmux", "kill-session", "-t", session_name],
+                check=False,
+                capture_output=True,
+            )
 
     # ------------------------------------------------------------------
     # Button click handler (prompt bridge)
