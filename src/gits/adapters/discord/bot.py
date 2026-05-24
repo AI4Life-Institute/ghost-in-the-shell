@@ -1219,9 +1219,24 @@ class DiscordAdapter(PlatformAdapter):
             ("memory", "Edit project memory file"),
             ("context", "Show context window usage"),
             ("diff", "Show code changes"),
-            ("usage", "Show rate limit and usage info"),
         ]:
             self._register_forward_command(tree, cmd_name, description)
+
+        @tree.command(
+            name="usage",
+            description="Show the full /usage panel for this channel's account",
+        )
+        async def cmd_usage(interaction: discord.Interaction):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_usage(
+                    str(interaction.channel_id), interaction
+                )
 
         # ── D. Universal Forwarder ────────────────────────────────────
 
