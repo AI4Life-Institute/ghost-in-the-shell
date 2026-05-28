@@ -301,17 +301,28 @@ class CodingCLILauncher:
             return sessions
         return []
 
-    def discover_all_sessions(self, work_dir: str, target_cli: str = "claude") -> list[CLISession]:
+    def discover_all_sessions(
+        self,
+        work_dir: str,
+        target_cli: str = "claude",
+        claude_account: str | None = None,
+    ) -> list[CLISession]:
         """Discover sessions from all CLIs, not just the target.
 
         Target-CLI sessions come first (sorted by mtime), then sessions from
         other CLIs sorted by mtime.  Each session has ``source_cli`` set so
         callers can detect cross-CLI import candidates.
+
+        ``claude_account`` is forwarded to the target discovery so /info and
+        the session-picker can look in the binding's per-account dir.
+        Non-claude bases ignore the account argument.
         """
-        resolved = self.resolve_cli(target_cli)
+        resolved = self.resolve_cli(target_cli, claude_account=claude_account)
         target_type = resolved.base_type
 
-        target_sessions = self.discover_sessions(work_dir, target_cli)
+        target_sessions = self.discover_sessions(
+            work_dir, target_cli, claude_account=claude_account
+        )
 
         other_sessions: list[CLISession] = []
         for cli_type in RESUME_TEMPLATES:
