@@ -407,6 +407,29 @@ class JsonlMonitor:
                 new_sid = entry.get("session_id", "")
                 if not new_sid or new_sid == binding.cli_session_id:
                     continue
+                # Validate the session_map entry's cwd matches binding.work_dir
+                # before applying. tmux reuses window @IDs after kill-server,
+                # so a stale entry from a previously-killed binding (different
+                # channel, different work_dir) can collide on @id. Without this
+                # guard, e.g. an ai4stock session_id can pollute a
+                # vault-weiliu-ghost-dev binding, after which _safe_session_id
+                # can't find the JSONL at the binding's expected account+dir
+                # path and clears it to fresh — losing the user's conversation.
+                # Older session_map entries without "cwd" fall through (legacy
+                # compat) to preserve behavior for installs predating the hook
+                # change that started writing cwd.
+                entry_cwd = entry.get("cwd")
+                if entry_cwd and binding.work_dir and entry_cwd != binding.work_dir:
+                    logger.info(
+                        "Ignoring session_map[%s] for channel %s: "
+                        "cwd mismatch (entry=%s, binding=%s) — "
+                        "likely a reused tmux window @id from a prior binding",
+                        binding.window_id,
+                        binding.channel_id,
+                        entry_cwd,
+                        binding.work_dir,
+                    )
+                    continue
 
                 old_path = self._find_jsonl_file(binding)
                 try:

@@ -799,6 +799,66 @@ class TestSessionMapIntegration:
         assert binding.cli_session_id == "new-session-abc"
 
     @pytest.mark.asyncio
+    async def test_session_map_cwd_mismatch_is_ignored(self, tmp_path):
+        """Stale session_map entry from a reused tmux @id must not pollute a binding.
+
+        Regression for the cross-channel bug: tmux reuses window @IDs after
+        kill-server, so an old entry (different cwd / different binding's
+        session) can collide on @id. The entry's cwd must match the binding's
+        work_dir before we accept the session_id, otherwise _safe_session_id
+        later can't find the JSONL at the binding's expected
+        account+work_dir path and clears the binding to fresh.
+        """
+        session_map = {
+            # Stale entry: same window_id, but cwd belongs to a *different* binding
+            "gits:@5": {
+                "session_id": "stale-from-other-channel",
+                "cwd": "/tmp/other-project",
+            }
+        }
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id="original-sid", work_dir="/tmp/project")
+        binding.window_id = "@5"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor._read_session_map = lambda: session_map
+
+        await monitor._poll_once()
+
+        session_mgr.update_cli_session_id.assert_not_called()
+        assert binding.cli_session_id == "original-sid"
+
+    @pytest.mark.asyncio
+    async def test_session_map_no_cwd_falls_through_for_legacy_compat(self, tmp_path):
+        """Old session_map entries without cwd should still apply (legacy compat)."""
+        session_map = {
+            "gits:@5": {
+                "session_id": "legacy-no-cwd-session",
+                # no "cwd" key
+            }
+        }
+
+        session_mgr = MagicMock()
+        session_mgr.update_cli_session_id = AsyncMock()
+
+        binding = _make_binding(cli_session_id=None, work_dir="/tmp/project")
+        binding.window_id = "@5"
+        session_mgr.list_bindings.return_value = [binding]
+
+        monitor = JsonlMonitor(session_mgr=session_mgr, poll_interval=0.05)
+        monitor._read_session_map = lambda: session_map
+
+        await monitor._poll_once()
+
+        session_mgr.update_cli_session_id.assert_called_once_with(
+            binding.channel_id, "legacy-no-cwd-session"
+        )
+
+    @pytest.mark.asyncio
     async def test_session_map_with_different_tmux_session_name(self, tmp_path):
         """Session map key with non-'gits' prefix should still match by window_id suffix."""
         session_map = {
