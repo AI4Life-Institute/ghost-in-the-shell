@@ -1208,13 +1208,24 @@ class Engine:
         # Session file path + live stats
         if binding.cli_session_id:
             lines.append(f"Session ID: `{binding.cli_session_id}`")
+            # Scope discovery + file lookup to this binding's claude_account so
+            # /info reads the same path runtime _safe_session_id reads. Without
+            # this, sessions written under ~/.claude-{account}/projects/ show
+            # "Session file: ❌ not found" even though resume actually works.
+            acct_for_lookup = getattr(binding, "claude_account", None)
+            if not isinstance(acct_for_lookup, str):
+                acct_for_lookup = None
             # Show the human-readable summary so it matches the /bind dropdown label
             try:
                 cli = binding.coding_cli or "claude"
                 target_type = self.launcher.resolve_cli(cli).base_type
                 matched = next(
                     (
-                        s for s in self.launcher.discover_all_sessions(binding.work_dir, target_cli=cli)
+                        s for s in self.launcher.discover_all_sessions(
+                            binding.work_dir,
+                            target_cli=cli,
+                            claude_account=acct_for_lookup,
+                        )
                         if s.session_id == binding.cli_session_id
                     ),
                     None,
@@ -1226,7 +1237,10 @@ class Engine:
             except Exception:
                 pass
             sess_file = self.launcher.get_session_file(
-                binding.work_dir, binding.coding_cli or "claude", binding.cli_session_id
+                binding.work_dir,
+                binding.coding_cli or "claude",
+                binding.cli_session_id,
+                claude_account=acct_for_lookup,
             )
             if sess_file:
                 lines.append(f"Session file: `{sess_file}`")

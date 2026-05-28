@@ -226,12 +226,20 @@ class HealthMonitor:
                 continue
             if not await self.tmux.window_exists(binding.window_id):
                 logger.warning(
-                    "tmux window '%s' (%s) is gone",
+                    "tmux window '%s' (%s) for channel %s is gone — marking suspended",
                     binding.window_name,
                     binding.window_id,
+                    binding.channel_id,
                 )
-                # Log but don't auto-recover individual windows
-                # (user might have intentionally closed it)
+                # Mark suspended so the next inbound message hits the normal
+                # _resume_suspended path (which recreates window + relaunches
+                # claude with --resume). Without this we'd log this warning
+                # every check_interval forever — the window won't come back
+                # on its own. JsonlMonitor polling is also stopped since
+                # there's no claude process writing to the JSONL.
+                await self.session_mgr.mark_suspended(binding.channel_id)
+                if self._engine is not None:
+                    self._engine.monitor.stop_polling(binding.channel_id)
 
         # Emergency: if memory is critically low, trigger idle scan immediately
         if self._engine is not None:
