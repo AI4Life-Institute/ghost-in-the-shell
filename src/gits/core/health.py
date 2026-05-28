@@ -240,16 +240,22 @@ class HealthMonitor:
                 await self._suspend_idle_bindings()
 
     async def _recover_all(self) -> RecoveryResult:
-        """Attempt to recover all bindings after tmux failure."""
+        """Recover from tmux server/session death by rebuilding only the tmux
+        session itself. Individual bindings recover lazily on first inbound
+        message via ``Engine._ensure_window_alive`` + ``_resume_suspended``.
+
+        Eager per-binding rebuild was removed after a 2026-05-24 incident
+        where a ``tmux kill-server`` cascaded into 234 rebuilt windows and
+        40+ ``claude --resume`` processes (22.6 GB RSS, near-OOM). Of the
+        280 persisted bindings only ~4 were active; the rest were stale.
+        ``handle_message`` already recreates a window and relaunches claude
+        just-in-time for any channel that actually receives traffic, so
+        eager rebuild paid full cost for work that almost never mattered.
+        """
         result = RecoveryResult()
-        bindings = self.session_mgr.list_bindings()
-        result.total = len(bindings)
 
-        if not bindings:
-            logger.info("No bindings to recover")
-            return result
-
-        # Ensure tmux session exists
+        # Always ensure the tmux session is back, even with zero bindings —
+        # future create_window calls (driven by handle_message) need it.
         for attempt in range(self.max_retries):
             try:
                 await self.tmux.ensure_session()
@@ -263,47 +269,21 @@ class HealthMonitor:
             logger.error(
                 "Could not create tmux session after %d retries", self.max_retries
             )
-            result.failed = result.total
+            result.failed = 1
+            result.details.append(
+                f"Failed to rebuild tmux session after {self.max_retries} retries"
+            )
+            for cb in self._on_recovery:
+                try:
+                    await cb(result)
+                except Exception:
+                    logger.exception("Recovery callback error")
             return result
 
-        # Rebuild each window
-        for binding in bindings:
-            try:
-                # Create new window
-                win = await self.tmux.create_window(
-                    name=binding.window_name,
-                    cwd=binding.work_dir,
-                )
-
-                # Update window ID in state (it changed after rebuild)
-                await self.session_mgr.update_window_id(
-                    binding.channel_id, win.window_id
-                )
-
-                # Try to resume CLI session
-                cmd = self.launcher.build_launch_command(
-                    cli=binding.coding_cli,
-                    session_id=binding.cli_session_id,
-                )
-                await self.tmux.send_text(win.window_id, cmd)
-
-                resume_note = (
-                    f" (resume {binding.cli_session_id[:8]})"
-                    if binding.cli_session_id
-                    else " (fresh)"
-                )
-                result.details.append(
-                    f"recovered {binding.window_name} -> "
-                    f"{binding.work_dir}{resume_note}"
-                )
-                result.recovered += 1
-
-            except Exception as e:
-                logger.error(
-                    "Failed to recover window '%s': %s", binding.window_name, e
-                )
-                result.details.append(f"failed {binding.window_name}: {e}")
-                result.failed += 1
+        result.details.append(
+            "Lazy recovery: tmux session rebuilt; bindings will recover on "
+            "first inbound message."
+        )
 
         # Notify callbacks
         for cb in self._on_recovery:
@@ -313,10 +293,9 @@ class HealthMonitor:
                 logger.exception("Recovery callback error")
 
         logger.info(
-            "Recovery complete: %d/%d recovered, %d failed",
-            result.recovered,
-            result.total,
-            result.failed,
+            "Lazy recovery complete: tmux session restored; %d persisted "
+            "bindings will rebuild on demand",
+            len(self.session_mgr.list_bindings()),
         )
         return result
 
