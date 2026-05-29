@@ -206,13 +206,27 @@ def _has_credential(
 
 def _iter_jsonl_files(
     name: str, *, cutoff_epoch: float, layout: AccountLayout,
+    default: str | None = None,
 ) -> list[Path]:
     """Mtime-prefiltered list of transcript files for ``name``.
 
     The mtime check is the dominant cost saver per the PoC: 2415 files
     drop to ~635 in a 7-day window, and only those are opened.
+
+    The **default** account (``name == default``) runs natively (no
+    ``CLAUDE_CONFIG_DIR``) and writes JSONL to ``~/.claude/projects``, so
+    we scan there — ``projects_dir(None)`` — not the near-empty/stale
+    ``~/.claude-<default>/projects``. This mirrors the default→native
+    translation the launcher (``effective_account``) and the credential
+    gate (``_has_credential(default=...)``) already apply; the scan must
+    not be the odd one out, or the default account reads load≈0 and
+    ``--account=auto`` pins to it forever. Counting all of native
+    ``~/.claude`` (including the operator's own interactive ``claude``
+    usage) is intended: that usage genuinely consumes the default
+    account's 5h/7d caps, which is exactly the pressure balancing avoids.
     """
-    projects = layout.projects_dir(name)
+    claude_account = None if (default is not None and name == default) else name
+    projects = layout.projects_dir(claude_account)
     try:
         if not projects.exists():
             return []
@@ -245,6 +259,7 @@ def _scan_loads(
     windows: tuple[float, ...],
     now: float,
     layout: AccountLayout,
+    default: str | None = None,
 ) -> tuple[float, ...]:
     """Sum cost-weighted load for each window (each is a cutoff epoch).
 
@@ -257,7 +272,9 @@ def _scan_loads(
         return ()
     cutoff_widest = min(windows)
     totals = [0.0] * len(windows)
-    for path in _iter_jsonl_files(name, cutoff_epoch=cutoff_widest, layout=layout):
+    for path in _iter_jsonl_files(
+        name, cutoff_epoch=cutoff_widest, layout=layout, default=default,
+    ):
         try:
             f = open(path, "rb")
         except OSError:
@@ -304,17 +321,21 @@ def account_load(
     *,
     now: float | None = None,
     layout: AccountLayout | None = None,
+    default: str | None = None,
 ) -> float:
     """Cost-weighted token load for ``account_name`` over the trailing window.
 
     Returns ``0.0`` for a missing/empty transcript dir — an account with
     no recorded activity is idle, and should be a top candidate.
+
+    Pass ``default=manifest.default`` so the default account scans its
+    native ``~/.claude/projects`` (see :func:`_iter_jsonl_files`).
     """
     layout = layout or AccountLayout()
     now = now if now is not None else _dt.datetime.now(_dt.UTC).timestamp()
     cutoff = now - max(window_seconds, 0)
     (total,) = _scan_loads(
-        account_name, windows=(cutoff,), now=now, layout=layout,
+        account_name, windows=(cutoff,), now=now, layout=layout, default=default,
     )
     return total
 
@@ -326,8 +347,13 @@ def account_load_dual(
     *,
     now: float | None = None,
     layout: AccountLayout | None = None,
+    default: str | None = None,
 ) -> tuple[float, float]:
-    """One-pass variant of :func:`account_load`. Returns ``(short, long)``."""
+    """One-pass variant of :func:`account_load`. Returns ``(short, long)``.
+
+    Pass ``default=manifest.default`` so the default account scans its
+    native ``~/.claude/projects`` (see :func:`_iter_jsonl_files`).
+    """
     layout = layout or AccountLayout()
     now = now if now is not None else _dt.datetime.now(_dt.UTC).timestamp()
     cutoff_short = now - max(short_seconds, 0)
@@ -337,6 +363,7 @@ def account_load_dual(
         windows=(cutoff_short, cutoff_long),
         now=now,
         layout=layout,
+        default=default,
     )
     return short, long
 
@@ -425,6 +452,7 @@ def rank_accounts(
     for entry in accounts:
         load_5h, load_7d = account_load_dual(
             entry.name, WINDOW_5H, WINDOW_7D, now=now, layout=layout,
+            default=default,
         )
         weight = effective_weight(entry)
         score = (load_5h + load_7d) / weight

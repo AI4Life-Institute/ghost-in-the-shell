@@ -171,9 +171,10 @@ def test_pick_account_lowest_score_wins(tmp_path):
         tmp_path, [("alpha", 1.0), ("beta", 1.0)], default="alpha",
     )
     _make_creds(layout, "alpha"); _make_creds(layout, "beta")
-    # alpha heavier than beta
+    # alpha heavier than beta. alpha is the default → runs native, so its
+    # load lives in ~/.claude/projects (projects_dir(None)), not the suffix.
     _write_jsonl(
-        layout.projects_dir("alpha") / "h" / "s.jsonl",
+        layout.projects_dir(None) / "h" / "s.jsonl",
         [_assistant(_FAKE_NOW - 100, input=1_000_000)],
         mtime=_FAKE_NOW - 100,
     )
@@ -256,9 +257,10 @@ def test_pick_account_isolated_keychain_only_passes_gate(tmp_path):
         tmp_path, [("def", 1.0), ("iso", 1.0)], default="def",
     )
     _make_creds(layout, "def")
-    # Load 'def' up so any working gate must pick 'iso'.
+    # Load 'def' up so any working gate must pick 'iso'. 'def' is the
+    # default → runs native, so its load lives in ~/.claude/projects.
     _write_jsonl(
-        layout.projects_dir("def") / "h" / "s.jsonl",
+        layout.projects_dir(None) / "h" / "s.jsonl",
         [_assistant(_FAKE_NOW - 100, input=1_000_000)],
         mtime=_FAKE_NOW - 100,
     )
@@ -313,9 +315,10 @@ def test_rank_accounts_full_table_shape(tmp_path):
         tmp_path, [("alpha", 1.0), ("beta", 2.0)], default="alpha",
     )
     _make_creds(layout, "alpha"); _make_creds(layout, "beta")
-    # alpha heavier than beta → beta should rank #1
+    # alpha heavier than beta → beta should rank #1. alpha is the default →
+    # runs native, so its load lives in ~/.claude/projects (projects_dir(None)).
     _write_jsonl(
-        layout.projects_dir("alpha") / "h" / "s.jsonl",
+        layout.projects_dir(None) / "h" / "s.jsonl",
         [_assistant(_FAKE_NOW - 100, input=1_000_000)],
         mtime=_FAKE_NOW - 100,
     )
@@ -360,6 +363,53 @@ def test_rank_accounts_single_account_returns_one_row(tmp_path):
     assert ranked[0].rank == 1
     # pick_account preserves the legacy ≤1-account contract — None.
     assert pick_account(vault, layout=layout, now=_FAKE_NOW) is None
+
+
+def test_rank_accounts_default_scans_native_claude_dir(tmp_path):
+    """Regression [[tnx3li]]: the default account scans native ~/.claude.
+
+    The default account runs natively (no CLAUDE_CONFIG_DIR), so its
+    sessions write JSONL to ``~/.claude/projects`` — not the suffixed
+    ``~/.claude-<default>/projects``. The scan must apply the same
+    default→native translation the launcher and credential gate already
+    do, or the default reads load≈0 and ``--account=auto`` pins to it.
+
+    Seed three dirs with distinguishable loads and assert the default
+    reports its NATIVE load (not the suffixed stale dir, not the sum)
+    while a non-default reports its SUFFIXED load.
+    """
+    vault, layout = _vault_with(
+        tmp_path, [("def", 1.0), ("iso", 1.0)], default="def",
+    )
+    _make_creds(layout, "def"); _make_creds(layout, "iso")
+
+    # Default's real usage — native ~/.claude/projects (projects_dir(None)).
+    _write_jsonl(
+        layout.projects_dir(None) / "h" / "native.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=1_000_000)],
+        mtime=_FAKE_NOW - 100,
+    )
+    # Stale/near-empty suffixed dir for the default — must NOT be counted.
+    _write_jsonl(
+        layout.projects_dir("def") / "h" / "stale.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=7)],
+        mtime=_FAKE_NOW - 100,
+    )
+    # Non-default reads its suffixed dir, unchanged.
+    _write_jsonl(
+        layout.projects_dir("iso") / "h" / "iso.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=500_000)],
+        mtime=_FAKE_NOW - 100,
+    )
+
+    by_name = {r.name: r for r in rank_accounts(vault, layout=layout, now=_FAKE_NOW)}
+    # Default: native load, not the suffixed 7, not the 1_000_007 sum.
+    assert by_name["def"].load_7d == pytest.approx(1_000_000.0)
+    assert by_name["def"].load_5h == pytest.approx(1_000_000.0)
+    # Non-default: suffixed load, untouched by the translation.
+    assert by_name["iso"].load_7d == pytest.approx(500_000.0)
+    # And the default no longer auto-wins now that its load is visible.
+    assert pick_account(vault, layout=layout, now=_FAKE_NOW) == "iso"
 
 
 def test_rank_accounts_uninitialized_vault_returns_empty(tmp_path):

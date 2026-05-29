@@ -117,9 +117,10 @@ def test_cmd_list_renders_new_columns(fake_home, capsys):
     now = time.time()
     recent = now - 300
 
-    # alpha heavier than beta → beta should rank #1
+    # alpha heavier than beta → beta should rank #1. alpha is the default →
+    # runs native, so its load lives in ~/.claude/projects (projects_dir(None)).
     _write_jsonl(
-        layout.projects_dir("alpha") / "h" / "s.jsonl",
+        layout.projects_dir(None) / "h" / "s.jsonl",
         [_assistant_event(recent, 100_000_000)],
         mtime=recent,
     )
