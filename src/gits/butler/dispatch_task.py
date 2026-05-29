@@ -394,19 +394,6 @@ def _post_message(channel_id: str, content: str) -> str | None:
 # ── account resolution ──────────────────────────────────────────────────────
 
 
-_EMPTY_FM_VALUES = {"", "null", "None", "[]"}
-
-
-def _normalize_fm_account(raw: str | None) -> str | None:
-    """Treat ``null``/``None``/``[]``/empty as "no value"."""
-    if raw is None:
-        return None
-    v = raw.strip().strip('"').strip("'").strip()
-    if v in _EMPTY_FM_VALUES:
-        return None
-    return v
-
-
 def _pick_account_or_none() -> str | None:
     """Resolve ``--account auto``: pick least-loaded launchable account.
 
@@ -542,16 +529,13 @@ def dispatch_task(
     title = thread_title(task_path)
     pointer = build_pointer_message(fm, task_path, phase)
 
-    # Account resolution: flag > frontmatter > auto-picker.
-    # `--account auto` (or omitted) ⇒ auto-picker; any other value pins.
-    fm_account = _normalize_fm_account(fm.get("account"))
+    # Account resolution: flag > auto-picker. The task-page `account:` field
+    # is NEVER read for resolution — it is a write-only record (see writeback
+    # below). `--account auto` (or omitted) ⇒ auto-picker; any other value pins.
     flag = (account or "").strip() or None
     if flag and flag != "auto":
         resolved_account: str | None = flag
         account_source = "flag"
-    elif fm_account:
-        resolved_account = fm_account
-        account_source = "frontmatter"
     else:
         resolved_account = _pick_account_or_none()
         account_source = "auto" if resolved_account else "auto (no candidate)"
@@ -619,9 +603,11 @@ def dispatch_task(
         "owner": owner,
         "status": status_value,
     }
-    # Only write `account:` back when the frontmatter slot was empty —
-    # operator-pinned accounts on the task page are preserved verbatim.
-    if resolved_account and fm_account is None:
+    # `account:` is a write-only record: always stamp the account actually
+    # used, overwriting any stale/author-set value so the page faithfully
+    # reflects the most recent dispatch. (Nothing is written when the picker
+    # found no candidate — the page stays clean, matching legacy.)
+    if resolved_account:
         updates["account"] = resolved_account
     try:
         writeback_frontmatter_atomic(task_path, updates)
@@ -647,7 +633,7 @@ def dispatch_task(
     else:
         print("  account: (legacy default — no --account on /bind)")
     print("  frontmatter: thread, dispatched, dispatch_msg_id, owner, status updated")
-    if resolved_account and fm_account is None:
+    if resolved_account:
         print("               + account")
     if failures:
         print()

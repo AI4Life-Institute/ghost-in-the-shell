@@ -73,7 +73,6 @@ dispatched: null                 # set on dispatch
 dispatch_msg_id: null            # set on dispatch
 owner: null                      # set on dispatch (butler that dispatched it)
 completed: null                  # set on terminal state (done | cancelled)
-account: null                    # optional pin; left null = auto-balanced on dispatch
 personas: [<persona-1>, <persona-2>, ...]
 test_script: <filename of .test.sh alongside, or null if none>
 ---
@@ -84,9 +83,9 @@ Field semantics worth pinning down:
 - **`thread:`** — leave `null` (or omit) at author time. The dispatch tool fills it atomically with a markdown link of the form `"[<title>](https://discord.com/channels/<guild_id>/<thread_id>)"`.
 - **`dispatched:`, `dispatch_msg_id:`** — also written by the dispatch tool. Don't pre-fill.
 - **`owner:`** — name of the butler that dispatched the task (from `ghost butler whoami`'s `outgoing_prefix_user`, e.g. `weiliu-algo-data`, `kathy`). Auto-filled by `ghost butler dispatch`; don't pre-fill manually. **Permanent record of who dispatched** — re-assigning a task to a different butler is operator-driven and out of scope of this field.
+- **`account:`** — **dispatcher-written record (output only)** — like `thread:`/`dispatched:`/`owner:`, it is written by the dispatch tool, **not authored**. Leave it absent. On dispatch, `ghost butler dispatch` auto-balances via the local-JSONL load-balancer and writes the chosen account here, so the page records where it ran. The dispatcher **does not read this field back** — a value sitting here never influences account selection (it's overwritten with whatever account is actually used on the next dispatch). To force a specific account, pass `--account <name>` at dispatch time (a conscious per-dispatch act). **Never hand-set `account:` on a task page** — it has no effect on routing and only risks looking authoritative when it isn't.
 - **`completed:`** — set to today's ISO date when status flips to `done` or `cancelled`. Both terminal states get it.
 - **`personas:`** — required for any substantive task. If the field is omitted entirely, the default is `[senior engineer]`; lint warns on missing.
-- **`account:`** — optional pin for the Claude account the dispatched binding should use. Leave `null` (or omit) for the default behavior: `ghost butler dispatch` runs the local-JSONL load-balancer and writes the chosen account back here at dispatch time. Set explicitly (e.g. `account: sharongoogle`) to force a specific account regardless of load. CLI flag (`--account`) takes precedence over this field.
 
 ### Body sections
 

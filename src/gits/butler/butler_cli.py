@@ -309,8 +309,9 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
             "Claude account for the dispatched binding. 'auto' (or omitted) "
             "picks the least-loaded launchable account via "
             "gits.core.account_load.pick_account; an explicit name pins. "
-            "Resolution precedence: this flag > task-page `account:` "
-            "frontmatter > auto."
+            "Resolution precedence: this flag > auto. The task-page "
+            "`account:` field is written by the dispatch tool as a record and "
+            "is NOT read on input — to force an account, use this flag."
         ),
     )
     sp.set_defaults(func=cmd_dispatch)
