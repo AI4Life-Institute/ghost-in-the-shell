@@ -39,6 +39,34 @@ from .usage_panel import format_usage_panel
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# /model help copy — single source of truth
+# ---------------------------------------------------------------------------
+# Both the engine's no-name help branch and the Discord slash-command
+# description draw their model copy from here so they can't drift apart as
+# new models ship. Deliberately lists stable *aliases* only (no version
+# numbers) plus a catch-all for any model name the CLI accepts. See task
+# ctn2c4. ``MODEL_CMD_DESCRIPTION`` must stay within Discord's 100-char
+# slash-command description limit.
+
+MODEL_HELP = (
+    "Usage: `/model <name>` — switch the coding CLI model.\n\n"
+    "**Claude Code aliases** (track the latest model per provider):\n"
+    "`default` (your account's recommended) · `best` (most capable) · "
+    "`opus` · `sonnet` · `haiku` · `opus[1m]` · `sonnet[1m]` (1M context) · "
+    "`opusplan` (Opus to plan, Sonnet to execute)\n\n"
+    "**Codex / other CLIs** — or any model name your CLI accepts "
+    "(e.g. `o3`, `gpt-4o`).\n\n"
+    "Aliases always point at the latest model; pass a full model ID to "
+    "pin a specific version."
+)
+
+MODEL_CMD_DESCRIPTION = (
+    "Switch the coding CLI model — run with no name to list aliases "
+    "(default, best, opus, sonnet…)"
+)
+
+
 class Engine:
     """Core engine — orchestrates all GITS modules.
 
@@ -2041,12 +2069,7 @@ class Engine:
         else:
             # No name — show help (don't send bare /model which opens
             # an interactive Ink picker that can't be operated from Discord)
-            await self._reply(
-                interaction,
-                "Usage: `/model <name>`\n"
-                "**Claude Code** — `sonnet`, `opus`, `haiku`, `sonnet[1m]`, `opus[1m]`, `opusplan`\n"
-                "**Codex** — `o3`, `o4-mini`, `gpt-4o`, or any model name supported by your CLI",
-            )
+            await self._reply(interaction, MODEL_HELP)
 
     # ------------------------------------------------------------------
     # B. CLI Forwarding

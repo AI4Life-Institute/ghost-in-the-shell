@@ -30,6 +30,7 @@ from ...core.account_load import (
     format_pick_token,
     rank_accounts,
 )
+from ...core.engine import MODEL_CMD_DESCRIPTION
 
 import discord
 from discord import app_commands
@@ -1168,7 +1169,7 @@ class DiscordAdapter(PlatformAdapter):
 
         # ── Model command (native with Discord choices) ────────────────
 
-        @tree.command(name="model", description="Switch the AI model (claude: sonnet/opus/haiku, codex: o3/gpt-4o, etc.)")
+        @tree.command(name="model", description=MODEL_CMD_DESCRIPTION)
         @app_commands.describe(name="Model name to switch to (e.g. sonnet, opus, o3, gpt-4o)")
         async def cmd_model(
             interaction: discord.Interaction, name: str | None = None
