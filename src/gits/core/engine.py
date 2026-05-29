@@ -2143,6 +2143,11 @@ class Engine:
             footer_parts.append(f"current: {manifest.default}")
         if any(row.rank is None for row in ranked):
             footer_parts.append("`—` rows excluded from auto-dispatch (no resolvable credential)")
+        if manifest.default and any(row.name == manifest.default for row in ranked):
+            footer_parts.append(
+                f"`*` ({manifest.default}) is default → runs native; its load "
+                "includes the operator's own interactive `claude` usage (real cap pressure)"
+            )
         footer = ("\n" + " · ".join(footer_parts)) if footer_parts else ""
 
         await self._reply(

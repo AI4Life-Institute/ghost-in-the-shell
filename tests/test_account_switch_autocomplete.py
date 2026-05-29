@@ -195,11 +195,12 @@ class TestBuildAccountSwitchChoices:
         for n in ("alpha", "beta", "gamma"):
             _make_creds(layout, n)
 
-        # alpha heaviest, gamma medium, beta lightest → beta = #1
+        # alpha heaviest, gamma medium, beta lightest → beta = #1. alpha is
+        # the default → runs native, so its load lives in ~/.claude/projects.
         now = time.time()
         recent = now - 300
         _write_jsonl(
-            layout.projects_dir("alpha") / "h" / "s.jsonl",
+            layout.projects_dir(None) / "h" / "s.jsonl",
             [_assistant_event(recent, 100_000_000)],
             mtime=recent,
         )
@@ -280,8 +281,9 @@ class TestBuildAccountSwitchChoices:
 
         now = time.time()
         recent = now - 300
+        # alpha is the default → runs native (~/.claude/projects).
         _write_jsonl(
-            layout.projects_dir("alpha") / "h" / "s.jsonl",
+            layout.projects_dir(None) / "h" / "s.jsonl",
             [_assistant_event(recent, 100_000_000)],
             mtime=recent,
         )

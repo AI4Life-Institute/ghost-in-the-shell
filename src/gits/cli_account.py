@@ -474,6 +474,12 @@ def cmd_list(args: argparse.Namespace) -> None:
     if manifest.default:
         print(f"\n[current: {manifest.default}]")
     print(f"[bindings: {sum(binding_counts.values())} total across {len(binding_counts)} accounts]")
+    if manifest.default and any(row.name == manifest.default for row in ranked):
+        print(
+            f"[note] `*` ({manifest.default}) is the default account: it runs "
+            "natively, so its load includes the operator's own interactive "
+            "`claude` usage in ~/.claude — that's real pressure on its 5h/7d caps."
+        )
     if any(row.rank is None for row in ranked):
         print(
             "[note] `—` in the pick? column = account excluded from auto-dispatch "
