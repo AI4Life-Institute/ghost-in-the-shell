@@ -1,6 +1,7 @@
 """Tests for Core Engine — command handlers with mocked tmux."""
 
 import asyncio
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -10,6 +11,8 @@ import pytest
 
 from gits.config import Settings
 from gits.core.engine import (
+    MODEL_CMD_DESCRIPTION,
+    MODEL_HELP,
     Engine,
     _create_worktree,
     _format_age,
@@ -353,6 +356,27 @@ class TestHandleModel:
             assert "opus" in reply.lower()
 
         asyncio.run(_test())
+
+
+class TestModelHelpCopy:
+    """Anti-staleness guards for the single-source-of-truth /model help."""
+
+    def test_help_includes_default_and_best(self):
+        assert "default" in MODEL_HELP
+        assert "best" in MODEL_HELP
+
+    def test_help_lists_real_1m_variants_not_invented_ones(self):
+        assert "opus[1m]" in MODEL_HELP
+        assert "sonnet[1m]" in MODEL_HELP
+        # There is no haiku[1m] alias — don't invent it.
+        assert "haiku[1m]" not in MODEL_HELP
+
+    def test_help_hardcodes_no_version_numbers(self):
+        # No "4.7"/"4.8"-style version numbers — aliases only.
+        assert re.search(r"\d+\.\d+", MODEL_HELP) is None
+
+    def test_discord_description_within_limit(self):
+        assert len(MODEL_CMD_DESCRIPTION) <= 100
 
 
 class TestHandleBash:
