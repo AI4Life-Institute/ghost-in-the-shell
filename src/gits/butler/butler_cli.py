@@ -170,10 +170,35 @@ def send_decorated(
     return resp["id"]
 
 
+def _resolve_target(target: str | None, cwd: str) -> str:
+    """Resolve a ``send`` target: a Discord snowflake passes through; a
+    non-numeric token is treated as an org node **alias** and resolved to its
+    channel_id via the caller's org (task or6t4n resolver). Falls back to the
+    bound home channel when no target is given."""
+    if not target:
+        return identity.require_home_channel("send", cwd=cwd)
+    if target.isdigit():
+        return target
+    from . import org as _org
+
+    try:
+        org_dir = _org.resolve_org_dir(cwd=cwd)
+        _, nodes = _org.load_org(org_dir)
+    except _org.OrgError as e:
+        sys.exit(f"ghost butler send: can't resolve alias '{target}': {e}")
+    cid = _org.resolve_channel(nodes, target)
+    if not cid:
+        sys.exit(f"ghost butler send: no node aliased '{target}' in the org")
+    return cid
+
+
 def cmd_send(args: argparse.Namespace) -> None:
-    """Send with butler prefix decoration; defaults to bound home channel."""
+    """Send with butler prefix decoration; defaults to bound home channel.
+
+    ``target_id`` may be a Discord snowflake OR an org node alias (resolved to
+    that node's channel via the org resolver)."""
     cwd = os.getcwd()
-    target_id = args.target_id or identity.require_home_channel("send", cwd=cwd)
+    target_id = _resolve_target(args.target_id, cwd)
     content = args.content
     if content == "-":
         content = sys.stdin.read()
@@ -190,6 +215,13 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     from . import dispatch_task as _dt
 
     _dt.cmd_dispatch(args)
+
+
+def cmd_onboard(args: argparse.Namespace) -> None:
+    """Create a new agent end-to-end — see :mod:`gits.butler.onboard`."""
+    from . import onboard as _ob
+
+    _ob.cmd_onboard(args)
 
 
 def cmd_read_thread(args: argparse.Namespace) -> None:
@@ -315,6 +347,41 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
         ),
     )
     sp.set_defaults(func=cmd_dispatch)
+
+    sp = verbs.add_parser(
+        "onboard",
+        help=(
+            "Create a new agent end-to-end (Discord channel + worktree + "
+            "binding + /bind + an Org/<org>/<name>.yaml node). The ONLY code "
+            "path allowed to write a node file."
+        ),
+        description=(
+            "Run from inside the PARENT's worktree — the caller's own node "
+            "becomes reports_to by default. Validates <name>, resolves org + "
+            "parent, creates/reuses the channel, writes the node + regenerates "
+            "_meta.tree_snapshot + lints + commits atomically (lint BEFORE "
+            "write), adds the worktree from caller HEAD (no push — vault-sync "
+            "propagates), binds + sends /bind. Idempotent: safe to re-run after "
+            "a halt. See <ghost-repo>/docs/org-schema.md."
+        ),
+    )
+    sp.add_argument("name", help="agent alias = channel = worktree slug = node filename")
+    sp.add_argument("--org", default=None, help="target org slug (default: resolved from caller)")
+    sp.add_argument(
+        "--reports-to", dest="reports_to", default=None,
+        help="parent node alias (default: caller's own node; required from main)",
+    )
+    sp.add_argument(
+        "--scope", action="append", default=None, metavar="<folder>",
+        help="vault-root-relative folder this node owns (repeatable)",
+    )
+    sp.add_argument("--human", default=None, help="real operator name (default: <name>)")
+    sp.add_argument("--cli", choices=("claude", "codex", "copilot", "opencode"),
+                    default="claude",
+                    help="CLI for the worktree's sessions (default: claude)")
+    sp.add_argument("--desc", default="", help="one-line description")
+    sp.add_argument("--dry-run", action="store_true", help="print the plan, create nothing")
+    sp.set_defaults(func=cmd_onboard)
 
     sp = verbs.add_parser(
         "read-thread",
