@@ -105,6 +105,11 @@ def main() -> None:
 
     _butler_cli.install_parser(sub)
 
+    # gits org — org-tree schema commands (lint); task or6t4n.
+    from . import org_cli as _org_cli
+
+    _org_cli.install_parser(sub)
+
     # gits restart
     sub.add_parser("restart", help="Restart the Ghost background service")
 
@@ -160,6 +165,8 @@ def main() -> None:
         _discord_cli.dispatch(args)
     elif args.command == "butler":
         _butler_cli.dispatch(args)
+    elif args.command == "org":
+        _org_cli.dispatch(args)
     elif args.command == "setup":
         _cmd_setup(args)
     elif args.command == "desktop":
