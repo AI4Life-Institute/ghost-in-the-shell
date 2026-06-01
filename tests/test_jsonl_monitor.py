@@ -638,8 +638,9 @@ class TestReadNewEntries:
             offset = f.tell()
             f.write(json.dumps(entries[1]) + "\n")
 
-        result = JsonlMonitor._read_new_entries(jsonl_file, offset)
-        assert result == ["new"]
+        items, consumed = JsonlMonitor._read_new_entries(jsonl_file, offset)
+        assert [t for t, _ in items] == ["new"]
+        assert consumed == jsonl_file.stat().st_size
 
     def test_reads_all_from_zero(self, tmp_path):
         """Offset 0 should read all entries."""
@@ -649,8 +650,8 @@ class TestReadNewEntries:
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "b"}]}},
         ])
 
-        result = JsonlMonitor._read_new_entries(jsonl_file, 0)
-        assert result == ["a", "b"]
+        items, _ = JsonlMonitor._read_new_entries(jsonl_file, 0)
+        assert [t for t, _ in items] == ["a", "b"]
 
     def test_skips_user_messages(self, tmp_path):
         """User messages should not appear in output."""
@@ -660,8 +661,8 @@ class TestReadNewEntries:
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "reply"}]}},
         ])
 
-        result = JsonlMonitor._read_new_entries(jsonl_file, 0)
-        assert result == ["reply"]
+        items, _ = JsonlMonitor._read_new_entries(jsonl_file, 0)
+        assert [t for t, _ in items] == ["reply"]
 
     def test_skips_summary_entries(self, tmp_path):
         """Summary entries should be skipped."""
@@ -671,8 +672,8 @@ class TestReadNewEntries:
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
         ])
 
-        result = JsonlMonitor._read_new_entries(jsonl_file, 0)
-        assert result == ["hi"]
+        items, _ = JsonlMonitor._read_new_entries(jsonl_file, 0)
+        assert [t for t, _ in items] == ["hi"]
 
     def test_handles_invalid_lines(self, tmp_path):
         """Invalid JSON lines should be skipped without error."""
@@ -685,8 +686,8 @@ class TestReadNewEntries:
             }) + "\n")
             f.write("\n")  # empty line
 
-        result = JsonlMonitor._read_new_entries(jsonl_file, 0)
-        assert result == ["valid"]
+        items, _ = JsonlMonitor._read_new_entries(jsonl_file, 0)
+        assert [t for t, _ in items] == ["valid"]
 
 
 # -- _find_jsonl_file robustness --------------------------------------------
@@ -2071,7 +2072,7 @@ class TestTouchActiveOnOutbound:
         # returns new text. The method tracks per-session timestamps internally.
         reads = iter([
             ([], 0),
-            (["opencode reply"], 1),
+            ([("opencode reply", 1)], 1),
         ])
         monkeypatch.setattr(
             JsonlMonitor, "_read_opencode_db",
@@ -2087,3 +2088,423 @@ class TestTouchActiveOnOutbound:
 
         await monitor._check_opencode_binding(binding)  # new content → touch
         session_mgr.touch_active.assert_awaited_once_with("chOC")
+
+
+# -- deliver-then-advance (at-least-once durability) --------------------------
+
+
+def _assistant_line(text: str) -> str:
+    """One newline-terminated assistant JSONL line yielding *text*."""
+    return json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": text}]},
+    }) + "\n"
+
+
+def _append(path: Path, text: str) -> None:
+    with open(path, "a") as f:
+        f.write(_assistant_line(text))
+
+
+class TestDeliverBeforeAdvance:
+    """The read offset must only advance past a JSONL line once every text it
+    produced has actually been delivered. A failed POST leaves the offset
+    pinned so the next poll retries instead of silently dropping the chunk.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch):
+        # Zero the retry backoff so in-loop retries don't sleep in tests.
+        monkeypatch.setattr(
+            "gits.core.jsonl_monitor._DELIVER_BACKOFFS", (0.0, 0.0, 0.0),
+            raising=False,
+        )
+
+    @staticmethod
+    def _key(monitor, binding, jsonl_file):
+        return (binding.channel_id, str(jsonl_file))
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_eventually_delivers_same_poll(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """A blip on the first attempt is absorbed by in-loop retry; the chunk
+        is delivered within the same poll and the offset advances to EOF."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        cb = AsyncMock(side_effect=[RuntimeError("blip"), None])
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime (first-seen → offset = 0)
+        _append(jsonl_file, "hello")
+        await monitor._poll_once()
+
+        # One failed attempt + one success, both for the same chunk.
+        assert cb.await_count == 2
+        assert cb.await_args_list[-1].args == ("ch1", "hello")
+        key = self._key(monitor, binding, jsonl_file)
+        assert monitor._offsets[key] == jsonl_file.stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_persistent_failure_pins_offset_and_retries(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """If every attempt fails the offset stays at the pre-text position and
+        the same text is re-attempted on the next poll — never dropped."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        cb = AsyncMock(side_effect=RuntimeError("discord down"))
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime → offset 0
+        key = self._key(monitor, binding, jsonl_file)
+        pinned = monitor._offsets[key]
+        _append(jsonl_file, "x")
+
+        await monitor._poll_once()
+        assert monitor._offsets[key] == pinned          # offset did NOT advance
+        assert cb.await_count == 3                       # 3 attempts this poll
+
+        await monitor._poll_once()
+        assert monitor._offsets[key] == pinned           # still pinned
+        assert cb.await_count == 6                        # re-attempted next poll
+
+    @pytest.mark.asyncio
+    async def test_at_least_once_failure_then_recovery(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """Failure on poll 1, recovery on poll 2 → the text is delivered at
+        least once (no silent drop)."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        delivered: list[str] = []
+        state = {"fail": True}
+
+        async def cb(_ch, chunk):
+            if state["fail"]:
+                raise RuntimeError("down")
+            delivered.append(chunk)
+
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime
+        _append(jsonl_file, "msg")
+
+        await monitor._poll_once()  # all attempts fail → pinned
+        assert delivered == []
+
+        state["fail"] = False
+        await monitor._poll_once()  # recovers → re-reads pinned content
+        assert delivered == ["msg"]
+
+    @pytest.mark.asyncio
+    async def test_partial_final_line_not_consumed_until_complete(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """A not-yet-newline-terminated final line is never delivered until it
+        is completed — then it is delivered whole exactly once."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        cb = AsyncMock()
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime
+
+        # One complete line, then a partial second line (no trailing newline).
+        full = _assistant_line("bbb").rstrip("\n")  # complete JSON, no newline
+        with open(jsonl_file, "a") as f:
+            f.write(_assistant_line("aaa"))
+            f.write(full[:12])  # partial — mid-flush
+
+        await monitor._poll_once()
+        sent = [c.args[1] for c in cb.await_args_list]
+        assert sent == ["aaa"]                  # partial NOT delivered
+        key = self._key(monitor, binding, jsonl_file)
+        # Offset sits at the end of the complete line, before the partial.
+        assert monitor._offsets[key] == len(_assistant_line("aaa"))
+
+        # Complete the partial line.
+        with open(jsonl_file, "a") as f:
+            f.write(full[12:] + "\n")
+        await monitor._poll_once()
+        sent = [c.args[1] for c in cb.await_args_list]
+        assert sent == ["aaa", "bbb"]           # delivered whole, once
+        assert monitor._offsets[key] == jsonl_file.stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_restat_gap_no_bytes_skipped(
+        self, monitor, session_mgr, tmp_path, monkeypatch,
+    ):
+        """Bytes appended *after* the read but before the offset advance must
+        not be skipped — the offset only ever trusts what was actually read."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        cb = AsyncMock()
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime
+
+        orig = JsonlMonitor._read_new_entries
+        injected = {"done": False}
+
+        def racing_read(path, offset, raw_sink=None):
+            result = orig(path, offset, raw_sink)
+            if not injected["done"]:
+                injected["done"] = True
+                _append(path, "late")  # appended "during" the read
+            return result
+
+        monkeypatch.setattr(
+            JsonlMonitor, "_read_new_entries", staticmethod(racing_read)
+        )
+
+        _append(jsonl_file, "early")
+        early_end = jsonl_file.stat().st_size  # before "late" is injected
+        await monitor._poll_once()
+
+        key = self._key(monitor, binding, jsonl_file)
+        # Offset advanced only to what was read, NOT the post-append size.
+        assert monitor._offsets[key] == early_end
+        assert [c.args[1] for c in cb.await_args_list] == ["early"]
+
+        await monitor._poll_once()  # picks up the raced-in append
+        assert [c.args[1] for c in cb.await_args_list] == ["early", "late"]
+
+    @pytest.mark.asyncio
+    async def test_exhausted_retry_does_not_touch_active(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """An exhausted (3-attempt) failure must not refresh the idle timer."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        cb = AsyncMock(side_effect=RuntimeError("down"))
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime
+        _append(jsonl_file, "x")
+        await monitor._poll_once()
+
+        assert cb.await_count == 3
+        session_mgr.touch_active.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delivered_prefix_not_redelivered(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """If line #1 succeeds and line #2 fails, the next poll must re-deliver
+        only line #2 — line #1's committed offset is never re-read."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        calls: list[str] = []
+
+        async def cb(_ch, chunk):
+            calls.append(chunk)
+            if chunk == "two":
+                raise RuntimeError("down")
+
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime
+        _append(jsonl_file, "one")
+        _append(jsonl_file, "two")
+
+        await monitor._poll_once()  # "one" commits, "two" fails → pinned
+        await monitor._poll_once()  # retries from after "one"
+
+        assert calls.count("one") == 1   # never re-delivered
+        assert calls.count("two") == 6   # 3 attempts × 2 polls, still retrying
+
+    @pytest.mark.asyncio
+    async def test_multi_text_line_commits_atomically(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """A single line yielding two texts commits as a unit: if the 2nd text
+        fails, the offset stays before the whole line so neither is dropped."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+
+        delivered: list[str] = []
+        state = {"fail_second": True}
+
+        async def cb(_ch, chunk):
+            if chunk == "B" and state["fail_second"]:
+                raise RuntimeError("down")
+            delivered.append(chunk)
+
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime
+        key = self._key(monitor, binding, jsonl_file)
+        pinned = monitor._offsets[key]
+
+        # One JSONL line, two text blocks → two texts sharing one line_end.
+        with open(jsonl_file, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "A"},
+                    {"type": "text", "text": "B"},
+                ]},
+            }) + "\n")
+
+        await monitor._poll_once()  # "A" sent, "B" fails → line not committed
+        assert monitor._offsets[key] == pinned  # whole line pinned
+
+        state["fail_second"] = False
+        await monitor._poll_once()  # re-reads whole line; "A" duplicates, "B" lands
+        assert delivered == ["A", "A", "B"]      # at-least-once: A twice, no drop
+        assert monitor._offsets[key] == jsonl_file.stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_healthy_stream_delivers_once_in_order(
+        self, monitor, session_mgr, tmp_path,
+    ):
+        """No regression: when every POST succeeds, texts are delivered exactly
+        once, in order, and the offset advances to EOF."""
+        jsonl_file = tmp_path / "sess-123.jsonl"
+        _make_jsonl_file(jsonl_file, [])
+        binding = _make_binding()
+        session_mgr.list_bindings.return_value = [binding]
+        cb = AsyncMock()
+        monitor.on_message(cb)
+        monitor._find_jsonl_file = MagicMock(return_value=jsonl_file)
+
+        await monitor._poll_once()  # prime
+        _append(jsonl_file, "one")
+        _append(jsonl_file, "two")
+        _append(jsonl_file, "three")
+        await monitor._poll_once()
+
+        assert [c.args[1] for c in cb.await_args_list] == ["one", "two", "three"]
+        key = self._key(monitor, binding, jsonl_file)
+        assert monitor._offsets[key] == jsonl_file.stat().st_size
+
+
+class TestOpenCodeDeliverBeforeAdvance:
+    """Mirror of the deliver-then-advance contract for the OpenCode path: the
+    per-session timestamp watermark only advances past a timestamp once every
+    part sharing it has been delivered."""
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch):
+        monkeypatch.setattr(
+            "gits.core.jsonl_monitor._DELIVER_BACKOFFS", (0.0, 0.0, 0.0),
+            raising=False,
+        )
+
+    def _setup_db(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        oc_dir = fake_home / ".local" / "share" / "opencode"
+        oc_dir.mkdir(parents=True)
+        (oc_dir / "opencode.db").touch()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    @pytest.mark.asyncio
+    async def test_failure_pins_watermark_then_recovers(
+        self, monitor, session_mgr, tmp_path, monkeypatch,
+    ):
+        self._setup_db(tmp_path, monkeypatch)
+
+        snapshot = iter([([], 0)])
+
+        def read_db(*_a, **_k):
+            try:
+                return next(snapshot)
+            except StopIteration:
+                return ([("oc1", 5)], 5)
+
+        monkeypatch.setattr(
+            JsonlMonitor, "_read_opencode_db", staticmethod(read_db)
+        )
+
+        delivered: list[str] = []
+        state = {"fail": True}
+
+        async def cb(_ch, chunk):
+            if state["fail"]:
+                raise RuntimeError("down")
+            delivered.append(chunk)
+
+        monitor.on_message(cb)
+        binding = _make_binding(channel_id="chOC", cli_session_id="sess-oc")
+        binding.coding_cli = "opencode"
+
+        await monitor._check_opencode_binding(binding)  # snapshot → ts=0
+        assert monitor._oc_timestamps["sess-oc"] == 0
+
+        await monitor._check_opencode_binding(binding)  # delivery fails → pinned
+        assert delivered == []
+        assert monitor._oc_timestamps["sess-oc"] == 0   # watermark NOT advanced
+
+        state["fail"] = False
+        await monitor._check_opencode_binding(binding)  # recovers
+        assert delivered == ["oc1"]
+        assert monitor._oc_timestamps["sess-oc"] == 5
+
+    @pytest.mark.asyncio
+    async def test_shared_timestamp_not_advanced_until_all_delivered(
+        self, monitor, session_mgr, tmp_path, monkeypatch,
+    ):
+        """Two parts at the same timestamp: a failure on the second must not
+        advance the watermark past that ts (the strict `>` filter would skip
+        the undelivered sibling forever)."""
+        self._setup_db(tmp_path, monkeypatch)
+
+        snapshot = iter([([], 0)])
+
+        def read_db(*_a, **_k):
+            try:
+                return next(snapshot)
+            except StopIteration:
+                return ([("A", 5), ("B", 5)], 5)
+
+        monkeypatch.setattr(
+            JsonlMonitor, "_read_opencode_db", staticmethod(read_db)
+        )
+
+        delivered: list[str] = []
+        state = {"fail_b": True}
+
+        async def cb(_ch, chunk):
+            if chunk == "B" and state["fail_b"]:
+                raise RuntimeError("down")
+            delivered.append(chunk)
+
+        monitor.on_message(cb)
+        binding = _make_binding(channel_id="chOC", cli_session_id="sess-oc")
+        binding.coding_cli = "opencode"
+
+        await monitor._check_opencode_binding(binding)  # snapshot → ts=0
+        await monitor._check_opencode_binding(binding)  # "A" ok, "B" fails
+        assert monitor._oc_timestamps["sess-oc"] == 0   # ts=5 NOT committed
+
+        state["fail_b"] = False
+        await monitor._check_opencode_binding(binding)  # re-reads both
+        assert delivered == ["A", "A", "B"]             # at-least-once on A
+        assert monitor._oc_timestamps["sess-oc"] == 5

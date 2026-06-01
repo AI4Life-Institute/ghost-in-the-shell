@@ -27,6 +27,15 @@ MAX_MESSAGE_LENGTH = 1900
 # Maximum summary length for tool_use arguments
 MAX_SUMMARY_LENGTH = 200
 
+# Bounded in-loop retry for a single outbound POST. Absorbs momentary Discord
+# 429/5xx without waiting a whole poll cycle. After these are exhausted the
+# caller leaves the read offset pinned, so the across-poll retry (rate-limited
+# by the ~2s poll interval) self-heals when Discord recovers. v1 has no
+# cross-poll cap / dead-letter — a persistent on-disk outbox is the heavier
+# future option if pin+poll proves insufficient.
+_DELIVER_MAX_ATTEMPTS = 3
+_DELIVER_BACKOFFS = (0.5, 1.0, 2.0)  # seconds between attempts 1→2, 2→3, …
+
 
 # -- Message splitting -------------------------------------------------------
 
@@ -283,6 +292,35 @@ class JsonlMonitor:
             return
         self._last_touch_at[channel_id] = now
         await self._session_mgr.touch_active(channel_id)
+
+    async def _deliver_chunk(self, channel_id: str, chunk: str) -> bool:
+        """Deliver one chunk via the registered callback, with bounded retry.
+
+        Retries transient failures up to ``_DELIVER_MAX_ATTEMPTS`` times with
+        short backoff. Returns ``True`` if the chunk was delivered, ``False``
+        if every attempt failed — in which case the caller must leave the read
+        offset pinned so the next poll re-attempts (deliver-then-advance).
+
+        Constants are read from the module at call time so tests can patch the
+        backoff to zero.
+        """
+        assert self._on_message is not None
+        for attempt in range(_DELIVER_MAX_ATTEMPTS):
+            try:
+                await self._on_message(channel_id, chunk)
+                return True
+            except Exception:
+                last = attempt == _DELIVER_MAX_ATTEMPTS - 1
+                logger.warning(
+                    "JsonlMonitor delivery attempt %d/%d failed for ch=%s%s",
+                    attempt + 1, _DELIVER_MAX_ATTEMPTS, channel_id,
+                    "" if last else " — retrying",
+                    exc_info=True,
+                )
+                if last:
+                    return False
+                await asyncio.sleep(_DELIVER_BACKOFFS[attempt])
+        return False
 
     def start(self) -> None:
         """Start the JSONL monitoring loop."""
@@ -582,21 +620,13 @@ class JsonlMonitor:
         raw_lines: list[str] | None = (
             [] if self._on_jsonl_line is not None else None
         )
-        new_texts = await asyncio.to_thread(
+        items, consumed = await asyncio.to_thread(
             self._read_new_entries, jsonl_path, last_offset, raw_lines
         )
 
-        # Update tracking
-        try:
-            # Re-stat to get accurate size after read
-            new_size = jsonl_path.stat().st_size
-        except OSError:
-            new_size = last_offset
-        self._offsets[file_key] = new_size
-        self._mtimes[file_key] = stat.st_mtime
-        self._offsets_dirty = True
-
-        # Feed every raw line to the quota-pattern callback (cheap; sync)
+        # Feed every raw (complete) line to the quota-pattern callback. This is
+        # cheap, side-effect-free classification — independent of delivery, so
+        # we run it on everything read this poll regardless of POST outcome.
         if raw_lines and self._on_jsonl_line is not None:
             for raw in raw_lines:
                 try:
@@ -604,24 +634,68 @@ class JsonlMonitor:
                 except Exception:
                     logger.exception("on_jsonl_line callback error")
 
-        # Fire callbacks
-        if new_texts and self._on_message:
-            logger.info(
-                "JSONL new content for ch=%s: %d texts, offset %d->%d",
-                binding.channel_id, len(new_texts), last_offset, new_size,
-            )
-            for text in new_texts:
-                chunks = split_message(text, MAX_MESSAGE_LENGTH)
-                for chunk in chunks:
-                    try:
-                        await self._on_message(binding.channel_id, chunk)
-                        await self._touch_active_throttled(binding.channel_id)
-                        logger.info(
-                            "JSONL forwarded to Discord ch=%s: %s",
-                            binding.channel_id, chunk[:80],
-                        )
-                    except Exception:
-                        logger.exception("JsonlMonitor message callback error")
+        # Deliver-then-advance: the offset only moves past a JSONL line once
+        # ALL texts that line produced have been delivered. A failed POST leaves
+        # the offset pinned at the last fully-committed line so the next poll
+        # re-reads and retries instead of dropping the chunk (at-least-once).
+        if not items or not self._on_message:
+            # Nothing deliverable — still consume past complete (e.g. user)
+            # lines so we don't re-read them forever. Safe: there is nothing to
+            # lose. ``consumed`` excludes any trailing partial line.
+            if consumed > last_offset:
+                self._offsets[file_key] = consumed
+                self._mtimes[file_key] = stat.st_mtime
+                self._offsets_dirty = True
+            return
+
+        logger.info(
+            "JSONL new content for ch=%s: %d texts from offset %d",
+            binding.channel_id, len(items), last_offset,
+        )
+        # Commit at line boundaries: a single JSONL line can yield multiple
+        # texts (multi-block assistant message); they share one line_end and
+        # commit together. ``committed`` is the highest line_end whose every
+        # text has been delivered.
+        committed = last_offset
+        n = len(items)
+        for idx, (text, line_end) in enumerate(items):
+            delivered = True
+            for chunk in split_message(text, MAX_MESSAGE_LENGTH):
+                if not await self._deliver_chunk(binding.channel_id, chunk):
+                    delivered = False
+                    break
+                # touch_active stays gated on a successful POST only.
+                await self._touch_active_throttled(binding.channel_id)
+                logger.info(
+                    "JSONL forwarded to Discord ch=%s: %s",
+                    binding.channel_id, chunk[:80],
+                )
+            if not delivered:
+                # Pin at the last fully-committed line and stop; next poll
+                # re-reads from here and retries the failing text.
+                if committed > last_offset:
+                    self._offsets[file_key] = committed
+                    self._offsets_dirty = True
+                logger.warning(
+                    "JsonlMonitor delivery pinned for ch=%s at offset %d "
+                    "(text dropped from this poll, will retry next poll)",
+                    binding.channel_id, committed,
+                )
+                return
+            # This text delivered. Advance the committed watermark past this
+            # line only once it is the last text of the line (next item has a
+            # different line_end, or this is the final item).
+            if idx + 1 == n or items[idx + 1][1] != line_end:
+                committed = line_end
+                self._offsets[file_key] = committed
+                self._offsets_dirty = True
+
+        # All texts delivered — advance past any trailing complete non-text
+        # lines too, and only now sync mtime (the no-change fast-path guard).
+        if consumed > committed:
+            self._offsets[file_key] = consumed
+            self._offsets_dirty = True
+        self._mtimes[file_key] = stat.st_mtime
 
     def _find_jsonl_file(self, binding: Any) -> Path | None:
         """Find the JSONL/session file for a binding's CLI session.
@@ -802,7 +876,7 @@ class JsonlMonitor:
         # Track last-seen part timestamp per session (stored as int in _known_parts)
         last_ts: int = self._oc_timestamps.get(session_key, -1)
 
-        new_texts, max_ts = await asyncio.to_thread(
+        items, max_ts = await asyncio.to_thread(
             self._read_opencode_db, db_path, session_key, last_ts,
         )
 
@@ -815,35 +889,62 @@ class JsonlMonitor:
             )
             return
 
-        if max_ts > last_ts:
-            self._oc_timestamps[session_key] = max_ts
+        # Deliver-then-advance, mirror of _check_binding. The SQL filter is
+        # strict (``time_updated > after_ts``), so the watermark may only
+        # advance to a timestamp T once EVERY part sharing T is delivered —
+        # otherwise an undelivered sibling at T would be skipped forever. On
+        # failure we pin at the last fully-completed timestamp; already-sent
+        # siblings at the failing timestamp duplicate next poll (at-least-once).
+        if not items or not self._on_message:
+            if max_ts > last_ts:
+                self._oc_timestamps[session_key] = max_ts
+            return
 
-        # Fire callbacks
-        if new_texts and self._on_message:
-            logger.info(
-                "OpenCode new content for ch=%s: %d texts",
-                binding.channel_id, len(new_texts),
-            )
-            for text in new_texts:
-                chunks = split_message(text, MAX_MESSAGE_LENGTH)
-                for chunk in chunks:
-                    try:
-                        await self._on_message(binding.channel_id, chunk)
-                        await self._touch_active_throttled(binding.channel_id)
-                    except Exception:
-                        logger.exception("OpenCode monitor callback error")
+        logger.info(
+            "OpenCode new content for ch=%s: %d texts",
+            binding.channel_id, len(items),
+        )
+        committed_ts = last_ts
+        n = len(items)
+        for idx, (text, ts) in enumerate(items):
+            delivered = True
+            for chunk in split_message(text, MAX_MESSAGE_LENGTH):
+                if not await self._deliver_chunk(binding.channel_id, chunk):
+                    delivered = False
+                    break
+                await self._touch_active_throttled(binding.channel_id)
+            if not delivered:
+                if committed_ts > last_ts:
+                    self._oc_timestamps[session_key] = committed_ts
+                logger.warning(
+                    "OpenCode delivery pinned for ch=%s at ts=%d "
+                    "(will retry next poll)",
+                    binding.channel_id, committed_ts,
+                )
+                return
+            # Advance the watermark past this timestamp only once it is the
+            # last part sharing it (next item has a higher ts, or end of list).
+            if idx + 1 == n or items[idx + 1][1] != ts:
+                committed_ts = ts
+                self._oc_timestamps[session_key] = committed_ts
+
+        if max_ts > committed_ts:
+            self._oc_timestamps[session_key] = max_ts
 
     @staticmethod
     def _read_opencode_db(
         db_path: Path, session_id: str, after_ts: int,
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[tuple[str, int]], int]:
         """Read new assistant text parts from OpenCode's SQLite DB.
 
-        Returns (list_of_texts, max_timestamp).
+        Returns ``(items, max_timestamp)`` where each item is a
+        ``(text, time_updated)`` tuple, ordered by ``time_updated`` ascending.
+        The per-text timestamp lets ``_check_opencode_binding`` advance its
+        watermark only past fully-delivered timestamps (deliver-then-advance).
         """
         import sqlite3
 
-        texts: list[str] = []
+        items: list[tuple[str, int]] = []
         max_ts = after_ts
 
         try:
@@ -877,42 +978,77 @@ class JsonlMonitor:
                     continue
                 text = pdata.get("text", "").strip()
                 if text:
-                    texts.append(text)
+                    # Coerce ts to int; fall back to the running max so the
+                    # watermark stays monotonic even if time_updated is null.
+                    items.append((text, int(ts) if ts else max_ts))
 
             db.close()
         except Exception:
             logger.warning("Error reading OpenCode DB", exc_info=True)
 
-        return texts, max_ts
+        return items, max_ts
 
     @staticmethod
     def _read_new_entries(
         file_path: Path,
         offset: int,
         raw_sink: list[str] | None = None,
-    ) -> list[str]:
+    ) -> tuple[list[tuple[str, int]], int]:
         """Read new JSONL entries from a file starting at byte offset.
 
-        Returns a list of displayable text strings. If *raw_sink* is provided,
-        every non-empty raw line is appended to it (used for quota-pattern
-        classification).
+        Returns ``(items, consumed_offset)`` where each item is a
+        ``(text, line_end_offset)`` tuple — ``line_end_offset`` is the byte
+        position just past the newline-terminated line that produced the text
+        (all texts from one line share that offset). ``consumed_offset`` is the
+        byte position past the last *complete* (newline-terminated) line read.
+
+        Only newline-terminated lines are consumed: a trailing partial line
+        (Claude mid-flush) is left unread so the next poll re-reads it whole.
+        This is what lets ``_check_binding`` advance the offset only past
+        content it has actually committed (deliver-then-advance).
+
+        If *raw_sink* is provided, every non-empty *complete* raw line is
+        appended to it (used for quota-pattern classification).
         Called in a thread via asyncio.to_thread.
         """
-        texts: list[str] = []
+        items: list[tuple[str, int]] = []
+        consumed = offset
         try:
-            with open(file_path, encoding="utf-8") as f:
+            # Read in binary so we can track exact byte boundaries. ``\n`` is a
+            # single byte that never appears inside a UTF-8 multibyte sequence,
+            # so splitting on it is safe regardless of message content.
+            with open(file_path, "rb") as f:
                 f.seek(offset)
-                for line in f:
-                    if raw_sink is not None and line.strip():
-                        raw_sink.append(line)
-                    entry = parse_jsonl_line(line)
-                    if entry is None:
-                        continue
-                    content_texts = extract_assistant_content(entry)
-                    texts.extend(content_texts)
+                data = f.read()
+            pos = offset
+            while True:
+                nl = data.find(b"\n", pos - offset)
+                if nl == -1:
+                    break  # trailing partial line — leave unconsumed
+                line_end = offset + nl + 1
+                raw_bytes = data[pos - offset:nl + 1]
+                try:
+                    line = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Complete but undecodable line — skip it but still advance
+                    # past it (it is newline-terminated, matching the
+                    # skip-invalid behaviour for malformed lines).
+                    consumed = line_end
+                    pos = line_end
+                    continue
+                if raw_sink is not None and line.strip():
+                    raw_sink.append(line)
+                entry = parse_jsonl_line(line)
+                if entry is not None:
+                    for text in extract_assistant_content(entry):
+                        items.append((text, line_end))
+                # Complete line — safe to advance past it whether or not it
+                # produced deliverable text.
+                consumed = line_end
+                pos = line_end
         except OSError as e:
             logger.error("Error reading JSONL file %s: %s", file_path, e)
-        return texts
+        return items, consumed
 
     @staticmethod
     def _read_new_lines_raw(file_path: Path, offset: int) -> list[str]:
