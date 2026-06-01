@@ -104,12 +104,21 @@ class Engine:
             account_layout=self.account_layout,
             account_vault=self.account_vault,
         )
+        # Resource + token watchdog config (task [[jeyuxq]]). Read once at
+        # startup from ~/.gits/config.env + os.environ.
+        from .watchdog_config import load_watchdog_config
+        self.watchdog_config = load_watchdog_config()
         self.health = HealthMonitor(
             tmux=self.tmux,
             session_mgr=self.session_mgr,
             launcher=self.launcher,
             check_interval=settings.health_check_interval,
             credential_lock_path=settings.credential_lock_file,
+            notify=self._send_watchdog_alert,
+            account_vault=self.account_vault,
+            account_layout=self.account_layout,
+            watchdog_config=self.watchdog_config,
+            watchdog_state_path=settings.state_dir / "watchdog_state.json",
         )
         self.monitor = PaneMonitor(
             tmux=self.tmux,
@@ -325,6 +334,26 @@ class Engine:
                 "no butler home channel bound — run `ghost butler bind <channel_id>`"
             )
         await self._adapter.send_message(cid, OutgoingMessage(text=text))
+
+    async def _send_watchdog_alert(self, text: str) -> None:
+        """Send a watchdog alert to the single configured channel.
+
+        Deliberately NOT :meth:`_broadcast_to_bindings` — watchdog alerts
+        go to one ops channel (``GITS_WATCHDOG_ALERT_CHANNEL``), not fanned
+        out to every binding (operator answer Q1, 2026-06-01). Falls
+        through silently if no adapter is wired.
+        """
+        if self._adapter is None:
+            return
+        channel = self.watchdog_config.alert_channel
+        if not channel:
+            return
+        try:
+            from ..adapters.base import OutgoingMessage
+
+            await self._adapter.send_message(channel, OutgoingMessage(text=text))
+        except Exception:
+            logger.debug("watchdog alert send to %s failed", channel, exc_info=True)
 
     async def inject_message(self, session_name: str, text: str) -> None:
         """Inject text into a named tmux session (for Guard and other uses)."""
