@@ -1124,6 +1124,22 @@ class DiscordAdapter(PlatformAdapter):
                     str(interaction.channel_id), interaction, message=message
                 )
 
+        @tree.command(
+            name="restart",
+            description="Gracefully restart the session in-place (resumes history, re-reads creds)",
+        )
+        async def cmd_restart(interaction: discord.Interaction):
+            if not self._check_interaction_access(interaction):
+                await interaction.response.send_message(
+                    "Access denied.", ephemeral=True
+                )
+                return
+            await interaction.response.defer()
+            if self._engine:
+                await self._engine.handle_restart(
+                    str(interaction.channel_id), interaction
+                )
+
         @tree.command(name="bash", description="Run a shell command in the working directory")
         @app_commands.describe(command="Shell command to execute")
         async def cmd_bash(interaction: discord.Interaction, command: str):
