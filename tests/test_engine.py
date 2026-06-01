@@ -1594,3 +1594,190 @@ class TestHandleStatusSessionSummary:
             assert "Session summary" not in reply
 
         asyncio.run(_test())
+
+
+def _reply_texts(interaction):
+    """All text replies sent through an interaction's followup, in order."""
+    return [
+        c.args[0]
+        for c in interaction.followup.send.call_args_list
+        if c.args
+    ]
+
+
+def _relaunch_cmd(engine):
+    """The relaunch command sent into the pane (the resume send_text), if any."""
+    for c in engine.tmux.send_text.call_args_list:
+        text = c.args[1] if len(c.args) > 1 else c.kwargs.get("text", "")
+        if "--resume" in text or "CLAUDE_CONFIG_DIR" in text:
+            return text
+    return None
+
+
+class TestHandleRestart:
+    """`/restart` — graceful in-pane resume that re-reads fresh credentials."""
+
+    async def _bind(self, engine, tmp_path, **kwargs):
+        defaults = dict(
+            platform="discord",
+            channel_id="ch-1",
+            window_id="@1",
+            window_name="test-window",
+            work_dir=str(tmp_path),
+            coding_cli="claude",
+            cli_session_id="sess-abc-1234567890",
+        )
+        defaults.update(kwargs)
+        return await engine.session_mgr.bind(**defaults)
+
+    def test_restart_happy_path(self, engine, tmp_path):
+        async def _test():
+            await self._bind(engine, tmp_path)
+            interaction = FakeInteraction()
+
+            await engine.handle_restart("ch-1", interaction)
+
+            # Graceful interrupt issued.
+            engine.tmux.send_keys.assert_any_call("@1", "C-c")
+            # Resumes the SAME session id in the same pane.
+            cmd = _relaunch_cmd(engine)
+            assert cmd is not None
+            assert "--resume" in cmd
+            assert "sess-abc-1234567890" in cmd
+            # Binding unchanged.
+            b = engine.session_mgr.get_binding("ch-1")
+            assert b.cli_session_id == "sess-abc-1234567890"
+            assert b.window_id == "@1"
+            # Confirmation sent.
+            assert any("Resumed" in t for t in _reply_texts(interaction))
+
+        asyncio.run(_test())
+
+    def test_restart_credential_refresh_account_dir(self, engine, tmp_path):
+        """CEO-required: resumed process's credential source is the account dir."""
+        async def _test():
+            await self._bind(engine, tmp_path, claude_account="sharongoogle")
+            interaction = FakeInteraction()
+
+            await engine.handle_restart("ch-1", interaction)
+
+            cmd = _relaunch_cmd(engine)
+            assert cmd is not None
+            assert "CLAUDE_CONFIG_DIR=" in cmd
+            assert ".claude-sharongoogle" in cmd
+            # Confirmation names the account so the operator sees the cred source.
+            assert any("sharongoogle" in t for t in _reply_texts(interaction))
+
+        asyncio.run(_test())
+
+    def test_restart_default_account_native_path(self, engine, tmp_path):
+        """Default account → no CLAUDE_CONFIG_DIR injected (native ~/.claude)."""
+        async def _test():
+            await self._bind(engine, tmp_path, claude_account=None)
+            interaction = FakeInteraction()
+
+            await engine.handle_restart("ch-1", interaction)
+
+            cmd = _relaunch_cmd(engine)
+            assert cmd is not None
+            assert "CLAUDE_CONFIG_DIR" not in cmd
+            assert any("default" in t for t in _reply_texts(interaction))
+
+        asyncio.run(_test())
+
+    def test_restart_preserves_permission_mode(self, engine, tmp_path):
+        """A bypassPermissions binding restarts with the YOLO flag re-applied."""
+        async def _test():
+            await self._bind(
+                engine, tmp_path, permission_mode="bypassPermissions"
+            )
+            interaction = FakeInteraction()
+
+            await engine.handle_restart("ch-1", interaction)
+
+            cmd = _relaunch_cmd(engine)
+            assert cmd is not None
+            assert "--dangerously-skip-permissions" in cmd
+            # Mode preserved on the binding (not dropped).
+            assert engine.session_mgr.get_binding("ch-1").permission_mode == (
+                "bypassPermissions"
+            )
+
+        asyncio.run(_test())
+
+    def test_restart_no_session_id(self, engine, tmp_path):
+        """No session id → 'nothing to resume', does NOT start fresh."""
+        async def _test():
+            await self._bind(engine, tmp_path, cli_session_id=None)
+            interaction = FakeInteraction()
+
+            await engine.handle_restart("ch-1", interaction)
+
+            texts = _reply_texts(interaction)
+            assert any("Nothing to resume" in t for t in texts)
+            assert any("/new" in t for t in texts)
+            # No relaunch attempted.
+            assert _relaunch_cmd(engine) is None
+            engine.tmux.send_keys.assert_not_called()
+
+        asyncio.run(_test())
+
+    def test_restart_not_bound(self, engine):
+        async def _test():
+            interaction = FakeInteraction()
+            await engine.handle_restart("ch-999", interaction)
+            assert any(
+                "Not bound" in t for t in _reply_texts(interaction)
+            )
+
+        asyncio.run(_test())
+
+    def test_restart_graceful_only_no_kill(self, engine, tmp_path):
+        """Only send_keys/send_text — never kill_window / kill -9."""
+        async def _test():
+            await self._bind(engine, tmp_path)
+            interaction = FakeInteraction()
+
+            await engine.handle_restart("ch-1", interaction)
+
+            engine.tmux.kill_window.assert_not_called()
+            # Graceful quit uses C-c + exit, not a forced kill.
+            engine.tmux.send_keys.assert_any_call("@1", "C-c")
+            assert any(
+                (c.args[1] if len(c.args) > 1 else "") == "exit"
+                for c in engine.tmux.send_text.call_args_list
+            )
+
+        asyncio.run(_test())
+
+    def test_restart_window_gone(self, engine, tmp_path):
+        """Missing pane → clean reply, no exception, dance not attempted."""
+        async def _test():
+            await self._bind(engine, tmp_path)
+            engine.tmux.window_exists = AsyncMock(return_value=False)
+            interaction = FakeInteraction()
+
+            await engine.handle_restart("ch-1", interaction)
+
+            assert any(
+                "window is gone" in t.lower() for t in _reply_texts(interaction)
+            )
+            # Did not attempt the graceful quit on a dead pane.
+            engine.tmux.send_keys.assert_not_called()
+
+        asyncio.run(_test())
+
+    def test_restart_relaunch_failure_reported(self, engine, tmp_path):
+        """Relaunch send failure → clear failure reply, no silent guess."""
+        async def _test():
+            await self._bind(engine, tmp_path)
+            engine.tmux.send_text = AsyncMock(side_effect=RuntimeError("pane dead"))
+            interaction = FakeInteraction()
+
+            await engine.handle_restart("ch-1", interaction)
+
+            assert any(
+                "Restart failed" in t for t in _reply_texts(interaction)
+            )
+
+        asyncio.run(_test())

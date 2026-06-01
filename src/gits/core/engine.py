@@ -1988,25 +1988,13 @@ class Engine:
             await self._reply(interaction, "Not bound.")
             return
 
-        cli = binding.coding_cli
         session_id = binding.cli_session_id
 
-        # Kill the running CLI
-        await self.tmux.send_keys(binding.window_id, "C-c")
-        await asyncio.sleep(0.5)
-        await self.tmux.send_text(binding.window_id, "exit")
-        await asyncio.sleep(1.5)
-
-        # Resume with new mode — preserve binding's account so claude
-        # reads/writes the per-account config dir.
-        cmd = self.launcher.build_launch_command(
-            cli=cli,
-            session_id=session_id,
-            claude_account=getattr(binding, "claude_account", None),
+        # Graceful quit + resume with the new mode flag. Preserves the
+        # binding's account so claude reads/writes the per-account config dir.
+        await self._graceful_resume(
+            binding, session_id=session_id, permission_mode=mode
         )
-        if mode and mode != "default":
-            cmd = _append_permission_flag(cmd, cli, mode)
-        await self._send_relaunch_in_pane(binding, cmd)
 
         # Persist new mode
         stored_mode = mode if mode != "default" else None
@@ -2023,6 +2011,103 @@ class Engine:
         await self._reply(
             interaction,
             f"Mode switched to **{mode_label}**{resume_note}",
+        )
+
+    async def _graceful_resume(
+        self,
+        binding: Any,
+        *,
+        session_id: str | None,
+        permission_mode: str | None,
+    ) -> str:
+        """Graceful in-pane quit + resume: ``C-c`` → ``exit`` → relaunch.
+
+        Sends a graceful interrupt then a clean ``exit`` so the CLI process
+        tears down on its own (never ``kill -9`` / ``tmux kill-*``), then
+        rebuilds the launch command — preserving the binding's
+        ``claude_account`` so the freshly spawned process reads that account's
+        on-disk credentials — and relaunches it in the **same** pane via
+        ``_send_relaunch_in_pane``. Returns the command string sent.
+
+        Single source for the quit/resume dance shared by ``handle_mode`` and
+        ``handle_restart``. When *permission_mode* is set (and not
+        ``"default"``) its CLI flag is re-applied to the resume command so the
+        mode survives the relaunch.
+        """
+        await self.tmux.send_keys(binding.window_id, "C-c")        # graceful interrupt
+        await asyncio.sleep(0.5)
+        await self.tmux.send_text(binding.window_id, "exit")       # graceful quit (no kill -9)
+        await asyncio.sleep(1.5)
+        cmd = self.launcher.build_launch_command(
+            cli=binding.coding_cli,
+            session_id=session_id or None,
+            claude_account=getattr(binding, "claude_account", None),
+        )
+        if permission_mode and permission_mode != "default":
+            cmd = _append_permission_flag(cmd, binding.coding_cli, permission_mode)
+        await self._send_relaunch_in_pane(binding, cmd)
+        return cmd
+
+    async def handle_restart(self, channel_id: str, interaction: Any) -> None:
+        """Handle /restart — graceful in-pane resume that re-reads fresh creds.
+
+        Gracefully quits the bound session's CLI process and resumes the
+        **same** session id in the **same** tmux pane, so conversation history
+        is preserved. The freshly spawned process re-reads the account's
+        on-disk ``.credentials.json`` at startup — the manual recovery lever
+        for a session wedged on a stale/expired in-memory token.
+
+        Boundary: if the account itself is dead (still 401 on disk) this won't
+        help — that's ``/account-switch``. Restart only re-reads what is
+        already on disk; it does not switch accounts or fetch credentials.
+        """
+        track("cmd_restart", platform=platform_for(channel_id))
+        binding = self.session_mgr.get_binding(channel_id)
+        if binding is None:
+            await self._reply(interaction, "Not bound.")
+            return
+
+        session_id = binding.cli_session_id
+        if not session_id:
+            await self._reply(
+                interaction,
+                "Nothing to resume — this binding has no session id yet. "
+                "Use `/new` to start a fresh session.",
+            )
+            return
+
+        # Window-gone guard: send_keys/send_text raise if the pane is missing,
+        # so detect up front and report cleanly instead of crashing the handler.
+        if not await self.tmux.window_exists(binding.window_id):
+            await self._reply(
+                interaction,
+                "Session window is gone — re-`/bind` needed.",
+            )
+            return
+
+        await self._reply(interaction, "♻️ Restarting session…")
+
+        try:
+            await self._graceful_resume(
+                binding,
+                session_id=session_id,
+                permission_mode=binding.permission_mode,
+            )
+        except Exception:
+            logger.exception("restart: failed to relaunch session %s", channel_id)
+            await self._reply(
+                interaction,
+                "⚠️ Restart failed — couldn't relaunch the session in its pane. "
+                "Try `/screenshot` to inspect, or re-`/bind`.",
+            )
+            return
+
+        # Binding / thread / channel / session_id all unchanged — no persist.
+        account = getattr(binding, "claude_account", None) or "default"
+        await self._reply(
+            interaction,
+            f"✅ Resumed `{session_id[:16]}…` on account `{account}` — "
+            "reading fresh credentials.",
         )
 
     async def handle_bash(
