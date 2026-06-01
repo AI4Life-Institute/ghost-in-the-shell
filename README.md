@@ -386,6 +386,8 @@ ghost uninstall-skills      # 移除（只删 manifest 里登记的，自己装�
 
 把 ghost 当作 PM 工具来用：[role](docs/role.md) · [task schema](docs/task-schema.md) · [dispatch lifecycle](docs/dispatch-lifecycle.md)。
 
+多 agent 协作的 org 模型（reports_to 树 + scope 归属 + dispatch/send）：[org model](docs/org-model.md)(叙事入口) · [org schema](docs/org-schema.md)(字段规范)。
+
 ---
 
 ## 许可证
