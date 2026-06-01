@@ -143,6 +143,11 @@ def main() -> None:
 
     _install_skills.install_parser(sub)
 
+    # gits resource / gits efficiency  (jeyuxq — resource watchdog)
+    from . import cli_resource as _cli_resource
+
+    _cli_resource.install_parser(sub)
+
     args = parser.parse_args()
 
     if args.command == "start":
@@ -177,6 +182,8 @@ def main() -> None:
         _cli_account.dispatch(args)
     elif args.command in ("install-skills", "uninstall-skills"):
         _install_skills.dispatch(args)
+    elif args.command in ("resource", "efficiency"):
+        _cli_resource.dispatch(args)
 
 
 def _cmd_start(args: argparse.Namespace) -> None:
