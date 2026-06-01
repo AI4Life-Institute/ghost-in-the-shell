@@ -22,6 +22,8 @@ tmux session ("gits")
 
 Key principle: **all CLIs run as interactive TUIs inside tmux** — never via SDK or non-interactive mode. tmux is the single source of truth.
 
+The org / agent-coordination subsystem (the `reports_to` tree, `scope` ownership, dispatch guard, `onboard`/`lint`) is documented separately — see [org-model.md](org-model.md) for the narrative and [org-schema.md](org-schema.md) for the field-level spec.
+
 ## Python dependencies
 
 | Package | Purpose |
