@@ -251,6 +251,66 @@ def test_thread_title_new_format_single_word_slug():
 
 
 # ---------------------------------------------------------------------------
+# build_pointer_message — done-notify instruction (task dn0tfy)
+# ---------------------------------------------------------------------------
+
+
+def test_pointer_embeds_done_notice_with_channel_and_task_id():
+    """The brief instructs the executor to report back via `ghost butler send`
+    into the dispatcher's home channel, with the channel id embedded and a
+    `DONE <task-id>` completion shape — so a finished executor pokes the PM
+    instead of leaving them to poll (task dn0tfy)."""
+    fm = {"id": "dn0tfy", "personas": "[senior engineer in python]"}
+    msg = dispatch_task.build_pointer_message(
+        fm, "/v/2026-06-01-dn0tfy-executor-done-notify.md", "plan",
+        channel_id="1511262347811880981",
+    )
+    # (a) the literal verb
+    assert "ghost butler send" in msg
+    # (b) the passed-in channel id, positionally (no --channel flag exists)
+    assert "1511262347811880981" in msg
+    assert "--channel" not in msg
+    # (c) the DONE <task-id> completion-notice shape
+    assert 'DONE dn0tfy <artifact-url-or-one-line-summary>' in msg
+
+
+def test_pointer_done_notice_comes_after_phase_block():
+    """Chronological ordering: the phase instruction precedes the
+    report-back-when-finished line."""
+    fm = {"id": "dn0tfy", "personas": "[senior engineer in python]"}
+    msg = dispatch_task.build_pointer_message(
+        fm, "/v/2026-06-01-dn0tfy-executor-done-notify.md", "plan",
+        channel_id="999",
+    )
+    assert msg.index("Phase: **plan first**") < msg.index("ghost butler send")
+
+
+def test_pointer_preserves_plan_phase_instruction():
+    """Regression: the done-notice is an addition, not a replacement — the
+    existing plan-first phase instruction must still be present."""
+    fm = {"id": "dn0tfy", "personas": "[senior engineer in python]"}
+    msg = dispatch_task.build_pointer_message(
+        fm, "/v/2026-06-01-dn0tfy-executor-done-notify.md", "plan",
+        channel_id="999",
+    )
+    assert "Phase: **plan first**" in msg
+    assert "Do not implement yet." in msg
+
+
+def test_pointer_done_notice_present_in_impl_phase_too():
+    """The report-back instruction is phase-independent (impl phase keeps it,
+    after the impl greenlight line)."""
+    fm = {"id": "dn0tfy", "personas": "[senior engineer in python]"}
+    msg = dispatch_task.build_pointer_message(
+        fm, "/v/2026-06-01-dn0tfy-executor-done-notify.md", "impl",
+        channel_id="777",
+    )
+    assert "Phase: **impl**" in msg
+    assert "ghost butler send 777" in msg
+    assert msg.index("Phase: **impl**") < msg.index("ghost butler send")
+
+
+# ---------------------------------------------------------------------------
 # Frontmatter validation (Acceptance #5)
 # ---------------------------------------------------------------------------
 
@@ -721,6 +781,7 @@ def test_pointer_message_includes_personas_and_phase_plan():
         {"id": "abc123", "personas": "[architect, reviewer]"},
         "/tmp/2026-05-16 abc123 do the thing.md",
         "plan",
+        channel_id="123",
     )
     assert "**a architect**" in msg and "**a reviewer**" in msg
     assert "[[abc123]]" in msg
@@ -733,6 +794,7 @@ def test_pointer_message_impl_phase_uses_impl_tail():
         {"id": "abc123", "personas": "[a]"},
         "/tmp/2026-05-16 abc123 t.md",
         "impl",
+        channel_id="123",
     )
     assert "Plan approved" in msg
     assert "plan first" not in msg.lower()
