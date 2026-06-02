@@ -319,6 +319,18 @@ _PHASE_TAILS = {
     ),
 }
 
+# Appended after the phase block so it reads chronologically (last line =
+# what to do when finished). Embeds the dispatcher's home channel id so the
+# executor doesn't have to discover it; a plain `ghost butler send` into that
+# bound channel rides the existing inbound wake path (engine.handle_message)
+# and pokes a suspended PM session for free — no engine notify hook needed.
+_DONE_NOTICE_TAIL = (
+    "\n\nWhen you're done, report back so the dispatcher isn't left polling: "
+    "run\n"
+    '  `ghost butler send {channel_id} "DONE {tid} '
+    '<artifact-url-or-one-line-summary>"`'
+)
+
 
 def _parse_personas(raw: str) -> list[str]:
     raw = raw.strip()
@@ -328,7 +340,7 @@ def _parse_personas(raw: str) -> list[str]:
 
 
 def build_pointer_message(
-    fm: dict[str, str], task_path: str, phase: str
+    fm: dict[str, str], task_path: str, phase: str, channel_id: str
 ) -> str:
     personas = _parse_personas(fm.get("personas", ""))
     persona_bold = ", ".join(f"**a {p}**" for p in personas)
@@ -342,6 +354,7 @@ def build_pointer_message(
         f"Read the whole file (Goal / Why / Context / Acceptance criteria / "
         f"Out of scope / Dispatch message / Test plan)."
         + _PHASE_TAILS[phase]
+        + _DONE_NOTICE_TAIL.format(channel_id=channel_id, tid=tid)
     )
 
 
@@ -527,7 +540,7 @@ def dispatch_task(
     channel_id, guild_id = read_home_channel(cwd=cwd)
 
     title = thread_title(task_path)
-    pointer = build_pointer_message(fm, task_path, phase)
+    pointer = build_pointer_message(fm, task_path, phase, channel_id)
 
     # Account resolution: flag > auto-picker. The task-page `account:` field
     # is NEVER read for resolution — it is a write-only record (see writeback
