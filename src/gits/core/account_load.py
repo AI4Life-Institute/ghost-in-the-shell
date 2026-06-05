@@ -39,6 +39,12 @@ broadened by [[4h3v7j]] to ban all OAuth Usage API calls from ghost):
   We check entry *existence* only — never read the secret.
 * **No mid-task rebalancing.** A binding's account is sticky once
   chosen; ``gits account switch`` is the operator-driven path.
+* **Bench gate (task [[5wuazc]]).** ``pick_account()`` hard-skips any
+  account with an unexpired ``benchedUntil`` manifest mark (``gits
+  account bench/unbench``) — same severity as the credential gate, not
+  a score penalty. Expiry is lazy: evaluated at read time, no daemon.
+  Explicit pins (``dispatch --account <name>``, ``account switch``)
+  warn but proceed.
 """
 
 from __future__ import annotations
@@ -55,7 +61,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .account import AccountLayout
-from .account_vault import AccountEntry, AccountVault
+from .account_vault import BENCH_FOREVER, AccountEntry, AccountVault
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +97,77 @@ def effective_weight(entry: AccountEntry) -> float:
     if isinstance(w, (int, float)) and w > 0:
         return float(w)
     return DEFAULT_WEIGHT
+
+
+def bench_expiry(entry: AccountEntry, now: float) -> float | None:
+    """Epoch when ``entry``'s bench lifts, or ``None`` if not benched.
+
+    Single source of truth for **lazy expiry** (task [[5wuazc]]):
+
+    * field absent → ``None`` (not benched)
+    * :data:`BENCH_FOREVER` → ``math.inf`` (benched until ``unbench``)
+    * ISO timestamp in the future → its epoch (benched until then)
+    * ISO timestamp at/before ``now`` → ``None`` (expired = not a bench)
+    * unparseable → ``None`` — **fail open**. A corrupted manifest field
+      must never silently disable an account; we log and treat it as
+      unbenched.
+    """
+    raw = getattr(entry, "benched_until", None)
+    if not isinstance(raw, str) or not raw:
+        return None
+    if raw == BENCH_FOREVER:
+        return float("inf")
+    epoch = _parse_iso_ts(raw)
+    if epoch is None:
+        logger.warning(
+            "account %s: unparseable benchedUntil %r — treating as not benched",
+            entry.name, raw,
+        )
+        return None
+    if epoch <= now:
+        return None
+    return epoch
+
+
+def is_benched(entry: AccountEntry, now: float) -> bool:
+    """True iff ``entry`` carries an unexpired bench mark. See :func:`bench_expiry`."""
+    return bench_expiry(entry, now) is not None
+
+
+def bench_display(raw: str) -> str:
+    """Human form of a raw ``benchedUntil`` value, in **local** time.
+
+    ``"forever"`` → ``indefinitely``; ISO timestamp →
+    ``until YYYY-MM-DD HH:MM`` (machine-local); unparseable → the raw
+    string verbatim (fail open, mirror :func:`bench_expiry`).
+    """
+    if raw == BENCH_FOREVER:
+        return "indefinitely"
+    try:
+        ts = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = _dt.datetime.fromisoformat(ts)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()
+        return f"until {dt.strftime('%Y-%m-%d %H:%M')}"
+    except ValueError:
+        return f"until {raw}"
+
+
+def bench_warning(entry: AccountEntry, now: float) -> str | None:
+    """Warn-but-proceed message for explicit pins on a benched account.
+
+    Returns ``None`` when ``entry`` is not (or no longer) benched.
+    Shared by ``gits account switch`` and ``ghost butler dispatch
+    --account <name>`` so the operator-override vocabulary stays in one
+    place (task [[5wuazc]]).
+    """
+    if not is_benched(entry, now):
+        return None
+    return (
+        f"account '{entry.name}' is benched "
+        f"{bench_display(entry.benched_until or '')} — proceeding anyway "
+        f"(explicit pin overrides the bench)"
+    )
 
 
 def _parse_iso_ts(ts: str) -> float | None:
@@ -377,10 +454,13 @@ def account_load_dual(
 class AccountRank:
     """One row in the dispatcher's ranked view of available accounts.
 
-    ``rank`` is ``None`` when the account fails the credential gate —
-    such rows are still emitted (so the UI can show them as ``—``) but
-    are excluded from the picker. Eligible rows carry ``rank=1, 2, …``
-    in score-asc order (same tiebreak rules as :func:`pick_account`).
+    ``rank`` is ``None`` when the account fails the credential gate or
+    carries an unexpired bench mark (task [[5wuazc]]) — such rows are
+    still emitted (so the UI can show them as ``—`` / ``⛔``) but are
+    excluded from the picker. ``benched_until`` distinguishes the two:
+    non-``None`` (raw manifest value) means benched. Eligible rows carry
+    ``rank=1, 2, …`` in score-asc order (same tiebreak rules as
+    :func:`pick_account`).
     """
 
     name: str
@@ -392,19 +472,23 @@ class AccountRank:
     rank: int | None
     bindings: int
     last_used: str
+    benched_until: str | None = None
 
 
-def format_pick_token(rank: int | None, top: int = 1) -> str:
+def format_pick_token(rank: int | None, top: int = 1, *, benched: bool = False) -> str:
     """Render the dispatcher's pick indicator for a ranked row.
 
-    Single source of truth for the ``#1 ←`` / ``#N`` / ``—`` vocabulary
-    that both the CLI table (``gits account list``) and the Discord
-    ``/account-switch`` autocomplete surface to the operator.
+    Single source of truth for the ``#1 ←`` / ``#N`` / ``—`` / ``⛔``
+    vocabulary that both the CLI table (``gits account list``) and the
+    Discord ``/account-switch`` autocomplete surface to the operator.
 
+    * ``benched`` (unexpired bench mark, task [[5wuazc]]) → ``⛔``
     * ``rank is None`` (credential gate excluded) → ``—``
     * ``rank == top`` (default top=1; dispatcher's pick) → ``#<rank> ←``
     * other eligible rows → ``#<rank>``
     """
+    if benched:
+        return "⛔"
     if rank is None:
         return "—"
     if rank == top:
@@ -422,11 +506,15 @@ def rank_accounts(
     """Return the full ranked account table the dispatcher would consult.
 
     Every account in the manifest appears in the result, including ones
-    the credential gate excludes (those have ``rank=None``). Eligible
-    rows are ranked ``1, 2, …`` by score ascending, tiebreaking on live
-    bindings, then ``last_used``, then name — identical to
-    :func:`pick_account`. Result ordering: eligible rows first (by
-    rank), then credential-gated rows by name.
+    the credential gate or the bench gate excludes (those have
+    ``rank=None``; benched rows additionally carry ``benched_until``).
+    The bench gate is the same severity as the credential gate — a
+    **hard skip**, not a score penalty (task [[5wuazc]]) — and expiry is
+    lazy: an expired ``benchedUntil`` is evaluated here at read time and
+    the account ranks normally. Eligible rows are ranked ``1, 2, …`` by
+    score ascending, tiebreaking on live bindings, then ``last_used``,
+    then name — identical to :func:`pick_account`. Result ordering:
+    eligible rows first (by rank), then gated rows by name.
 
     Returns ``[]`` if the vault isn't initialized or the manifest can't
     be loaded. Single-account manifests return a 1-row table (whereas
@@ -446,6 +534,7 @@ def rank_accounts(
     layout = layout or AccountLayout()
     default = manifest.default
     binding_counts: Mapping[str, int] = live_binding_counts or {}
+    now_epoch = now if now is not None else _dt.datetime.now(_dt.UTC).timestamp()
 
     eligible: list[tuple[float, int, str, str, AccountEntry, float, float]] = []
     gated: list[AccountRank] = []
@@ -458,7 +547,8 @@ def rank_accounts(
         score = (load_5h + load_7d) / weight
         bindings = binding_counts.get(entry.name, 0)
         last_used = entry.last_used or ""
-        if _has_credential(entry.name, default=default, layout=layout):
+        benched = is_benched(entry, now_epoch)
+        if not benched and _has_credential(entry.name, default=default, layout=layout):
             eligible.append((score, bindings, last_used, entry.name, entry, load_5h, load_7d))
         else:
             gated.append(AccountRank(
@@ -471,6 +561,7 @@ def rank_accounts(
                 rank=None,
                 bindings=bindings,
                 last_used=last_used,
+                benched_until=entry.benched_until if benched else None,
             ))
 
     eligible.sort()
@@ -505,7 +596,9 @@ def pick_account(
     * the multi-account vault isn't initialized,
     * the manifest has 0 or 1 account (single-account install — caller
       keeps legacy behavior),
-    * or every account fails the credential gate.
+    * or every account fails the credential gate or is benched
+      (``gits account bench``, task [[5wuazc]]) — dispatch then proceeds
+      account-less, which is the operator's everything-paused override.
     """
     if not vault.is_initialized():
         return None

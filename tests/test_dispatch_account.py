@@ -29,6 +29,9 @@ def fake_dispatch(monkeypatch):
     monkeypatch.setattr(dt.identity, "resolve_user",
                         lambda **kw: ("owner-x", None))
     monkeypatch.setattr(dt.time, "sleep", lambda _s: None)
+    # Keep these tests hermetic: the real check reads the dev machine's
+    # manifest. The bench-warn path has its own unit tests below.
+    monkeypatch.setattr(dt, "_warn_if_benched", lambda _n: None)
 
     # Sentinel: pass fm_account=ABSENT to omit the `account:` key entirely
     # (vs. a present-but-empty value like "null").
@@ -148,3 +151,49 @@ def test_real_writeback_inserts_account_for_absent_field(tmp_path, monkeypatch):
     text = p.read_text()
     assert "account: picked-acct\n" in text
     assert text.endswith("\nbody\n")  # body preserved
+
+
+# ─── _warn_if_benched (task [[5wuazc]]) ──────────────────────────────────
+
+
+@pytest.fixture
+def bench_env(tmp_path, monkeypatch):
+    """Pin HOME/state_dir and build a 2-account vault with one benched."""
+    from gits.core.account import AccountLayout
+    from gits.core.account_vault import (
+        BENCH_FOREVER,
+        AccountEntry,
+        AccountVault,
+        Manifest,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GITS_STATE_DIR", str(tmp_path / ".gits"))
+    layout = AccountLayout(home=tmp_path)
+    vault = AccountVault(tmp_path / ".gits", layout=layout)
+    m = Manifest(default="free")
+    for name in ("free", "rested"):
+        m.accounts.append(AccountEntry(
+            name=name, weight=1.0, config_dir=str(layout.account_dir(name)),
+        ))
+    m.accounts[1].benched_until = BENCH_FOREVER
+    vault.save(m)
+    return vault
+
+
+def test_warn_if_benched_warns_on_benched_pin(bench_env, capsys):
+    dt._warn_if_benched("rested")
+    err = capsys.readouterr().err
+    assert "benched" in err
+    assert "proceeding" in err
+
+
+def test_warn_if_benched_silent_on_unbenched_pin(bench_env, capsys):
+    dt._warn_if_benched("free")
+    assert "benched" not in capsys.readouterr().err
+
+
+def test_warn_if_benched_silent_on_unknown_account(bench_env, capsys):
+    # Unknown name: left to downstream /bind validation — no bench noise.
+    dt._warn_if_benched("nobody")
+    assert "benched" not in capsys.readouterr().err

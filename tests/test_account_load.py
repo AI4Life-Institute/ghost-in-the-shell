@@ -17,10 +17,17 @@ from gits.core.account_load import (
     AccountRank,
     account_load,
     account_load_dual,
+    bench_expiry,
+    format_pick_token,
     pick_account,
     rank_accounts,
 )
-from gits.core.account_vault import AccountEntry, AccountVault, Manifest
+from gits.core.account_vault import (
+    BENCH_FOREVER,
+    AccountEntry,
+    AccountVault,
+    Manifest,
+)
 
 # Fixed epoch to keep the fixture deterministic.
 _FAKE_NOW = 1_700_000_000.0
@@ -442,3 +449,110 @@ def test_pick_account_matches_rank_one(tmp_path):
     ranked = rank_accounts(vault, layout=layout, now=_FAKE_NOW)
     rank_one = next(r for r in ranked if r.rank == 1)
     assert pick_account(vault, layout=layout, now=_FAKE_NOW) == rank_one.name
+
+
+# ─── bench gate (task [[5wuazc]]) ────────────────────────────────────────
+
+
+def _iso_offset(epoch: float) -> str:
+    """Offset-aware ISO form — what `gits account bench` stores."""
+    return _dt.datetime.fromtimestamp(epoch, tz=_dt.UTC).isoformat(
+        timespec="seconds"
+    )
+
+
+def _bench(vault: AccountVault, name: str, until: str) -> None:
+    vault.set_bench(name, until)
+
+
+def test_bench_expiry_states(tmp_path):
+    e = AccountEntry(name="x", config_dir="/x")
+    assert bench_expiry(e, _FAKE_NOW) is None                  # absent
+    e.benched_until = BENCH_FOREVER
+    assert bench_expiry(e, _FAKE_NOW) == float("inf")          # indefinite
+    e.benched_until = _iso_offset(_FAKE_NOW + 3600)
+    assert bench_expiry(e, _FAKE_NOW) == pytest.approx(_FAKE_NOW + 3600)
+    e.benched_until = _iso_offset(_FAKE_NOW - 1)
+    assert bench_expiry(e, _FAKE_NOW) is None                  # expired = lazy lift
+    e.benched_until = "not-a-timestamp"
+    assert bench_expiry(e, _FAKE_NOW) is None                  # corrupt → fail open
+
+
+def test_pick_account_hard_skips_benched_even_with_lowest_score(tmp_path):
+    """Bench is a gate, not a score penalty — by-far-lowest score still skipped."""
+    vault, layout = _vault_with(
+        tmp_path, [("idle", 1.0), ("busy", 1.0)], default="idle",
+    )
+    _make_creds(layout, "idle"); _make_creds(layout, "busy")
+    # busy carries heavy load; idle has zero load → idle would win on score.
+    _write_jsonl(
+        layout.projects_dir("busy") / "h" / "s.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=10_000_000)],
+        mtime=_FAKE_NOW - 100,
+    )
+    _bench(vault, "idle", _iso_offset(_FAKE_NOW + 86400))
+    assert pick_account(vault, layout=layout, now=_FAKE_NOW) == "busy"
+
+
+def test_pick_account_lazy_expiry_lifts_past_bench(tmp_path):
+    """An expired benchedUntil is simply not a bench — picker selects normally."""
+    vault, layout = _vault_with(
+        tmp_path, [("a", 1.0), ("b", 1.0)], default="a",
+    )
+    _make_creds(layout, "a"); _make_creds(layout, "b")
+    _write_jsonl(
+        layout.projects_dir("b") / "h" / "s.jsonl",
+        [_assistant(_FAKE_NOW - 100, input=10_000_000)],
+        mtime=_FAKE_NOW - 100,
+    )
+    _bench(vault, "a", _iso_offset(_FAKE_NOW - 60))  # already expired
+    assert pick_account(vault, layout=layout, now=_FAKE_NOW) == "a"
+    # And the rank table shows no bench marker for it.
+    by_name = {r.name: r for r in rank_accounts(vault, layout=layout, now=_FAKE_NOW)}
+    assert by_name["a"].benched_until is None
+    assert by_name["a"].rank == 1
+
+
+def test_pick_account_all_benched_returns_none(tmp_path):
+    vault, layout = _vault_with(
+        tmp_path, [("a", 1.0), ("b", 1.0)], default="a",
+    )
+    _make_creds(layout, "a"); _make_creds(layout, "b")
+    _bench(vault, "a", BENCH_FOREVER)
+    _bench(vault, "b", _iso_offset(_FAKE_NOW + 3600))
+    assert pick_account(vault, layout=layout, now=_FAKE_NOW) is None
+
+
+def test_rank_accounts_benched_row_gated_with_marker(tmp_path):
+    vault, layout = _vault_with(
+        tmp_path, [("ok", 1.0), ("out", 1.0)], default="ok",
+    )
+    _make_creds(layout, "ok"); _make_creds(layout, "out")
+    until = _iso_offset(_FAKE_NOW + 7200)
+    _bench(vault, "out", until)
+    by_name = {r.name: r for r in rank_accounts(vault, layout=layout, now=_FAKE_NOW)}
+    assert by_name["out"].rank is None
+    assert by_name["out"].benched_until == until
+    assert by_name["ok"].rank == 1
+    assert by_name["ok"].benched_until is None
+
+
+def test_rank_accounts_bench_forever_round_trips_reload(tmp_path):
+    """Manifest round-trip: bench → fresh vault load → still benched."""
+    vault, layout = _vault_with(
+        tmp_path, [("a", 1.0), ("b", 1.0)], default="a",
+    )
+    _make_creds(layout, "a"); _make_creds(layout, "b")
+    _bench(vault, "a", BENCH_FOREVER)
+    # Fresh vault instance = restart-equivalent reload.
+    vault2 = AccountVault(tmp_path / ".gits", layout=layout)
+    assert pick_account(vault2, layout=layout, now=_FAKE_NOW) == "b"
+    by_name = {r.name: r for r in rank_accounts(vault2, layout=layout, now=_FAKE_NOW)}
+    assert by_name["a"].benched_until == BENCH_FOREVER
+
+
+def test_format_pick_token_benched():
+    assert format_pick_token(None, benched=True) == "⛔"
+    assert format_pick_token(2, benched=True) == "⛔"   # benched wins
+    assert format_pick_token(None) == "—"
+    assert format_pick_token(1) == "#1 ←"

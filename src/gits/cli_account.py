@@ -9,6 +9,9 @@ Per openspec change ``add-multi-account-hotswap``. Five commands:
 * ``remove <name>`` — delete an account dir + manifest entry.
 * ``import <session_id> --to <name> [--from <name>] [--force]`` — copy a
   session JSONL between accounts.
+* ``bench <name> [--until ...] [--for ...]`` / ``unbench <name>`` —
+  mark an account do-not-dispatch with optional lazy auto-expiry
+  (task [[5wuazc]]).
 
 Short alias ``gits acct`` is registered alongside ``gits account``.
 
@@ -24,9 +27,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as _dt
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,8 +44,17 @@ from .core.account import (
     AccountLayoutError,
     is_ghost_managed,
 )
-from .core.account_load import AccountRank, format_pick_token, rank_accounts
+from .core.account_load import (
+    AccountRank,
+    _has_credential,
+    bench_display,
+    bench_warning,
+    format_pick_token,
+    is_benched,
+    rank_accounts,
+)
 from .core.account_vault import (
+    BENCH_FOREVER,
     AccountEntry,
     AccountVault,
     AccountVaultError,
@@ -480,7 +494,19 @@ def cmd_list(args: argparse.Namespace) -> None:
             "natively, so its load includes the operator's own interactive "
             "`claude` usage in ~/.claude — that's real pressure on its 5h/7d caps."
         )
-    if any(row.rank is None for row in ranked):
+    # Benched rows (task [[5wuazc]]) — full expiry doesn't fit the 7-char
+    # pick? column, so the row shows `⛔` and each benched account gets a
+    # detail line here. Printed ONLY while a bench is active: the
+    # acceptance test greps list output for "bench", so no static text
+    # may contain the word.
+    for row in ranked:
+        if row.benched_until is not None:
+            print(
+                f"[note] ⛔ {row.name} benched {bench_display(row.benched_until)} "
+                f"— excluded from auto-dispatch; "
+                f"`gits account unbench {row.name}` to restore."
+            )
+    if any(row.rank is None and row.benched_until is None for row in ranked):
         print(
             "[note] `—` in the pick? column = account excluded from auto-dispatch "
             "(no resolvable credential — `.credentials.json` missing and no "
@@ -546,13 +572,14 @@ def _format_header() -> str:
 def _format_row(prefix: str, row: AccountRank) -> str:
     tier = row.tier or "—"
     weight = f"{row.weight:g}"
+    pick = format_pick_token(row.rank, benched=row.benched_until is not None)
     return (
         f"{prefix} {row.name:<12} "
         f"{tier:<5} {weight:<7} "
         f"{_human_count(row.load_5h):<9} "
         f"{_human_count(row.load_7d):<9} "
         f"{_human_count(row.score):<9} "
-        f"{format_pick_token(row.rank):<7} "
+        f"{pick:<7} "
         f"{row.bindings}"
     )
 
@@ -570,9 +597,16 @@ def cmd_switch(args: argparse.Namespace) -> None:
     target: str = args.name
     binding_id: str = args.binding
 
-    if vault.get(target) is None:
+    entry = vault.get(target)
+    if entry is None:
         print(f"[error] no such account '{target}'", file=sys.stderr)
         sys.exit(1)
+
+    # Benched target: warn but proceed — an explicit switch is a conscious
+    # per-action operator override (task [[5wuazc]]).
+    warning = bench_warning(entry, _dt.datetime.now(_dt.UTC).timestamp())
+    if warning:
+        print(f"[warn] {warning}", file=sys.stderr)
 
     # Run the switch through a transient Engine so we get the full kill +
     # respawn flow + manifest update. CLI path uses auto_import=False —
@@ -761,6 +795,142 @@ def cmd_set_weight(args: argparse.Namespace) -> None:
         print(f"[error] {e}", file=sys.stderr)
         sys.exit(1)
     print(f"[ok] {args.name} weight = {args.weight:g}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Commands: gits account bench / unbench (task [[5wuazc]])
+# ─────────────────────────────────────────────────────────────────────
+
+#: ``--for`` grammar: integer + one unit, e.g. ``3d`` / ``12h`` / ``45m``.
+_BENCH_FOR_RE = re.compile(r"^(\d+)([dhm])$")
+_BENCH_FOR_UNITS = {"d": 86400, "h": 3600, "m": 60}
+_BENCH_UNTIL_FMT = "%Y-%m-%d %H:%M"
+
+
+def _parse_bench_for(spec: str) -> _dt.timedelta:
+    """Parse a ``--for`` duration (``3d`` / ``12h`` / ``45m``). Raises ValueError."""
+    m = _BENCH_FOR_RE.match(spec.strip())
+    if not m:
+        raise ValueError(
+            f"invalid --for duration {spec!r} — expected <N>d / <N>h / <N>m (e.g. 3d, 12h, 45m)"
+        )
+    n, unit = int(m.group(1)), m.group(2)
+    if n == 0:
+        raise ValueError(f"invalid --for duration {spec!r} — must be > 0")
+    return _dt.timedelta(seconds=n * _BENCH_FOR_UNITS[unit])
+
+
+def _parse_bench_until(spec: str) -> _dt.datetime:
+    """Parse a ``--until "YYYY-MM-DD HH:MM"`` in **local** machine time.
+
+    Returns an offset-aware datetime (local zone attached) so the
+    manifest stores an absolute instant — DST-proof and unambiguous if
+    the machine timezone later changes. Raises ValueError on bad format.
+    """
+    try:
+        naive = _dt.datetime.strptime(spec.strip(), _BENCH_UNTIL_FMT)
+    except ValueError:
+        raise ValueError(
+            f'invalid --until {spec!r} — expected "YYYY-MM-DD HH:MM" '
+            f'local time (e.g. "2026-06-08 00:00")'
+        ) from None
+    return naive.astimezone()
+
+
+def _warn_if_last_launchable(vault: AccountVault, layout: AccountLayout) -> None:
+    """Loud warning when no un-benched launchable account remains.
+
+    Benching the last candidate is allowed (operator may genuinely want
+    everything paused) — the picker will return None and dispatch
+    proceeds account-less.
+    """
+    try:
+        manifest = vault.load()
+        now = _dt.datetime.now(_dt.UTC).timestamp()
+        default = manifest.default
+        remaining = [
+            a.name for a in manifest.accounts
+            if not is_benched(a, now)
+            and _has_credential(a.name, default=default, layout=layout)
+        ]
+    except Exception as e:  # noqa: BLE001 — warning is best-effort
+        logger.debug("last-launchable check failed: %s", e)
+        return
+    if not remaining:
+        print(
+            "[warn] ⚠️  NO un-benched launchable account remains!\n"
+            "       `--account=auto` will pick nothing; dispatch proceeds\n"
+            "       account-less (legacy default behavior). If that's not\n"
+            "       what you want: `gits account unbench <name>`.",
+            file=sys.stderr,
+        )
+
+
+def cmd_bench(args: argparse.Namespace) -> None:
+    """``gits account bench <name> [--until "YYYY-MM-DD HH:MM"] [--for <dur>]``.
+
+    Marks the account do-not-dispatch (task [[5wuazc]]): the picker
+    hard-skips it (same severity as the credential gate). No flag =
+    benched indefinitely until ``unbench``. Expiry is lazy — no daemon,
+    no cron; the mark simply stops mattering once past. Re-benching an
+    already-benched account updates the expiry.
+    """
+    settings = Settings()
+    layout = AccountLayout()
+    vault = AccountVault(settings.state_dir, layout=layout)
+    name: str = args.name
+
+    # --until/--for are declared mutually exclusive in argparse (its
+    # error exits 2); here only one (or neither) can be set.
+    try:
+        if args.for_:
+            delta = _parse_bench_for(args.for_)
+            until_dt = _dt.datetime.now().astimezone() + delta
+            until = until_dt.isoformat(timespec="seconds")
+        elif args.until:
+            until_dt = _parse_bench_until(args.until)
+            if until_dt <= _dt.datetime.now().astimezone():
+                print(
+                    f"[warn] --until {args.until!r} is already in the past — "
+                    f"the mark expires immediately (lazy expiry).",
+                    file=sys.stderr,
+                )
+            until = until_dt.isoformat(timespec="seconds")
+        else:
+            until = BENCH_FOREVER
+    except ValueError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        vault.set_bench(name, until)
+    except AccountVaultError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[ok] {name} benched {bench_display(until)} — auto-dispatch will hard-skip it.")
+    print(f"     Restore with `gits account unbench {name}`.")
+    _warn_if_last_launchable(vault, layout)
+
+
+def cmd_unbench(args: argparse.Namespace) -> None:
+    """``gits account unbench <name>`` — clear the bench mark.
+
+    No-op with a friendly message (exit 0) when the account isn't
+    benched.
+    """
+    settings = Settings()
+    layout = AccountLayout()
+    vault = AccountVault(settings.state_dir, layout=layout)
+    try:
+        _, was_benched = vault.clear_bench(args.name)
+    except AccountVaultError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        sys.exit(1)
+    if was_benched:
+        print(f"[ok] {args.name} unbenched — back in the auto-dispatch pool.")
+    else:
+        print(f"[ok] {args.name} was not benched — nothing to do.")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1169,6 +1339,37 @@ def install_parser(parent_subparsers: argparse._SubParsersAction) -> None:
         )
         p_setw.set_defaults(_handler=cmd_set_weight)
 
+        p_bench = ssub.add_parser(
+            "bench",
+            help=(
+                "Mark an account do-not-dispatch (e.g. weekly rate limit hit); "
+                "auto-dispatch hard-skips it until expiry or `unbench`"
+            ),
+        )
+        p_bench.add_argument("name", help="Account name")
+        bench_when = p_bench.add_mutually_exclusive_group()
+        bench_when.add_argument(
+            "--until",
+            default=None,
+            metavar='"YYYY-MM-DD HH:MM"',
+            help="Auto-expire at this local time (lazy — no daemon/cron)",
+        )
+        bench_when.add_argument(
+            "--for",
+            dest="for_",
+            default=None,
+            metavar="<dur>",
+            help="Auto-expire after a duration: 3d / 12h / 45m",
+        )
+        p_bench.set_defaults(_handler=cmd_bench)
+
+        p_unbench = ssub.add_parser(
+            "unbench",
+            help="Clear an account's bench mark (no-op if not benched)",
+        )
+        p_unbench.add_argument("name", help="Account name")
+        p_unbench.set_defaults(_handler=cmd_unbench)
+
 
 def dispatch(args: argparse.Namespace) -> None:
     """Run the handler attached by ``set_defaults(_handler=...)``."""
@@ -1177,7 +1378,7 @@ def dispatch(args: argparse.Namespace) -> None:
         print(
             "usage: gits account <add|fix-hooks|list|switch|remove|import|refresh|"
             "refresh-install|refresh-uninstall|migrate-default-native|"
-            "set-default|set-tags|set-weight>",
+            "set-default|set-tags|set-weight|bench|unbench>",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -200,3 +200,70 @@ def test_cmd_list_no_network_calls(fake_home, capsys):
         cmd_list(argparse.Namespace())
 
     assert "5h load" in capsys.readouterr().out
+
+
+# ─── benched marker (task [[5wuazc]]) ────────────────────────────────────
+
+
+def test_cmd_list_benched_shows_marker_and_detail(fake_home, capsys):
+    vault, layout = _build_vault(
+        fake_home,
+        accounts=[("alpha", 1.0, "max"), ("beta", 1.0, "max")],
+        default="alpha",
+    )
+    _make_creds(layout, "alpha")
+    _make_creds(layout, "beta")
+    vault.set_bench("beta", "2030-06-08T00:00:00+00:00")
+
+    cmd_list(argparse.Namespace())
+    out = capsys.readouterr().out
+
+    beta_line = next(ln for ln in out.splitlines() if ln.lstrip().startswith("beta"))
+    assert "⛔" in beta_line
+    # Detail footer: greppable as "bench" (acceptance test contract) with
+    # local-time expiry + the unbench hint.
+    assert "benched until 2030-06-0" in out
+    assert "unbench beta" in out
+    # The eligible account still ranks.
+    alpha_line = next(ln for ln in out.splitlines() if "alpha" in ln)
+    assert "#1 ←" in alpha_line
+
+
+def test_cmd_list_expired_bench_shows_no_marker(fake_home, capsys):
+    """Lazy expiry: a past benchedUntil renders nothing bench-related at all.
+
+    The acceptance script greps the whole output for "bench" after expiry,
+    so neither the marker nor any static text may contain the word.
+    """
+    vault, layout = _build_vault(
+        fake_home,
+        accounts=[("alpha", 1.0, "max"), ("beta", 1.0, "max")],
+        default="alpha",
+    )
+    _make_creds(layout, "alpha")
+    _make_creds(layout, "beta")
+    vault.set_bench("beta", "2020-01-01T00:00:00+00:00")  # long past
+
+    cmd_list(argparse.Namespace())
+    out = capsys.readouterr().out
+
+    assert "⛔" not in out
+    assert "bench" not in out.lower()
+    beta_line = next(ln for ln in out.splitlines() if ln.lstrip().startswith("beta"))
+    assert "#" in beta_line  # ranks normally
+
+
+def test_cmd_list_indefinite_bench_says_indefinitely(fake_home, capsys):
+    vault, layout = _build_vault(
+        fake_home,
+        accounts=[("alpha", 1.0, "max"), ("beta", 1.0, "max")],
+        default="alpha",
+    )
+    _make_creds(layout, "alpha")
+    _make_creds(layout, "beta")
+    from gits.core.account_vault import BENCH_FOREVER
+    vault.set_bench("beta", BENCH_FOREVER)
+
+    cmd_list(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert "benched indefinitely" in out

@@ -441,6 +441,39 @@ def _pick_account_or_none() -> str | None:
         return None
 
 
+def _warn_if_benched(name: str) -> None:
+    """Warn (stderr) when an explicitly pinned account is benched.
+
+    Warn-but-proceed (task [[5wuazc]]): an explicit ``--account <name>``
+    pin is a conscious per-action operator override, mirroring the
+    existing ``--account`` precedence philosophy. Best-effort and
+    exception-proof — dispatch must never die on a vault hiccup, and an
+    unknown name is left to the downstream ``/bind`` validation.
+    """
+    try:
+        import datetime as _dt
+
+        from ..config import Settings
+        from ..core.account import AccountLayout
+        from ..core.account_load import bench_warning
+        from ..core.account_vault import AccountVault
+
+        settings = Settings()
+        vault = AccountVault(settings.state_dir, layout=AccountLayout())
+        entry = vault.get(name)
+        if entry is None:
+            return
+        warning = bench_warning(entry, _dt.datetime.now(_dt.UTC).timestamp())
+        if warning:
+            print(f"ghost butler dispatch: [warn] {warning}", file=sys.stderr)
+    except Exception as e:
+        print(
+            f"ghost butler dispatch: bench check for --account={name} failed "
+            f"({e}); continuing",
+            file=sys.stderr,
+        )
+
+
 # ── lint ─────────────────────────────────────────────────────────────────────
 
 
@@ -549,6 +582,7 @@ def dispatch_task(
     if flag and flag != "auto":
         resolved_account: str | None = flag
         account_source = "flag"
+        _warn_if_benched(flag)
     else:
         resolved_account = _pick_account_or_none()
         account_source = "auto" if resolved_account else "auto (no candidate)"
