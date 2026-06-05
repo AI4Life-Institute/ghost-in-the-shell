@@ -25,7 +25,7 @@ from .account_vault import AccountVault
 from .guard import GuardHandler
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
-from .launcher import CLISession, CodingCLILauncher
+from .launcher import CLISession, CodingCLILauncher, prefix_account_env
 from .monitor import PaneMonitor
 from .quota import QuotaPatternMatcher, QuotaSignalDebouncer
 from .quota_notifier import QuotaNotifier
@@ -2349,7 +2349,6 @@ class Engine:
             return
 
         eff = effective_account(binding.claude_account, self.account_vault)
-        env = os.environ.copy()
         if eff is not None:
             account_dir = self.account_layout.account_dir(eff)
             if not account_dir.exists():
@@ -2358,10 +2357,14 @@ class Engine:
                     f"Account `{eff}` not configured locally.",
                 )
                 return
-            env["CLAUDE_CONFIG_DIR"] = str(account_dir)
+            # Inline prefix, NOT subprocess env= — with a tmux server already
+            # running, env= only reaches the client process and the pane
+            # inherits the server's environment (the original [[mfgft7]] bug).
+            spawn_cmd = prefix_account_env("claude", account_dir)
             account_label = eff
         else:
-            env.pop("CLAUDE_CONFIG_DIR", None)
+            # Default account runs natively against ~/.claude — no injection.
+            spawn_cmd = "claude"
             try:
                 account_label = self.account_vault.load().default or "default"
             except Exception:
@@ -2375,9 +2378,8 @@ class Engine:
                     subprocess.run,
                     [
                         "tmux", "new-session", "-d", "-s", session_name,
-                        "-x", "200", "-y", "60", "claude",
+                        "-x", "200", "-y", "60", spawn_cmd,
                     ],
-                    env=env,
                     check=True,
                     capture_output=True,
                 )
