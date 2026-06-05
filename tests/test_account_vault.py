@@ -355,3 +355,68 @@ def test_vault_load_non_object_raises(vault: AccountVault) -> None:
     vault.manifest_path.write_text("[]")
     with pytest.raises(AccountVaultError, match="not a JSON object"):
         vault.load()
+
+
+# ----------------------------------------------------------------------
+# bench / unbench (task [[5wuazc]])
+# ----------------------------------------------------------------------
+
+
+def test_vault_set_bench_round_trip(vault: AccountVault) -> None:
+    vault.add(AccountEntry(name="a", config_dir="/a"))
+    vault.set_bench("a", "2030-01-01T00:00:00+00:00")
+    # Fresh load = restart-equivalent reload.
+    entry = vault.get("a")
+    assert entry is not None
+    assert entry.benched_until == "2030-01-01T00:00:00+00:00"
+    assert vault.load().to_dict()["accounts"][0]["benchedUntil"] == (
+        "2030-01-01T00:00:00+00:00"
+    )
+
+
+def test_vault_set_bench_forever_and_update(vault: AccountVault) -> None:
+    from gits.core.account_vault import BENCH_FOREVER
+
+    vault.add(AccountEntry(name="a", config_dir="/a"))
+    vault.set_bench("a", BENCH_FOREVER)
+    assert vault.get("a").benched_until == BENCH_FOREVER
+    # Re-bench updates the expiry — no error.
+    vault.set_bench("a", "2030-06-01T12:00:00+00:00")
+    assert vault.get("a").benched_until == "2030-06-01T12:00:00+00:00"
+
+
+def test_vault_clear_bench(vault: AccountVault) -> None:
+    vault.add(AccountEntry(name="a", config_dir="/a"))
+    vault.set_bench("a", "2030-01-01T00:00:00+00:00")
+    _, was_benched = vault.clear_bench("a")
+    assert was_benched is True
+    assert vault.get("a").benched_until is None
+    # Clearing again: friendly no-op signal.
+    _, was_benched = vault.clear_bench("a")
+    assert was_benched is False
+
+
+def test_vault_bench_unknown_account(vault: AccountVault) -> None:
+    vault.add(AccountEntry(name="a", config_dir="/a"))
+    with pytest.raises(AccountVaultError):
+        vault.set_bench("ghost", "2030-01-01T00:00:00+00:00")
+    with pytest.raises(AccountVaultError):
+        vault.clear_bench("ghost")
+
+
+def test_vault_set_bench_rejects_empty(vault: AccountVault) -> None:
+    vault.add(AccountEntry(name="a", config_dir="/a"))
+    with pytest.raises(AccountVaultError):
+        vault.set_bench("a", "")
+
+
+def test_manifest_benched_until_optional_and_round_trips() -> None:
+    # Old manifests (no benchedUntil key) load as not-benched.
+    m = Manifest.from_dict(
+        {"default": "a", "accounts": [{"name": "a", "config_dir": "/a"}]}
+    )
+    assert m.accounts[0].benched_until is None
+    # And the field survives a to_dict/from_dict cycle.
+    m.accounts[0].benched_until = "forever"
+    m2 = Manifest.from_dict(m.to_dict())
+    assert m2.accounts[0].benched_until == "forever"

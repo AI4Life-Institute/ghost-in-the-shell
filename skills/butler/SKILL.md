@@ -96,6 +96,15 @@ launch. Set per-account capacity with `gits account set-weight <name>
 <N>` (e.g. `20` for Max 20x, `6` for Team 6x) — without this the picker
 assumes 1.0 and `gits account list` warns.
 
+When an account is temporarily unusable (e.g. it hit its weekly rate
+limit), **bench** it: `ghost account bench <name> [--until "YYYY-MM-DD
+HH:MM"] [--for 3d|12h|45m]` (no flag = until `unbench`). The picker
+hard-skips benched accounts — same severity as the credential gate;
+do NOT use a tiny `set-weight` as a soft bench (weight only biases the
+score; the picker can still select it). Expiry is lazy (no cron needed);
+`ghost account list` shows `⛔` while the bench is active, and an
+explicit `dispatch --account <name>` pin still overrides with a warning.
+
 Run from inside any vault-like worktree. The orchestrator resolves the repo
 root from cwd via `git rev-parse --show-toplevel`.
 

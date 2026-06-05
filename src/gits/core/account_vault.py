@@ -36,6 +36,12 @@ class AccountVaultError(Exception):
     """Raised on vault structural errors (e.g., duplicate add)."""
 
 
+#: Sentinel ``benchedUntil`` value meaning "benched until `unbench`".
+#: A literal word (not a far-future timestamp) so the manifest stays
+#: honest and human-readable.
+BENCH_FOREVER = "forever"
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Manifest model
 # ─────────────────────────────────────────────────────────────────────
@@ -59,6 +65,14 @@ class AccountEntry:
     #: unset — treated as ``1.0`` by ``effective_weight`` and warned in
     #: ``gits account list``.
     weight: float | None = None
+    #: Bench mark (task [[5wuazc]]): ``None`` = not benched; the literal
+    #: :data:`BENCH_FOREVER` = benched indefinitely; otherwise an
+    #: offset-aware ISO 8601 timestamp — benched until that instant.
+    #: Expiry is **lazy** (evaluated at read time by
+    #: :func:`gits.core.account_load.bench_expiry`); an expired or
+    #: unparseable value is simply not a bench. Operator sets via
+    #: ``gits account bench/unbench``.
+    benched_until: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,11 +84,13 @@ class AccountEntry:
             "lastUsed": self.last_used,
             "tags": list(self.tags),
             "weight": self.weight,
+            "benchedUntil": self.benched_until,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AccountEntry:
         w = d.get("weight")
+        b = d.get("benchedUntil")
         return cls(
             name=d["name"],
             email=d.get("email"),
@@ -84,6 +100,7 @@ class AccountEntry:
             last_used=d.get("lastUsed"),
             tags=list(d.get("tags", [])),
             weight=float(w) if isinstance(w, (int, float)) else None,
+            benched_until=b if isinstance(b, str) and b else None,
         )
 
 
@@ -360,6 +377,46 @@ class AccountVault:
                 entry.weight = float(weight)
                 self.save(manifest)
                 return manifest
+        raise AccountVaultError(f"no such account '{name}'")
+
+    def set_bench(self, name: str, until: str) -> Manifest:
+        """Mark an account benched (task [[5wuazc]]).
+
+        ``until`` is either an offset-aware ISO 8601 timestamp or the
+        :data:`BENCH_FOREVER` sentinel. Benching an already-benched
+        account simply updates the expiry — no error. Validity/expiry of
+        the timestamp is the caller's concern (the CLI parses and
+        formats); the vault just persists.
+        """
+        if not isinstance(until, str) or not until:
+            raise AccountVaultError(
+                f"benchedUntil must be a non-empty string, got {until!r}"
+            )
+        manifest = self.load()
+        for entry in manifest.accounts:
+            if entry.name == name:
+                entry.benched_until = until
+                self.save(manifest)
+                return manifest
+        raise AccountVaultError(f"no such account '{name}'")
+
+    def clear_bench(self, name: str) -> tuple[Manifest, bool]:
+        """Clear an account's bench mark. Returns ``(manifest, was_benched)``.
+
+        ``was_benched`` is False when the account had no mark (caller
+        prints a friendly no-op message; not an error). The check is on
+        the raw field: an *expired* mark still reports True and gets
+        scrubbed — lazy expiry already made it inert, removing it just
+        keeps the manifest tidy.
+        """
+        manifest = self.load()
+        for entry in manifest.accounts:
+            if entry.name == name:
+                was_benched = entry.benched_until is not None
+                entry.benched_until = None
+                if was_benched:
+                    self.save(manifest)
+                return manifest, was_benched
         raise AccountVaultError(f"no such account '{name}'")
 
     def update_last_used(self, name: str, when: str | None = None) -> Manifest:
