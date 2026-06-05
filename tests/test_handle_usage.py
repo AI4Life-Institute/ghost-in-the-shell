@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -185,11 +186,16 @@ class TestHandleUsage:
 
         asyncio.run(_run())
 
-    def test_default_account_skips_env(self, engine, tmp_path):
-        """When binding's account == manifest default, CLAUDE_CONFIG_DIR not set."""
+    def test_default_account_spawns_bare_claude(self, engine, tmp_path):
+        """When binding's account == manifest default, no CLAUDE_CONFIG_DIR prefix.
+
+        The spawn command must be the bare ``claude`` string and no argv
+        element may mention CLAUDE_CONFIG_DIR — the default account runs
+        natively against ~/.claude (see ``add-default-account-native-and-refresh``).
+        """
         async def _run():
             # Manifest claims "myacct" is the default → effective_account
-            # returns None for that name → engine drops CLAUDE_CONFIG_DIR.
+            # returns None for that name → engine skips the inline prefix.
             manifest = MagicMock()
             manifest.default = "myacct"
             engine.account_vault.load = MagicMock(return_value=manifest)
@@ -199,19 +205,29 @@ class TestHandleUsage:
             with run_p, sleep_p:
                 await engine.handle_usage("ch-default", FakeInteraction())
 
-            # Find the new-session call and inspect its env kwarg.
             new_session_call = next(
                 c for c in run_mock.call_args_list
                 if "new-session" in c.args[0]
             )
-            env = new_session_call.kwargs["env"]
-            assert "CLAUDE_CONFIG_DIR" not in env
+            argv = new_session_call.args[0]
+            # Spawn command is the final argv element; must be bare claude.
+            assert argv[-1] == "claude"
+            assert not any("CLAUDE_CONFIG_DIR" in a for a in argv)
+            # The env-kwarg mechanism is dead: a tmux server inherits its own
+            # environment, so passing env= here was the original bug.
+            assert "env" not in new_session_call.kwargs
 
         asyncio.run(_run())
 
-    def test_non_default_account_sets_env(self, engine, tmp_path):
+    def test_non_default_account_inlines_config_dir(self, engine, tmp_path):
+        """Non-default account → single shell string with inline CLAUDE_CONFIG_DIR.
+
+        env= on the tmux client does NOT reach the pane when a server is
+        already running (the original bug) — the prefix must be inside the
+        command string itself.
+        """
         async def _run():
-            # Different account name than default → eff != None → env set.
+            # Different account name than default → eff != None → prefix set.
             manifest = MagicMock()
             manifest.default = "other"
             engine.account_vault.load = MagicMock(return_value=manifest)
@@ -231,8 +247,37 @@ class TestHandleUsage:
                 c for c in run_mock.call_args_list
                 if "new-session" in c.args[0]
             )
-            env = new_session_call.kwargs["env"]
-            assert env.get("CLAUDE_CONFIG_DIR") == str(account_dir)
+            argv = new_session_call.args[0]
+            # Single inline command string — same idiom as launcher's
+            # build_launch_command (one shared code path).
+            assert argv[-1] == f"CLAUDE_CONFIG_DIR={account_dir} claude"
+            assert "env" not in new_session_call.kwargs
+
+        asyncio.run(_run())
+
+    def test_account_dir_with_space_is_shell_quoted(self, engine, tmp_path):
+        """Account dir containing a space must be shlex-quoted in the command."""
+        async def _run():
+            manifest = MagicMock()
+            manifest.default = "other"
+            engine.account_vault.load = MagicMock(return_value=manifest)
+
+            account_dir = tmp_path / ".claude-my acct"
+            account_dir.mkdir()
+            engine.account_layout.account_dir = MagicMock(return_value=account_dir)
+
+            await _bind(engine, "ch-space", tmp_path, claude_account="my acct")
+
+            run_p, sleep_p, run_mock = _patch_engine_io()
+            with run_p, sleep_p:
+                await engine.handle_usage("ch-space", FakeInteraction())
+
+            new_session_call = next(
+                c for c in run_mock.call_args_list
+                if "new-session" in c.args[0]
+            )
+            argv = new_session_call.args[0]
+            assert argv[-1] == f"CLAUDE_CONFIG_DIR={shlex.quote(str(account_dir))} claude"
 
         asyncio.run(_run())
 

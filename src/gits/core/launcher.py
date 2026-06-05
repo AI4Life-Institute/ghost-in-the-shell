@@ -22,6 +22,7 @@ Custom CLI aliases can be defined in ~/.gits/config.json:
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -41,6 +42,18 @@ CLI_SESSION_PATHS: dict[str, str] = {
     "copilot": "~/.copilot/session-state",
     "opencode": "~/.local/share/opencode/storage/session",
 }
+
+
+def prefix_account_env(base: str, account_dir: Path) -> str:
+    """Prepend ``CLAUDE_CONFIG_DIR=<dir>`` to a CLI command string.
+
+    The single shared idiom for per-account claude isolation: the variable
+    is inlined into the command string (run by tmux via the shell), NOT
+    passed as a subprocess ``env=`` kwarg — when a tmux server is already
+    running, ``env=`` only affects the short-lived client process and the
+    pane inherits the *server's* environment instead (task [[mfgft7]]).
+    """
+    return f"CLAUDE_CONFIG_DIR={shlex.quote(str(account_dir))} {base}"
 
 
 class ResolvedCLI(NamedTuple):
@@ -210,8 +223,6 @@ class CodingCLILauncher:
         codex / copilot / opencode the account argument is ignored (they
         have their own auth mechanisms).
         """
-        import shlex
-
         resolved = self.resolve_cli(cli, claude_account=claude_account)
         if session_id:
             base = resolved.resume_by_id.format(id=session_id)
@@ -224,7 +235,7 @@ class CodingCLILauncher:
         effective = self._effective_account(claude_account) if isinstance(claude_account, str) else claude_account
         if isinstance(effective, str) and resolved.base_type == "claude":
             account_dir = self._account_layout.account_dir(effective)
-            return f"CLAUDE_CONFIG_DIR={shlex.quote(str(account_dir))} {base}"
+            return prefix_account_env(base, account_dir)
         return base
 
     def get_session_file(
