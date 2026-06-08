@@ -49,7 +49,16 @@ _HOOKED_SETTINGS = {
     "hooks": {
         "SessionStart": [
             {"hooks": [{"type": "command", "command": "/x/gits hook", "timeout": 5}]}
-        ]
+        ],
+        # A fully-installed account also carries the PreToolUse impl-preflight
+        # guard (Ghost task j5pn2w) — fix-hooks treats an account missing it as
+        # incomplete and repairs it.
+        "PreToolUse": [
+            {
+                "matcher": "Edit|Write|NotebookEdit|Bash",
+                "hooks": [{"type": "command", "command": "/x/gits guard", "timeout": 5}],
+            }
+        ],
     },
 }
 

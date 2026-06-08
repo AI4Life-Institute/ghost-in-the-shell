@@ -72,6 +72,11 @@ def main() -> None:
         ),
     )
 
+    # gits guard — PreToolUse impl-preflight (refuse impl edits in a vault
+    # session). Installed alongside the SessionStart hook by `gits hook
+    # --install`; see gits.hooks.impl_vault_preflight (Ghost task j5pn2w).
+    sub.add_parser("guard", help="PreToolUse impl-preflight hook (reads stdin)")
+
     # gits info
     sub.add_parser("info", help="Show current bindings")
 
@@ -157,6 +162,10 @@ def main() -> None:
         _cmd_setup(args)
     elif args.command == "hook":
         _cmd_hook(args)
+    elif args.command == "guard":
+        from .hooks.impl_vault_preflight import main as _guard_main
+
+        _guard_main()
     elif args.command == "info":
         _cmd_status(args)
     elif args.command == "wechat":
@@ -1229,6 +1238,10 @@ def _cmd_hook(args: argparse.Namespace) -> None:
 
 _CLAUDE_SETTINGS_FILE = os.path.expanduser("~/.claude/settings.json")
 _HOOK_COMMAND_SUFFIX = "gits hook"
+_GUARD_COMMAND_SUFFIX = "gits guard"
+# PreToolUse matcher for the impl-preflight guard (Ghost task j5pn2w). Mirrors
+# the tools the vault source-mutation hook covers.
+_GUARD_MATCHER = "Edit|Write|NotebookEdit|Bash"
 
 
 def _find_gits_path() -> str:
@@ -1262,6 +1275,21 @@ def _is_hook_installed(settings: dict) -> bool:
                 continue
             cmd = h.get("command", "")
             if cmd == _HOOK_COMMAND_SUFFIX or cmd.endswith("/" + _HOOK_COMMAND_SUFFIX):
+                return True
+    return False
+
+
+def _is_guard_installed(settings: dict) -> bool:
+    """Check if the PreToolUse impl-preflight guard is already installed."""
+    pre = settings.get("hooks", {}).get("PreToolUse", [])
+    for entry in pre:
+        if not isinstance(entry, dict):
+            continue
+        for h in entry.get("hooks", []):
+            if not isinstance(h, dict):
+                continue
+            cmd = h.get("command", "")
+            if cmd == _GUARD_COMMAND_SUFFIX or cmd.endswith("/" + _GUARD_COMMAND_SUFFIX):
                 return True
     return False
 
@@ -1302,21 +1330,32 @@ def _install_hook(config_dir: str | None = None, quiet: bool = False) -> int:
         )
         return 1
 
-    if _is_hook_installed(settings):
+    gits_path = _find_gits_path()
+    settings.setdefault("hooks", {})
+    changed: list[str] = []
+
+    # SessionStart: gits hook (session_map maintenance).
+    if not _is_hook_installed(settings):
+        settings["hooks"].setdefault("SessionStart", []).append(
+            {"hooks": [{"type": "command", "command": f"{gits_path} hook", "timeout": 5}]}
+        )
+        changed.append("SessionStart hook")
+
+    # PreToolUse: gits guard (impl-preflight — refuse impl edits in a vault
+    # session; self-gates to a no-op elsewhere). Ghost task j5pn2w.
+    if not _is_guard_installed(settings):
+        settings["hooks"].setdefault("PreToolUse", []).append(
+            {
+                "matcher": _GUARD_MATCHER,
+                "hooks": [{"type": "command", "command": f"{gits_path} guard", "timeout": 5}],
+            }
+        )
+        changed.append("PreToolUse guard")
+
+    if not changed:
         if not quiet:
             print(f"Hook already installed in {settings_file}")
         return 0
-
-    gits_path = _find_gits_path()
-    hook_command = f"{gits_path} hook"
-    hook_config = {"type": "command", "command": hook_command, "timeout": 5}
-
-    if "hooks" not in settings:
-        settings["hooks"] = {}
-    if "SessionStart" not in settings["hooks"]:
-        settings["hooks"]["SessionStart"] = []
-
-    settings["hooks"]["SessionStart"].append({"hooks": [hook_config]})
 
     try:
         settings_file.write_text(
@@ -1327,7 +1366,7 @@ def _install_hook(config_dir: str | None = None, quiet: bool = False) -> int:
         return 1
 
     if not quiet:
-        print(f"Hook installed successfully in {settings_file}")
+        print(f"Installed {', '.join(changed)} in {settings_file}")
     return 0
 
 
