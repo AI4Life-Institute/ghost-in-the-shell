@@ -377,7 +377,7 @@ def cmd_fix_hooks(args: argparse.Namespace) -> None:
     hook installed (whether already-ok or repaired); non-zero if at least
     one install failed.
     """
-    from .__main__ import _install_hook, _is_hook_installed
+    from .__main__ import _install_hook, _is_guard_installed, _is_hook_installed
 
     settings = Settings()
     layout = AccountLayout()
@@ -426,6 +426,7 @@ def cmd_fix_hooks(args: argparse.Namespace) -> None:
             not unreadable
             and isinstance(current, dict)
             and _is_hook_installed(current)
+            and _is_guard_installed(current)
         ):
             print(f"{entry.name}: hook already installed in {settings_file}")
             already += 1
