@@ -12,7 +12,7 @@ rather than shelling out to ``ghost butler``/``ghost discord`` subcommands.
 Task-page schema fields (hardcoded here pending G-2 [[6n0iua]] which moves
 the spec to ``ghost/docs/task-schema.md``):
   id, project, status, personas, cli, thread, dispatched, dispatch_msg_id,
-  owner, account
+  owner, account, model
 """
 
 from __future__ import annotations
@@ -538,6 +538,7 @@ def dispatch_task(
     cwd: str | None = None,
     send_decorated=None,
     account: str | None = None,
+    model: str | None = None,
 ) -> None:
     """Orchestrate the full dispatch. ``send_decorated`` is injected by
     :mod:`gits.butler.butler_cli` to avoid a circular import; signature is
@@ -587,6 +588,32 @@ def dispatch_task(
         resolved_account = _pick_account_or_none()
         account_source = "auto" if resolved_account else "auto (no candidate)"
 
+    # Model resolution (openspec add-dispatch-model-pin): flag > task-page
+    # `model:` field > none. Unlike `account:`, the page field IS read on
+    # input — model grade is a property of the task, declared by its author.
+    model_flag = (model or "").strip() or None
+    page_model = (fm.get("model") or "").strip() or None
+    if model_flag:
+        resolved_model: str | None = model_flag
+        model_source = "flag"
+    elif page_model:
+        resolved_model = page_model
+        model_source = "task page"
+    else:
+        resolved_model = None
+        model_source = ""
+
+    # Fail fast — before any thread is created.
+    if resolved_model:
+        try:
+            from ..core.account import validate_model_name
+            validate_model_name(resolved_model)
+        except ValueError as e:
+            sys.exit(
+                f"ghost butler dispatch: invalid model name "
+                f"(source: {model_source}): {e}"
+            )
+
     # Validate any concrete name before sending it on /bind.
     if resolved_account:
         try:
@@ -605,6 +632,8 @@ def dispatch_task(
     bind_msg = f"/bind {work_dir} {cli}"
     if resolved_account:
         bind_msg += f" --account={resolved_account}"
+    if resolved_model:
+        bind_msg += f" --model={resolved_model}"
     try:
         bind_mid = send_decorated(tid, bind_msg, cwd=cwd)
     except SystemExit as e:
@@ -656,6 +685,11 @@ def dispatch_task(
     # found no candidate — the page stays clean, matching legacy.)
     if resolved_account:
         updates["account"] = resolved_account
+    # `model:` mirrors the account stamp: record what this dispatch actually
+    # used (the flag may have overridden a stale page value). Nothing is
+    # written when no model was pinned.
+    if resolved_model:
+        updates["model"] = resolved_model
     try:
         writeback_frontmatter_atomic(task_path, updates)
     except Exception as e:
@@ -679,9 +713,15 @@ def dispatch_task(
         print(f"  account: {resolved_account} (source: {account_source})")
     else:
         print("  account: (legacy default — no --account on /bind)")
+    if resolved_model:
+        print(f"  model:   {resolved_model} (source: {model_source})")
     print("  frontmatter: thread, dispatched, dispatch_msg_id, owner, status updated")
-    if resolved_account:
-        print("               + account")
+    extra_stamps = [
+        k for k, used in (("account", resolved_account), ("model", resolved_model))
+        if used
+    ]
+    if extra_stamps:
+        print(f"               + {', '.join(extra_stamps)}")
     if failures:
         print()
         print("✗ lint FAILED:")
@@ -698,4 +738,9 @@ def dispatch_task(
 
 def cmd_dispatch(args: argparse.Namespace) -> None:
     """argparse entrypoint; thin wrapper around :func:`dispatch_task`."""
-    dispatch_task(args.task_ref, args.phase, account=getattr(args, "account", None))
+    dispatch_task(
+        args.task_ref,
+        args.phase,
+        account=getattr(args, "account", None),
+        model=getattr(args, "model", None),
+    )

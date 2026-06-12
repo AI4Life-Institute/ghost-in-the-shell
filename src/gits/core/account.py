@@ -116,6 +116,8 @@ class SwitchResult:
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _RESERVED_NAMES = frozenset({"shared"})
 
+_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
 #: Subitems that previously were considered "shared" between accounts. In the
 #: current strict-isolation design these are NOT symlinked; each account has
 #: its own real copies. The list is kept for ``rsync`` exclusion logic and
@@ -153,6 +155,24 @@ def validate_account_name(name: str) -> None:
     if not _NAME_PATTERN.match(name):
         raise ValueError(
             f"account name '{name}' must match ^[a-z0-9][a-z0-9_-]{{0,31}}$"
+        )
+
+
+def validate_model_name(name: str) -> None:
+    """Raise :class:`ValueError` if ``name`` is not a safe CLI model name.
+
+    Deliberately a charset check, not an allowlist — the claude CLI accepts
+    stable aliases (``sonnet``, ``opus``, …) and arbitrary full model IDs,
+    and an allowlist would drift as models ship (same reasoning as
+    ``MODEL_HELP`` in :mod:`gits.core.engine`). The name is embedded in a
+    shell launch command, so anything outside
+    ``^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`` is rejected.
+    """
+    if not isinstance(name, str):
+        raise ValueError(f"model name must be a string, got {type(name).__name__}")
+    if not _MODEL_NAME_PATTERN.match(name):
+        raise ValueError(
+            f"model name {name!r} must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,127}}$"
         )
 
 

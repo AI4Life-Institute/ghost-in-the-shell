@@ -24,7 +24,7 @@ from typing import Any
 # encoder (`ghost butler` CLI). Override via GITS_DISPATCH_PREFIX_PATTERN
 # env var is honored there.
 from ...butler.prefix import VAULT_DISPATCH_RE as _VAULT_DISPATCH_RE
-from ...core.account import validate_account_name
+from ...core.account import validate_account_name, validate_model_name
 from ...core.account_load import (
     AccountRank,
     format_pick_token,
@@ -530,11 +530,12 @@ class DiscordAdapter(PlatformAdapter):
 
         if cmd == "/bind":
             # Parse positionals (path, cli) and flags
-            # (--fresh, --resume=<id>, --account=<name>).
+            # (--fresh, --resume=<id>, --account=<name>, --model=<name>).
             positionals: list[str] = []
             explicit_fresh = False
             resume_id: str | None = None
             account_arg: str | None = None
+            model_arg: str | None = None
             for tok in args:
                 if tok == "--fresh":
                     explicit_fresh = True
@@ -542,6 +543,8 @@ class DiscordAdapter(PlatformAdapter):
                     resume_id = tok[len("--resume="):]
                 elif tok.startswith("--account="):
                     account_arg = tok[len("--account="):]
+                elif tok.startswith("--model="):
+                    model_arg = tok[len("--model="):]
                 else:
                     positionals.append(tok)
 
@@ -555,11 +558,22 @@ class DiscordAdapter(PlatformAdapter):
                         logger.debug("Failed to reply to butler /bind")
                     return True
 
+            if model_arg is not None:
+                try:
+                    validate_model_name(model_arg)
+                except ValueError as e:
+                    try:
+                        await message.reply(f"⚠️ Invalid `--model` value: {e}")
+                    except Exception:
+                        logger.debug("Failed to reply to butler /bind")
+                    return True
+
             if not positionals:
                 try:
                     await message.reply(
                         "⚠️ `/bind` requires a path: "
-                        "`/bind <path> [cli] [--fresh|--resume=<id>] [--account=<name>]`"
+                        "`/bind <path> [cli] [--fresh|--resume=<id>] "
+                        "[--account=<name>] [--model=<name>]`"
                     )
                 except Exception:
                     logger.debug("Failed to reply to butler /bind")
@@ -648,6 +662,7 @@ class DiscordAdapter(PlatformAdapter):
                     fresh=fresh,
                     session_id=resume_id,
                     account=account_arg,
+                    model=model_arg,
                 )
             except Exception:
                 logger.exception("butler /bind failed")
