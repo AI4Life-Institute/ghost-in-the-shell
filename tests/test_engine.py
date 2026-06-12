@@ -140,6 +140,67 @@ class TestHandleBind:
         asyncio.run(_test())
 
 
+class TestBindModelPin:
+    """`/bind --model=` → launch command (openspec add-dispatch-model-pin)."""
+
+    def test_fresh_claude_launch_carries_model(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            await engine.handle_bind(
+                "ch-1", str(project_dir), FakeInteraction(), model="sonnet"
+            )
+
+            cmd = engine.tmux.create_window.call_args.kwargs["command"]
+            assert cmd.endswith(" --model sonnet")
+
+        asyncio.run(_test())
+
+    def test_fresh_launch_without_model_unchanged(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            await engine.handle_bind("ch-1", str(project_dir), FakeInteraction())
+
+            cmd = engine.tmux.create_window.call_args.kwargs["command"]
+            assert "--model" not in cmd
+
+        asyncio.run(_test())
+
+    def test_resume_never_injects_model(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            await engine._create_bind(
+                "ch-1", str(project_dir), "win", "claude", FakeInteraction(),
+                session_id="abc-123", model="sonnet",
+            )
+
+            cmd = engine.tmux.create_window.call_args.kwargs["command"]
+            assert "--resume" in cmd
+            assert "--model" not in cmd
+
+        asyncio.run(_test())
+
+    def test_non_claude_cli_ignores_model(self, engine, tmp_path):
+        async def _test():
+            project_dir = tmp_path / "proj"
+            project_dir.mkdir()
+
+            await engine._create_bind(
+                "ch-1", str(project_dir), "win", "codex", FakeInteraction(),
+                model="sonnet",
+            )
+
+            cmd = engine.tmux.create_window.call_args.kwargs["command"]
+            assert "--model" not in cmd
+
+        asyncio.run(_test())
+
+
 class TestHandleUnbind:
     def test_unbind_existing(self, engine, tmp_path):
         async def _test():

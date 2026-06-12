@@ -68,7 +68,7 @@ candidate paths and exits non-zero; ask the user which one they meant.
 ### Invocation
 
 ```
-ghost butler dispatch <task-id> [--phase plan|impl] [--account <name|auto>]
+ghost butler dispatch <task-id> [--phase plan|impl] [--account <name|auto>] [--model <name>]
 ```
 
 - `<task-id>` — 6-char task id (preferred — unique) or a fuzzy filename
@@ -85,6 +85,14 @@ ghost butler dispatch <task-id> [--phase plan|impl] [--account <name|auto>]
   never sees `auto`. When the task page's `account:` was `null`, the
   resolved name is written back into frontmatter alongside `thread:` /
   `dispatched:`.
+- `--model` — pin the CLI model for the worker (alias like `sonnet`/`haiku`
+  or a full model ID) so cheap tasks don't burn the strongest model.
+  Resolution precedence: this flag > the task page's `model:` frontmatter
+  field (which, unlike `account:`, IS read on input — model grade is a
+  property of the task) > none (account's default model). The resolved
+  name rides the `/bind` message as `--model=<name>` and applies to fresh
+  claude launches only; the value actually used is stamped back into the
+  page's `model:` field.
 
 The auto-picker uses *local* JSONL transcripts only — no OAuth Usage
 API. It compares cost-weighted utilization (`load / weight`) across the

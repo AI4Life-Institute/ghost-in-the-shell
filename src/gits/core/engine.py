@@ -471,6 +471,7 @@ class Engine:
         fresh: bool = False,
         session_id: str | None = None,
         account: str | None = None,
+        model: str | None = None,
     ) -> None:
         """Handle /bind — bind channel to a project directory.
 
@@ -482,6 +483,11 @@ class Engine:
         ``account`` (per task [[gbraq8]]) pins the claude account name
         used for this binding, overriding ``manifest.default``. ``None``
         keeps the legacy "use default" behavior.
+
+        ``model`` (per openspec ``add-dispatch-model-pin``) pins the CLI
+        model for a fresh claude launch via ``--model <name>``. Ignored on
+        resume (the resumed session keeps its own model) and for
+        non-claude bases.
         """
         track("cmd_bind", platform=platform_for(channel_id), cli=cli or "default")
         if path:
@@ -543,7 +549,7 @@ class Engine:
                     )
                     await self._create_bind(
                         channel_id, str(p), window_name, cli, interaction,
-                        mode=mode, account=account,
+                        mode=mode, account=account, model=model,
                     )
                 return
             else:
@@ -551,6 +557,7 @@ class Engine:
                 await self._create_bind(
                     channel_id, str(p), window_name, cli, interaction,
                     mode=mode, session_id=session_id, account=account,
+                    model=model,
                 )
         else:
             await self._reply(
@@ -617,6 +624,7 @@ class Engine:
         session_id: str | None = None,
         mode: str | None = None,
         account: str | None = None,
+        model: str | None = None,
     ) -> None:
         """Create a tmux window, binding, and reply with confirmation.
 
@@ -634,6 +642,10 @@ class Engine:
         ``manifest.default`` for this binding. The dispatch
         load-balancer resolves the concrete name at dispatch time and
         passes it via ``--account=<name>`` on ``/bind``.
+
+        ``model`` (per openspec ``add-dispatch-model-pin``) appends
+        ``--model <name>`` to fresh claude launches only — resumes keep
+        the session's own model, non-claude bases ignore it.
         """
         p = Path(work_dir)
         claude_account = account or self._default_claude_account()
@@ -644,6 +656,16 @@ class Engine:
         # Append permission mode flag (CLI-specific)
         if mode and mode != "default":
             cmd = _append_permission_flag(cmd, cli, mode)
+
+        if model and not session_id:
+            try:
+                base_type = self.launcher.resolve_cli(
+                    cli, claude_account=claude_account
+                ).base_type
+            except Exception:
+                base_type = ""
+            if base_type == "claude":
+                cmd += f" --model {model}"
 
         win = await self.tmux.create_window(
             name=window_name, cwd=str(p), command=cmd

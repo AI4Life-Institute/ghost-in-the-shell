@@ -346,6 +346,18 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
             "is NOT read on input — to force an account, use this flag."
         ),
     )
+    sp.add_argument(
+        "--model",
+        default=None,
+        metavar="<name>",
+        help=(
+            "CLI model for the dispatched worker (alias like 'sonnet'/'haiku' "
+            "or a full model ID). Precedence: this flag > task-page `model:` "
+            "frontmatter field > none (account's default model). Applies to "
+            "fresh claude launches only; the resolved value is stamped back "
+            "into the task page."
+        ),
+    )
     sp.set_defaults(func=cmd_dispatch)
 
     sp = verbs.add_parser(
