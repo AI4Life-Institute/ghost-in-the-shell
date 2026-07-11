@@ -122,22 +122,6 @@ class BuilderResponseAdapter:
             lines.append(f"• summary: `{rec['summary_ref']}`")
         await self._send(channel_id, OutgoingMessage(text="\n".join(lines)))
 
-    # -- slash-command entrypoint (T8 `/bos respond`) ----------------------
-
-    async def respond(
-        self, channel_id: str, user_id: str, uid: str, decision_id: str, choice: str,
-    ) -> None:
-        """`/bos respond` → the same authenticated, single-use path as a button.
-
-        A thin, explicit entrypoint for the T8 slash command: the command layer
-        has already resolved the ticket (from the bound thread) and the open
-        decision (from the renderer projection); the actor gate + capability-token
-        pass-through + two-phase render all live in :meth:`_handle_decision`, so
-        button clicks and ``/bos respond`` are provably one code path (fail-closed
-        on identity, keyed off builder-os exit codes).
-        """
-        await self._handle_decision(channel_id, user_id, uid, decision_id, choice)
-
     # -- decision (authenticated, single-use) ------------------------------
 
     async def _handle_decision(
