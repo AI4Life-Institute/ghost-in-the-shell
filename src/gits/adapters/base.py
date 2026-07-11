@@ -43,37 +43,6 @@ class IncomingMessage:
 
 
 @dataclass
-class Embed:
-    """A platform-agnostic rich card ("embed").
-
-    Kept deliberately small — the builder-os renderer (0002 §5.2) needs a title,
-    a body, a few labelled fields, an accent colour and a footer. Adapters that
-    cannot render embeds (WeChat, desktop) fall back to plain text, so the field
-    is optional everywhere and never load-bearing for delivery.
-    """
-
-    title: str | None = None
-    description: str | None = None
-    # (name, value, inline) tuples — inline lets short fields sit side by side.
-    fields: list[tuple[str, str, bool]] = field(default_factory=list)
-    color: int | None = None
-    footer: str | None = None
-
-    def to_text(self) -> str:
-        """Plain-text fallback for adapters without embed support."""
-        lines: list[str] = []
-        if self.title:
-            lines.append(f"**{self.title}**")
-        if self.description:
-            lines.append(self.description)
-        for name, value, _inline in self.fields:
-            lines.append(f"**{name}:** {value}")
-        if self.footer:
-            lines.append(f"_{self.footer}_")
-        return "\n".join(lines)
-
-
-@dataclass
 class OutgoingMessage:
     """Platform-agnostic outbound message."""
 
@@ -84,7 +53,6 @@ class OutgoingMessage:
     select_placeholder: str | None = None
     edit_message_id: str | None = None
     ephemeral: bool = False
-    embed: Embed | None = None
 
 
 # Callback type aliases
@@ -152,17 +120,6 @@ class PlatformAdapter(ABC):
         """Archive / close a thread."""
         ...
 
-    # Pinning is optional: not every platform supports it, so these are
-    # concrete no-ops rather than abstract methods (additive — existing
-    # adapters need no change). Discord overrides them (0002 §5.2 pinned cards).
-    async def pin_message(self, channel_id: str, message_id: str) -> None:
-        """Pin a message (no-op where unsupported)."""
-        return None
-
-    async def unpin_message(self, channel_id: str, message_id: str) -> None:
-        """Unpin a message (no-op where unsupported)."""
-        return None
-
 
 class MultiAdapter(PlatformAdapter):
     """Routes send_message/edit_message/delete_message to the right adapter
@@ -216,12 +173,6 @@ class MultiAdapter(PlatformAdapter):
 
     async def delete_message(self, channel_id: str, message_id: str) -> None:
         await self._route(channel_id).delete_message(channel_id, message_id)
-
-    async def pin_message(self, channel_id: str, message_id: str) -> None:
-        await self._route(channel_id).pin_message(channel_id, message_id)
-
-    async def unpin_message(self, channel_id: str, message_id: str) -> None:
-        await self._route(channel_id).unpin_message(channel_id, message_id)
 
     def on_message(self, callback: MessageCallback) -> None:
         pass  # callbacks registered directly on each adapter

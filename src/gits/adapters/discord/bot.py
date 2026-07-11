@@ -39,7 +39,6 @@ from discord.ext import commands
 from ..base import (
     Button,
     ButtonCallback,
-    Embed,
     IncomingMessage,
     MessageCallback,
     OutgoingMessage,
@@ -253,8 +252,6 @@ class DiscordAdapter(PlatformAdapter):
                     kwargs["file"] = discord.File(
                         io.BytesIO(msg.image), filename="screenshot.png"
                     )
-                if msg.embed:
-                    kwargs["embed"] = self._build_embed(msg.embed)
                 if msg.select_options or msg.buttons:
                     kwargs["view"] = self._build_view(
                         button_rows=msg.buttons,
@@ -306,8 +303,6 @@ class DiscordAdapter(PlatformAdapter):
         kwargs: dict[str, Any] = {}
         if msg.text is not None:
             kwargs["content"] = msg.text[:2000]
-        if msg.embed:
-            kwargs["embed"] = self._build_embed(msg.embed)
         if msg.select_options or msg.buttons:
             kwargs["view"] = self._build_view(
                 button_rows=msg.buttons,
@@ -325,22 +320,6 @@ class DiscordAdapter(PlatformAdapter):
 
         message = await channel.fetch_message(int(message_id))
         await message.delete()
-
-    async def pin_message(self, channel_id: str, message_id: str) -> None:
-        """Pin a Discord message (lifecycle cards, 0002 §5.2)."""
-        channel = self.bot.get_channel(int(channel_id))
-        if channel is None:
-            channel = await self.bot.fetch_channel(int(channel_id))
-        message = await channel.fetch_message(int(message_id))
-        await message.pin()
-
-    async def unpin_message(self, channel_id: str, message_id: str) -> None:
-        """Unpin a Discord message."""
-        channel = self.bot.get_channel(int(channel_id))
-        if channel is None:
-            channel = await self.bot.fetch_channel(int(channel_id))
-        message = await channel.fetch_message(int(message_id))
-        await message.unpin()
 
     def on_message(self, callback: MessageCallback) -> None:
         self._message_callbacks.append(callback)
@@ -1528,26 +1507,6 @@ class DiscordAdapter(PlatformAdapter):
                 pass
 
         return choices[:25]
-
-    # ------------------------------------------------------------------
-    # Embed builder
-    # ------------------------------------------------------------------
-
-    def _build_embed(self, embed: Embed) -> discord.Embed:
-        """Convert our platform-agnostic Embed model to a discord.py Embed."""
-        kwargs: dict[str, Any] = {}
-        if embed.title:
-            kwargs["title"] = embed.title[:256]
-        if embed.description:
-            kwargs["description"] = embed.description[:4096]
-        if embed.color is not None:
-            kwargs["color"] = embed.color
-        de = discord.Embed(**kwargs)
-        for name, value, inline in embed.fields[:25]:
-            de.add_field(name=name[:256], value=(value or "​")[:1024], inline=inline)
-        if embed.footer:
-            de.set_footer(text=embed.footer[:2048])
-        return de
 
     # ------------------------------------------------------------------
     # Button builder
