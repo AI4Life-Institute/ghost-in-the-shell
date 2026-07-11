@@ -22,8 +22,11 @@ from ..config import Settings
 from ..telemetry import platform_for, track
 from .account import AccountLayout, SwitchResult, effective_account
 from .account_vault import AccountVault
-from .builder_event_monitor import BuilderEvent, BuilderEventMonitor
+from .builder_event_monitor import BuilderEventMonitor
+from .builder_humans import BuilderHumans
 from .builder_registry import BuilderRegistry
+from .builder_renderer import BuilderRenderer
+from .builder_response import BuilderResponseAdapter
 from .guard import GuardHandler
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
@@ -125,11 +128,10 @@ class Engine:
             tmux=self.tmux,
         )
 
-        # Builder-OS consumer (G1 + G2, 0002 §5.1/§5.4). Dormant until a ticket
-        # is registered in ~/.gits/builder_tickets.json — the poll loop is a
-        # stat-and-sleep no-op with no registry, so this is zero behavior change
-        # for every non-builder install. T7 wires a real renderer onto the seam;
-        # here the default sinks just log (see _on_builder_event/_on_builder_fault).
+        # Builder-OS consumer (G1–G4, 0002 §5.1/§5.4/§5.2/§5.6). Dormant until a
+        # ticket is registered in ~/.gits/builder_tickets.json — the poll loop is
+        # a stat-and-sleep no-op with no registry, so this is zero behavior
+        # change for every non-builder install.
         self.builder_registry = BuilderRegistry(
             registry_file=settings.builder_tickets_file,
             builder_os_root=settings.builder_os_root,
@@ -138,6 +140,24 @@ class Engine:
             registry=self.builder_registry,
             offsets_file=settings.builder_event_offsets_file,
             poll_interval=settings.builder_event_poll_interval,
+        )
+        # G3 renderer + G4 response adapter (T7). The renderer consumes the
+        # monitor's on_event/on_fault seam; the response adapter handles the
+        # authenticated human-input path off button clicks.
+        self.builder_renderer = BuilderRenderer(
+            registry=self.builder_registry,
+            state_file=settings.builder_renderer_state_file,
+            coalesce_seconds=settings.builder_progress_coalesce_seconds,
+        )
+        self.builder_humans = BuilderHumans(humans_file=settings.builder_humans_file)
+        self.builder_response = BuilderResponseAdapter(
+            humans=self.builder_humans,
+            registry=self.builder_registry,
+            renderer=self.builder_renderer,
+            builder_os_cmd=settings.builder_os_cmd,
+            builder_os_root=settings.builder_os_root,
+            forced_forward_log=settings.builder_forced_forward_log,
+            nudge=self._builder_nudge,
         )
 
         # Subscription credential vault (multi-account hot-swap).
@@ -187,6 +207,10 @@ class Engine:
     def set_adapter(self, adapter: Any) -> None:
         """Set the platform adapter."""
         self._adapter = adapter
+        # The builder renderer + response adapter post/edit/pin through the same
+        # adapter (0002 §5.2/§5.6).
+        self.builder_renderer.set_adapter(adapter)
+        self.builder_response.set_adapter(adapter)
 
     async def start(self) -> None:
         """Start the engine: ensure tmux session, start health monitor."""
@@ -236,9 +260,10 @@ class Engine:
         self.jsonl_monitor.start()
 
         # Start builder-os event monitoring (dormant until a ticket registers).
-        # Default seam = log only; T7 replaces these with the renderer/adapter.
-        self.builder_event_monitor.on_event(self._on_builder_event)
-        self.builder_event_monitor.on_fault(self._on_builder_fault)
+        # G3 renderer consumes the seam (cards, pins, mirrors, coalescing);
+        # G4 response adapter handles button clicks (see handle_button_click).
+        self.builder_event_monitor.on_event(self.builder_renderer.on_event)
+        self.builder_event_monitor.on_fault(self.builder_renderer.on_fault)
         self.builder_event_monitor.start()
 
         # Quota notifier (no-op until subscriptions are registered)
@@ -430,6 +455,24 @@ class Engine:
                 msg.channel_id,
                 (msg.text or "")[:50],
             )
+            return
+
+        # Builder-OS suppression while BLOCKED (0002 §5.3). This is the ONE
+        # existing-path touch. It is gated strictly on a builder-bound binding
+        # WITH an open decision: `builder_ticket_uid` is None for every ordinary
+        # (non-builder) binding, so the monitor is never even consulted and
+        # forwarding for non-builder channels is byte-identical (regression).
+        builder_uid = getattr(binding, "builder_ticket_uid", None)
+        if (
+            builder_uid
+            and msg.text
+            and self.builder_event_monitor.is_suppressed(builder_uid)
+        ):
+            logger.info(
+                "Holding message for builder ticket %s (open decision) — "
+                "not forwarding to pane", builder_uid,
+            )
+            await self.builder_renderer.render_guided_reply(builder_uid, msg.channel_id)
             return
 
         if msg.text or msg.image_paths:
@@ -2516,7 +2559,14 @@ class Engine:
         - ``prompt_abort:{window_id}`` — send Ctrl-C
         - ``bind_resume:{channel_id}:{index}`` — resume existing session
         - ``bind_new:{channel_id}`` — start fresh session
+        - ``bos|…`` — builder-os decision/observation (handled by G4 adapter)
         """
+        # Builder-OS decision/observation buttons (0002 §5.6). Routed first;
+        # returns False for every non-builder callback so the handling below is
+        # provably unaffected.
+        if await self.builder_response.handle_click(channel_id, user_id, callback_data):
+            return
+
         parts = callback_data.split(":")
         if len(parts) < 2:
             logger.warning("Invalid callback_data: %s", callback_data)
@@ -2708,31 +2758,57 @@ class Engine:
         )
 
     # ------------------------------------------------------------------
-    # Builder-OS event monitor seam (0002 §5.4)
-    #
-    # T7 (renderer/adapter) replaces these defaults. Until then the monitor is
-    # fully exercised (validation, fold, offsets, receipts, freeze) with a
-    # trivial log-only consumer, so T7 plugs in without reworking the monitor.
+    # Builder-OS nudge injection (0002 §7.4)
     # ------------------------------------------------------------------
 
-    async def _on_builder_event(self, ticket_uid: str, event: BuilderEvent) -> str | None:
-        """Default renderer seam: log the event. Returns the posted message id.
+    async def _builder_nudge(self, ticket_uid: str, line: str) -> None:
+        """Inject one structured hint line into the driver pane (§7.4).
 
-        T7 posts a lifecycle card and returns its Discord message id (recorded in
-        the projection receipt for dedup). The default returns None — receipts
-        still key on event_id, so replay dedup works without a real message id.
+        Reuses the ordinary send-keys forwarding machinery. Nudges are hints,
+        not state: a lost nudge is recovered by the model running
+        ``builder-os driver status``, so a missing binding/window is logged and
+        swallowed rather than raised.
         """
-        logger.info(
-            "builder event ticket=%s seq=%d type=%s state=%s: %s",
-            ticket_uid, event.sequence, event.type, event.state, event.summary,
-        )
+        binding = self._binding_for_ticket(ticket_uid)
+        if binding is None:
+            logger.info("builder nudge for %s dropped — no bound pane", ticket_uid)
+            return
+        try:
+            await self._ensure_window_alive(binding)
+            await self.tmux.send_text(
+                binding.window_id, line,
+                submit_keys=_submit_keys_for_cli(binding.coding_cli),
+            )
+        except Exception:
+            logger.warning("builder nudge send failed for %s", ticket_uid, exc_info=True)
+
+    def _binding_for_ticket(self, ticket_uid: str):
+        """The SessionBinding whose ``builder_ticket_uid`` matches (or None)."""
+        for binding in self.session_mgr.list_bindings():
+            if getattr(binding, "builder_ticket_uid", None) == ticket_uid:
+                return binding
         return None
 
-    async def _on_builder_fault(self, ticket_uid: str, kind: str, detail: str) -> None:
-        """Default fault seam: log the freeze. T7 renders the fault/tamper card."""
-        logger.warning(
-            "builder ticket %s frozen (%s): %s", ticket_uid, kind, detail
+    async def forced_forward(self, channel_id: str, user_id: str, text: str) -> bool:
+        """`/bos forward` mechanics (§5.3): bypass suppression, audit, inject.
+
+        Records a ghost-side audit entry (§5.5 — ghost never writes builder-os
+        runtime state) and forwards ``text`` straight to the pane, ignoring the
+        suppression gate. No lifecycle effect. Returns True if forwarded. The
+        ``/bos forward`` *command* that calls this is T8; the mechanics + audit
+        record land here (T7).
+        """
+        binding = self.session_mgr.get_binding(channel_id)
+        uid = getattr(binding, "builder_ticket_uid", None) if binding else None
+        if binding is None or not uid:
+            return False
+        await self.builder_response.record_forced_forward(uid, user_id, text)
+        await self._ensure_window_alive(binding)
+        await self.tmux.send_text(
+            binding.window_id, text,
+            submit_keys=_submit_keys_for_cli(binding.coding_cli),
         )
+        return True
 
     # ------------------------------------------------------------------
     # Pane monitor callbacks
