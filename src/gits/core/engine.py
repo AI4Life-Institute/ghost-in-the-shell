@@ -22,6 +22,8 @@ from ..config import Settings
 from ..telemetry import platform_for, track
 from .account import AccountLayout, SwitchResult, effective_account
 from .account_vault import AccountVault
+from .builder_event_monitor import BuilderEvent, BuilderEventMonitor
+from .builder_registry import BuilderRegistry
 from .guard import GuardHandler
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
@@ -123,6 +125,21 @@ class Engine:
             tmux=self.tmux,
         )
 
+        # Builder-OS consumer (G1 + G2, 0002 §5.1/§5.4). Dormant until a ticket
+        # is registered in ~/.gits/builder_tickets.json — the poll loop is a
+        # stat-and-sleep no-op with no registry, so this is zero behavior change
+        # for every non-builder install. T7 wires a real renderer onto the seam;
+        # here the default sinks just log (see _on_builder_event/_on_builder_fault).
+        self.builder_registry = BuilderRegistry(
+            registry_file=settings.builder_tickets_file,
+            builder_os_root=settings.builder_os_root,
+        )
+        self.builder_event_monitor = BuilderEventMonitor(
+            registry=self.builder_registry,
+            offsets_file=settings.builder_event_offsets_file,
+            poll_interval=settings.builder_event_poll_interval,
+        )
+
         # Subscription credential vault (multi-account hot-swap).
         # Lazy: only meaningful once user runs `gits subscription add`.
         self.subscription_vault = SubscriptionVault(settings.subscriptions_dir)
@@ -218,6 +235,12 @@ class Engine:
         self.jsonl_monitor.on_message(self._on_jsonl_message)
         self.jsonl_monitor.start()
 
+        # Start builder-os event monitoring (dormant until a ticket registers).
+        # Default seam = log only; T7 replaces these with the renderer/adapter.
+        self.builder_event_monitor.on_event(self._on_builder_event)
+        self.builder_event_monitor.on_fault(self._on_builder_fault)
+        self.builder_event_monitor.start()
+
         # Quota notifier (no-op until subscriptions are registered)
         await self.quota_notifier.start()
 
@@ -230,6 +253,7 @@ class Engine:
         """Stop the engine."""
         self.monitor.stop_all()
         self.jsonl_monitor.stop()
+        self.builder_event_monitor.stop()
         await self.quota_notifier.stop()
         await self.token_refresh.stop()
         await self.health.stop()
@@ -2681,6 +2705,33 @@ class Engine:
         await self._adapter.send_message(
             channel_id,
             OutgoingMessage(text=text),
+        )
+
+    # ------------------------------------------------------------------
+    # Builder-OS event monitor seam (0002 §5.4)
+    #
+    # T7 (renderer/adapter) replaces these defaults. Until then the monitor is
+    # fully exercised (validation, fold, offsets, receipts, freeze) with a
+    # trivial log-only consumer, so T7 plugs in without reworking the monitor.
+    # ------------------------------------------------------------------
+
+    async def _on_builder_event(self, ticket_uid: str, event: BuilderEvent) -> str | None:
+        """Default renderer seam: log the event. Returns the posted message id.
+
+        T7 posts a lifecycle card and returns its Discord message id (recorded in
+        the projection receipt for dedup). The default returns None — receipts
+        still key on event_id, so replay dedup works without a real message id.
+        """
+        logger.info(
+            "builder event ticket=%s seq=%d type=%s state=%s: %s",
+            ticket_uid, event.sequence, event.type, event.state, event.summary,
+        )
+        return None
+
+    async def _on_builder_fault(self, ticket_uid: str, kind: str, detail: str) -> None:
+        """Default fault seam: log the freeze. T7 renders the fault/tamper card."""
+        logger.warning(
+            "builder ticket %s frozen (%s): %s", ticket_uid, kind, detail
         )
 
     # ------------------------------------------------------------------

@@ -1,0 +1,99 @@
+# VENDORED, MINIMAL copy of builder-os contract/schemas/driver-event.schema.yaml
+# (+ the common.schema.yaml $defs it references), trimmed for ghost's G2
+# consumer per 0002 §10.2 ("ghost vendors a copy at G2 build time; protocol
+# field guards divergence").
+#
+# SCOPE OF THIS COPY (deliberately minimal — 0002 §5.4, T6 ghost note):
+#   * the envelope's required fields,
+#   * the protocol const (the divergence guard),
+#   * the closed `type` enum,
+#   * the full lifecycle `state` enum, and
+#   * the per-type `state` set (the normative §4.4 catalog's type->state binding).
+# It intentionally OMITS the per-type payload `$defs`: ghost validates the
+# envelope + type->state binding only; payload shape is builder-os's concern and
+# is re-checked there. T9 cross-checks this copy against builder-os's real
+# jsonschema validation.
+#
+# `builder_schema.py` builds its validator tables from Python constants; a test
+# (test_builder_schema.py) asserts those constants equal THIS file field-for-
+# field, so any drift between the two is caught mechanically.
+#
+# Source of record: builder-os design/0002-mvp-engineering-design.md v4.1 §4.1,
+# §4.4; contract/schemas/{driver-event,common}.schema.yaml.
+source: builder-os:contract/schemas/driver-event.schema.yaml
+protocol: 1
+
+# The envelope's required top-level keys (0002 §4.1; driver-event `required`).
+envelope_required:
+  - protocol
+  - event_id
+  - sequence
+  - occurred_at
+  - ticket_uid
+  - driver_session_id
+  - epoch
+  - role
+  - type
+  - state
+  - summary
+  - payload
+
+# Full lifecycle state set (0001 §5.1 amended: REVIEW_INCONCLUSIVE, HALTED,
+# CLEANUP_FAILED). Instance `state` MUST be in this set.
+states:
+  - CREATED
+  - ADMISSION_CHECK
+  - ADMITTED
+  - PROVISIONED
+  - ACTIVE
+  - BLOCKED
+  - CANDIDATE_READY
+  - REVIEWING
+  - REVIEW_INCONCLUSIVE
+  - CR_REWORK
+  - DISPOSITION_CHECK
+  - READY_FOR_HUMAN
+  - DISPOSED
+  - CLEANUP
+  - TERMINATED
+  - HALTED
+  - CLEANUP_FAILED
+  - FAILED
+
+# type -> allowed `state` set (the normative §4.4 catalog binding). `const` in
+# the source becomes a one-element list here; the three contextual types
+# (driver.resumed, eva.*, driver.disposed) carry their enum.
+type_states:
+  driver.started: [ACTIVE]
+  driver.progress: [ACTIVE]
+  driver.checkpointed: [ACTIVE]
+  driver.blocked: [BLOCKED]
+  driver.human_input_required: [BLOCKED]
+  driver.escalation_requested: [BLOCKED]
+  driver.human_input_consumed: [ACTIVE]
+  driver.resumed: [ACTIVE, BLOCKED, REVIEWING, REVIEW_INCONCLUSIVE, CR_REWORK, DISPOSITION_CHECK]
+  driver.halted: [HALTED]
+  driver.cleanup_failed: [CLEANUP_FAILED]
+  driver.failed: [FAILED]
+  review.started: [REVIEWING]
+  review.approved: [DISPOSITION_CHECK]
+  review.changes_requested: [CR_REWORK]
+  review.unknown: [REVIEW_INCONCLUSIVE]
+  eva.conforming: [ADMISSION_CHECK, ACTIVE, BLOCKED, REVIEW_INCONCLUSIVE, DISPOSITION_CHECK, READY_FOR_HUMAN, HALTED]
+  eva.revise: [ADMISSION_CHECK, ACTIVE, BLOCKED, REVIEW_INCONCLUSIVE, DISPOSITION_CHECK, READY_FOR_HUMAN, HALTED]
+  eva.escalate: [ADMISSION_CHECK, ACTIVE, BLOCKED, REVIEW_INCONCLUSIVE, DISPOSITION_CHECK, READY_FOR_HUMAN, HALTED]
+  eva.unknown: [ADMISSION_CHECK, ACTIVE, BLOCKED, REVIEW_INCONCLUSIVE, DISPOSITION_CHECK, READY_FOR_HUMAN, HALTED]
+  driver.ready_for_human: [READY_FOR_HUMAN]
+  driver.disposed: [DISPOSED, CLEANUP]
+  driver.terminated: [TERMINATED]
+
+# Decision-opening event types: their payload carries a `decision_id` that opens
+# an outstanding human decision (0002 §7.2, §5.3). Used by the monitor's fold to
+# compute the suppression flag. `driver.blocked` carries decision_id for
+# crash-consistency (schema comment on payload_driver_blocked).
+decision_open_types:
+  - driver.blocked
+  - driver.human_input_required
+  - driver.escalation_requested
+# The event type that closes an open decision (the durable ack, §4.5).
+decision_close_type: driver.human_input_consumed
