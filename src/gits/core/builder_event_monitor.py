@@ -64,10 +64,6 @@ FREEZE_PROTOCOL = "unknown_protocol"
 FREEZE_SEQUENCE = "sequence_gap"
 
 
-class _SequenceError(Exception):
-    """Internal: per-``driver_session_id`` sequence gap / out-of-order."""
-
-
 @dataclass
 class BuilderEvent:
     """A validated driver event handed to the renderer seam (0002 §4.1).
@@ -300,15 +296,21 @@ class BuilderEventMonitor:
             # Genuinely new lines (appended after the fold) advance the sequence
             # cursor and the projection here.
             is_new = line_end > fold_eof
-            if is_new:
-                try:
-                    self._check_sequence(proj, ev)
-                except _SequenceError as e:
-                    await self._freeze(uid, FREEZE_SEQUENCE, str(e))
-                    self._commit(uid, committed, stat.st_mtime)
-                    return
+            if is_new and not self._sequence_ok(proj, ev):
+                await self._freeze(
+                    uid, FREEZE_SEQUENCE,
+                    f"sequence {ev.sequence} != expected "
+                    f"{proj.seq_by_session.get(ev.driver_session_id, 0) + 1} "
+                    f"for driver_session {ev.driver_session_id}",
+                )
+                self._commit(uid, committed, stat.st_mtime)
+                return
 
-            # Deliver-then-advance with durable receipt dedup (§4.3).
+            # Deliver-then-advance with durable receipt dedup (§4.3). The sequence
+            # cursor and projection advance ONLY after durable acceptance (below),
+            # so a transient dispatch failure pins the offset with the cursor
+            # unchanged — the retry re-reads the same line and re-checks cleanly
+            # instead of tripping a spurious gap and freezing forever.
             eid = ev.event_id
             if eid not in receipts:
                 delivered = await self._dispatch(uid, ev, receipts)
@@ -318,7 +320,7 @@ class BuilderEventMonitor:
                     return
 
             if is_new:
-                self._apply(proj, ev)
+                self._apply(proj, ev)  # advances seq cursor + last_state/decision
             committed = line_end
             self._offsets[uid] = committed
             self._dirty = True
@@ -383,10 +385,13 @@ class BuilderEventMonitor:
                 await self._freeze(uid, FREEZE_SCHEMA, str(e))
                 return
             ev = BuilderEvent(uid, obj)
-            try:
-                self._check_sequence(proj, ev)
-            except _SequenceError as e:
-                await self._freeze(uid, FREEZE_SEQUENCE, str(e))
+            if not self._sequence_ok(proj, ev):
+                await self._freeze(
+                    uid, FREEZE_SEQUENCE,
+                    f"sequence {ev.sequence} != expected "
+                    f"{proj.seq_by_session.get(ev.driver_session_id, 0) + 1} "
+                    f"for driver_session {ev.driver_session_id}",
+                )
                 return
             self._apply(proj, ev)
         self._proj[uid] = proj
@@ -399,24 +404,29 @@ class BuilderEventMonitor:
     # -- projection maths ---------------------------------------------------
 
     @staticmethod
-    def _check_sequence(proj: Projection, ev: BuilderEvent) -> None:
-        """Per-``driver_session_id`` gap-free-from-1 check (0002 §4.1).
+    def _sequence_ok(proj: Projection, ev: BuilderEvent) -> bool:
+        """Per-``driver_session_id`` gap-free-from-1 check (0002 §4.1) — pure.
 
         The sequence resets per driver_session_id, so a single log spanning
         resumes/restarts (multiple sessions) is fine — each session must still be
-        gap-free and monotonic. Any deviation (gap or out-of-order) raises.
+        gap-free and monotonic. This is **non-mutating**: the cursor is advanced
+        only by :meth:`_apply`, and only after an event is durably accepted, so a
+        pinned-then-retried line re-checks against the same expected value rather
+        than tripping a spurious gap (deliver-then-advance, §4.3).
         """
-        sid = ev.driver_session_id
-        expected = proj.seq_by_session.get(sid, 0) + 1
-        if ev.sequence != expected:
-            raise _SequenceError(
-                f"sequence {ev.sequence} != expected {expected} for driver_session {sid}"
-            )
-        proj.seq_by_session[sid] = ev.sequence
+        expected = proj.seq_by_session.get(ev.driver_session_id, 0) + 1
+        return ev.sequence == expected
 
     @staticmethod
     def _apply(proj: Projection, ev: BuilderEvent) -> None:
-        """Fold one event into the projection (last_state + decision/suppression)."""
+        """Commit one accepted event into the projection.
+
+        Advances the per-``driver_session_id`` sequence cursor together with
+        ``last_state`` and the decision/suppression flag. Called only after the
+        event is durably accepted (dispatched+receipted, or already receipted),
+        so the cursor never runs ahead of what has actually been delivered.
+        """
+        proj.seq_by_session[ev.driver_session_id] = ev.sequence
         proj.last_state = ev.state
         etype = ev.type
         if etype in DECISION_OPEN_TYPES:

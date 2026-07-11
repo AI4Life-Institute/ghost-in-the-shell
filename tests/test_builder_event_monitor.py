@@ -185,6 +185,34 @@ class TestDelivery:
         await mon._poll_once()
         assert sink.ids() == ["evt-drv-1-1", "evt-drv-1-2", "evt-drv-1-3"]
 
+    async def test_live_append_dispatch_failure_does_not_freeze(self, tmp_path):
+        # Regression (CR round 1 blocker): a live-appended event (is_new, so the
+        # sequence path runs) whose dispatch fails once must retry cleanly — the
+        # sequence cursor must NOT advance past a non-delivered event, else the
+        # retry re-reads the same line, sees a spurious gap, and freezes forever.
+        mon, sink, paths = setup(tmp_path, {
+            "builder-os:17": [make_event(1, "driver.started", "ACTIVE")],
+        })
+        await mon._poll_once()  # seq 1 folded + delivered; fold_eof set here
+        assert sink.ids() == ["evt-drv-1-1"]
+        # Append seq 2 AFTER the fold (is_new=True) and fail its first dispatch.
+        with open(paths["builder-os:17"], "a") as f:
+            f.write(json.dumps(make_event(2, "driver.progress", "ACTIVE")) + "\n")
+        sink.fail_on = {"evt-drv-1-2"}
+        await mon._poll_once()
+        assert sink.ids() == ["evt-drv-1-1"]  # seq 2 pinned, not delivered
+        assert not mon.is_frozen("builder-os:17")  # must NOT freeze on retry
+        # Recover: seq 2 delivered exactly once, still not frozen.
+        sink.fail_on = set()
+        await mon._poll_once()
+        assert sink.ids() == ["evt-drv-1-1", "evt-drv-1-2"]
+        assert not mon.is_frozen("builder-os:17")
+        # And a subsequent in-sequence event still flows (cursor is correct).
+        with open(paths["builder-os:17"], "a") as f:
+            f.write(json.dumps(make_event(3, "driver.checkpointed", "ACTIVE")) + "\n")
+        await mon._poll_once()
+        assert sink.ids() == ["evt-drv-1-1", "evt-drv-1-2", "evt-drv-1-3"]
+
     async def test_at_least_once_residual_is_one_duplicate(self, tmp_path):
         # Honest at-least-once (supersedes issue #8 "exactly-once"): if a crash
         # lands after a successful post but before the receipt+offset persist,
