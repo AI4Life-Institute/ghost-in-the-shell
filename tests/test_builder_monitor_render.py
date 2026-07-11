@@ -109,3 +109,50 @@ async def test_crash_window_replay_renders_nothing_new(tmp_path):
     await monitor._poll_once()
     # The renderer's own persisted index dedups every replayed event.
     assert len(fake.sent) == n
+
+
+async def test_fault_crash_replay_renders_one_frozen_card(tmp_path):
+    # CR round 1 (major), fault edition of test_crash_window_replay: a re-fold
+    # that re-detects the freeze must not re-post/re-pin the frozen card (§4.3).
+    log = tmp_path / "events.jsonl"
+    good = _event(1, "driver.started", "ACTIVE")
+    bad = _event(2, "driver.progress", "ACTIVE")
+    bad["protocol"] = 2  # unknown protocol ⇒ the monitor freezes the ticket
+    log.write_text(json.dumps(good) + "\n" + json.dumps(bad) + "\n")
+
+    reg_file = tmp_path / "builder_tickets.json"
+    reg_file.write_text(json.dumps({UID: {
+        "runtime_dir": str(tmp_path), "event_log": str(log),
+        "channel_id": CHAN, "assistant_channel_id": ASSIST,
+        "driver_session_id": "drv-1", "capability_token": "cap",
+    }}))
+    reg = BuilderRegistry(registry_file=reg_file)
+    renderer = BuilderRenderer(reg, state_file=tmp_path / "renderer.json",
+                               coalesce_seconds=60.0, clock=lambda: 0.0)
+    fake = FakeAdapter()
+    renderer.set_adapter(fake)
+    monitor = BuilderEventMonitor(reg, offsets_file=tmp_path / "offsets.json")
+    monitor.on_event(renderer.on_event)
+    monitor.on_fault(renderer.on_fault)
+
+    await monitor._poll_once()
+    assert monitor.is_frozen(UID) is True
+    # One freeze = one thread card (+ one mirror). Count the thread card only.
+    thread_faults = [m for (ch, m) in fake.sent
+                     if ch == CHAN and m.embed and "frozen" in (m.embed.title or "").lower()]
+    assert len(thread_faults) == 1
+    n_sent, n_pinned = len(fake.sent), len(fake.pinned)
+
+    # Crash before durable state persisted: wipe frozen + fold state too.
+    monitor._offsets.clear()
+    monitor._mtimes.clear()
+    monitor._receipts.clear()
+    monitor._folded.clear()
+    monitor._proj.clear()
+    monitor._fold_eof.clear()
+    monitor._frozen.clear()
+
+    await monitor._poll_once()
+    assert monitor.is_frozen(UID) is True   # re-detected …
+    assert len(fake.sent) == n_sent          # … but the frozen card is not re-posted
+    assert len(fake.pinned) == n_pinned      # nor re-pinned

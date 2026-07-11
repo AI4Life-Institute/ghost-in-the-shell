@@ -232,6 +232,40 @@ async def test_fault_renders_pinned_mirrored_card(tmp_path):
     assert fake.pinned  # pinned
 
 
+async def test_fault_replay_renders_nothing_new(tmp_path):
+    # CR round 1 (major): on_fault must share on_event's replay/dedup guard —
+    # a re-fold / crash-replay that re-freezes a ticket must NOT re-post or
+    # re-pin the freeze card (§4.3). Old code (fault path with no guard) posted
+    # + pinned twice; this asserts exactly one.
+    r, fake = _renderer(tmp_path)
+    await r.on_fault(UID, "sequence_gap", "sequence 5 != expected 4")
+    n_sent, n_pinned = len(fake.sent), len(fake.pinned)
+    assert n_sent >= 1 and n_pinned >= 1
+
+    # The monitor re-emits the same freeze on the next poll after a re-fold.
+    await r.on_fault(UID, "sequence_gap", "sequence 5 != expected 4")
+    assert len(fake.sent) == n_sent      # no extra card (thread or mirror)
+    assert len(fake.pinned) == n_pinned  # not re-pinned
+
+
+async def test_fault_dedup_survives_reload(tmp_path):
+    # The fault dedup key is persisted, so a fresh renderer (restart) still
+    # dedups a replayed freeze — the crash-replay scenario, fault edition.
+    r, fake = _renderer(tmp_path)
+    await r.on_fault(UID, "schema_invalid", "unparseable line at byte 40")
+    n_sent = len(fake.sent)
+
+    reg = _registry(tmp_path)
+    r2 = BuilderRenderer(reg, state_file=tmp_path / "renderer.json",
+                         coalesce_seconds=60.0, clock=lambda: 0.0)
+    fake2 = FakeAdapter()
+    r2.set_adapter(fake2)
+    await r2.on_fault(UID, "schema_invalid", "unparseable line at byte 40")
+    assert n_sent >= 1
+    assert fake2.sent == []      # nothing re-posted after restart
+    assert fake2.pinned == []    # nothing re-pinned
+
+
 # --- dedup / crash-window repair (§4.3) ------------------------------------
 
 async def test_replayed_event_renders_nothing_new(tmp_path):

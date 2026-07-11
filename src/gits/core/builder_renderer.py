@@ -237,7 +237,19 @@ class BuilderRenderer:
     # -- per-class handlers -------------------------------------------------
 
     async def _on_progress(self, uid: str, ev: BuilderEvent) -> str | None:
-        """Coalesce: ≤1 rendered line per ticket per ``coalesce_seconds`` (F7)."""
+        """Coalesce: ≤1 rendered line per ticket per ``coalesce_seconds`` (F7).
+
+        NOTE (bounded, safe-to-lose): a *coalesced* progress event returns None
+        and is deliberately NOT written to the dedup index, and the coalescing
+        window (``self._progress``) is transient (not persisted). So a crash /
+        restart that replays events (T6's at-least-once window) can re-render at
+        most one progress line per ticket — the first of the post-restart window
+        — which was previously coalesced away. This is intentional: progress is
+        cosmetic and unpinned, so a rare duplicate line costs nothing, whereas
+        persisting per-progress dedup state would add a write per progress event
+        purely to suppress a harmless cosmetic dup. Lifecycle cards (the pinned,
+        load-bearing surface) ARE indexed and never duplicate.
+        """
         st = self._progress.setdefault(uid, {"last": None, "elided": 0})
         now = self._clock()
         note = ev.payload.get("note") or ev.summary or ""
@@ -480,7 +492,20 @@ class BuilderRenderer:
 
         Returns the thread message id, which is what the monitor receipts. The
         thread id is stored in our own dedup index synchronously so a T6 replay
-        renders nothing new."""
+        renders nothing new.
+
+        The dedup guard lives HERE (keyed on ``event_id or dedup_key``) rather
+        than only in :meth:`on_event`, so it also covers :meth:`on_fault` — a
+        crash-replay / log re-fold that re-freezes a ticket must not re-post and
+        re-pin the freeze card (§4.3), exactly as it must not re-post an event
+        card. ``on_event`` still short-circuits earlier for efficiency; this is
+        the load-bearing guard for the fault path, which has no such pre-check.
+        """
+        ts = self._ticket_state(uid)
+        key = event_id or dedup_key
+        if key in ts["events"]:
+            return ts["events"][key]
+
         ticket = self._registry.get(uid)
         self._last_mirror_id = None
         if ticket is None or not ticket.channel_id:
@@ -493,8 +518,7 @@ class BuilderRenderer:
             # Post failed: raise so the monitor pins + retries (don't record).
             raise RuntimeError(f"card post failed for {uid}")
 
-        ts = self._ticket_state(uid)
-        ts["events"][event_id or dedup_key] = thread_id
+        ts["events"][key] = thread_id
         await self._persist()  # durable BEFORE returning to the monitor
 
         if pin:
