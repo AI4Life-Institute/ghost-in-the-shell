@@ -50,6 +50,14 @@ class SessionBinding:
     # engine-owned worktrees (safe to delete) from user worktrees we just
     # happen to be bound to (must preserve — see task [[23do0p]]).
     owned_worktree: bool = False
+    # Builder-OS G1 pointers (0002 §5.1; omitted-when-None, same pattern as
+    # ``claude_account``). Convenience only, for inbound routing ("which ticket
+    # does this thread belong to"); the authoritative record is
+    # ``~/.gits/builder_tickets.json`` (see :mod:`gits.core.builder_registry`),
+    # so loss of these fields is recoverable and nothing load-bearing lives here
+    # (F3: ``_binding_from_dict`` silently drops unknown fields).
+    builder_ticket_uid: str | None = None
+    builder_runtime_dir: str | None = None
 
 
 def _binding_to_dict(b: SessionBinding) -> dict:
@@ -66,6 +74,10 @@ def _binding_to_dict(b: SessionBinding) -> dict:
         data.pop("respawn_failed", None)
     if data.get("owned_worktree") is False:
         data.pop("owned_worktree", None)
+    if data.get("builder_ticket_uid") is None:
+        data.pop("builder_ticket_uid", None)
+    if data.get("builder_runtime_dir") is None:
+        data.pop("builder_runtime_dir", None)
     # first_interaction_at is a transient in-memory signal — never persist it.
     data.pop("first_interaction_at", None)
     return data
