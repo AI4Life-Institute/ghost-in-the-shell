@@ -139,6 +139,14 @@ class BuilderEventMonitor:
         # Persisted per-ticket state.
         self._offsets: dict[str, int] = {}
         self._mtimes: dict[str, float] = {}
+        # uid -> {event_id -> receipt}. NOTE (MVP bound): receipts grow O(events)
+        # per ticket and the whole store is rewritten on each debounced save.
+        # They are retained for the ticket's lifetime ON PURPOSE — the shrink /
+        # torn-tail self-heal re-reads from byte 0 and relies on them to dedup
+        # already-delivered events, so pruning below the offset would reintroduce
+        # duplicate dispatch on self-heal. For MVP ticket sizes (hundreds of
+        # events, short-lived) this is negligible; bounded pruning keyed to a
+        # ticket-terminated signal is post-MVP.
         self._receipts: dict[str, dict[str, dict]] = {}
         self._frozen: dict[str, str] = {}  # uid -> freeze reason
 
@@ -260,8 +268,23 @@ class BuilderEventMonitor:
 
         if stat.st_size < last_offset:
             # Append-only logs don't shrink except builder-os's torn-tail
-            # self-heal (§4.3). Reset and let receipts dedup any re-read.
-            logger.info("Builder event log for %s shrank — resetting offset", uid)
+            # self-heal (§4.3: back up + truncate an invalid trailing line). We
+            # must re-read from byte 0 — but a bare offset reset would leave
+            # `fold_eof` and the per-session sequence cursor at their live-
+            # advanced values, so re-read post-fold events would be `is_new` and
+            # hit the sequence gate (cursor already ahead) BEFORE receipt dedup —
+            # a spurious, permanent freeze that turns the designed self-heal
+            # fatal. So re-run the FULL startup fold: it rebuilds the projection,
+            # `fold_eof`, and cursors from the shrunken log, after which every
+            # surviving line is at/below `fold_eof` (dedup via receipts, no
+            # sequence gate) and only genuinely-new appends are sequence-checked.
+            logger.info("Builder event log for %s shrank — re-folding (self-heal)", uid)
+            self._folded.discard(uid)
+            self._proj.pop(uid, None)
+            self._fold_eof.pop(uid, None)
+            await self._fold(ticket)
+            if uid in self._frozen:
+                return
             last_offset = 0
 
         items, consumed = await asyncio.to_thread(self._read_lines, path, last_offset)

@@ -235,6 +235,41 @@ class TestDelivery:
         # Exactly one re-delivery (event2); event1 stays deduped by its receipt.
         assert sink2.ids() == ["evt-drv-1-2"]
 
+    async def test_shrink_refolds_and_self_heals(self, tmp_path):
+        # Regression (CR round 2 blocker): builder-os's torn-tail self-heal
+        # (§4.3) truncates an invalid trailing line, shrinking the log below the
+        # persisted offset. The shrink handler must RE-FOLD, not just reset the
+        # offset — otherwise the live-advanced sequence cursor trips the gate on
+        # re-read (before receipt dedup) and freezes forever.
+        #
+        # Constructed so the fatal path actually runs: startup fold sees only
+        # e1, then e2/e3 arrive live (cursor advances past fold_eof).
+        mon, sink, paths = setup(tmp_path, {
+            "builder-os:17": [make_event(1, "driver.started", "ACTIVE")],
+        })
+        await mon._poll_once()
+        log = paths["builder-os:17"]
+        for e in (make_event(2, "driver.progress", "ACTIVE"),
+                  make_event(3, "driver.checkpointed", "ACTIVE")):
+            with open(log, "a") as f:
+                f.write(json.dumps(e) + "\n")
+        await mon._poll_once()
+        assert sink.ids() == ["evt-drv-1-1", "evt-drv-1-2", "evt-drv-1-3"]
+        # Self-heal: last (torn) line truncated → file now smaller than offset.
+        write_log(log, [make_event(1, "driver.started", "ACTIVE"),
+                        make_event(2, "driver.progress", "ACTIVE")])
+        await mon._poll_once()
+        assert not mon.is_frozen("builder-os:17")  # <-- freezes under the old code
+        # Survivors deduped via receipts — no re-dispatch.
+        assert sink.ids() == ["evt-drv-1-1", "evt-drv-1-2", "evt-drv-1-3"]
+        # A fresh, correctly-sequenced tail flows again after the self-heal.
+        with open(log, "a") as f:
+            f.write(json.dumps(
+                make_event(3, "driver.checkpointed", "ACTIVE", eid="evt-3b")) + "\n")
+        await mon._poll_once()
+        assert not mon.is_frozen("builder-os:17")
+        assert "evt-3b" in sink.ids()
+
 
 # -- AC3: startup fold / suppression -----------------------------------------
 
