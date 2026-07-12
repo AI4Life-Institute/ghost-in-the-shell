@@ -151,8 +151,14 @@ class SessionManager:
         permission_mode: str | None = None,
         claude_account: str | None = None,
         owned_worktree: bool = False,
+        builder_ticket_uid: str | None = None,
     ) -> SessionBinding:
-        """Create or update a binding."""
+        """Create or update a binding.
+
+        ``builder_ticket_uid`` (G6/T8) marks a binding as a builder-os ticket's
+        driver pane, so ``_binding_for_ticket`` / suppression / forced-forward can
+        find it. Left ``None`` for every ordinary bind.
+        """
         binding = SessionBinding(
             platform=platform,
             channel_id=channel_id,
@@ -166,6 +172,7 @@ class SessionManager:
             permission_mode=permission_mode,
             claude_account=claude_account,
             owned_worktree=owned_worktree,
+            builder_ticket_uid=builder_ticket_uid,
         )
         self._bindings[channel_id] = binding
         await self._save()
