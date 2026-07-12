@@ -133,6 +133,16 @@ class Settings(BaseSettings):
         return self.state_dir / "builder_renderer.json"
 
     @property
+    def builder_start_journal_file(self) -> Path:
+        """Crash-safe ``/bos start`` token journal (B2).
+
+        Records the minted capability token before ``ticket admit`` so a crash
+        between admit and the registry write can be retried without minting a new
+        token (which would strand every later human response as unauthorized).
+        """
+        return self.state_dir / "builder_start_journal.json"
+
+    @property
     def builder_forced_forward_log(self) -> Path:
         """Ghost-side audit of ``/bos forward`` overrides (0002 §5.3).
 

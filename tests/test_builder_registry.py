@@ -20,11 +20,18 @@ class TestReads:
         assert reg.list_tickets() == []
         assert reg.get("builder-os:17") is None
 
-    def test_corrupt_file_treated_as_empty(self, tmp_path):
+    def test_corrupt_file_treated_as_empty_but_faulted(self, tmp_path):
+        # Still tolerant (never crashes the poll loop) …
         f = tmp_path / "builder_tickets.json"
         f.write_text("{ this is not json")
         reg = _registry(tmp_path)
         assert reg.list_tickets() == []
+        # … but corruption is now SURFACED (minor), distinct from a missing file.
+        assert reg.integrity_fault() is not None
+
+    def test_missing_file_is_not_a_fault(self, tmp_path):
+        reg = _registry(tmp_path)
+        assert reg.integrity_fault() is None  # dormant, not corrupt
 
     def test_non_object_records_skipped(self, tmp_path):
         f = tmp_path / "builder_tickets.json"
@@ -89,6 +96,25 @@ class TestWrites:
         assert removed is not None
         assert reg.get("builder-os:1") is None
         assert await reg.unregister("builder-os:1") is None
+
+    async def test_concurrent_register_no_lost_writes(self, tmp_path):
+        """B3: the register RMW is serialized under a cross-process mutex, so
+        concurrent registrations don't clobber each other. The old unlocked
+        read-modify-write (read {} → write one entry) lost all but the last."""
+        import asyncio
+
+        reg = _registry(tmp_path)
+
+        async def reg_one(i):
+            await reg.register(
+                f"builder-os:{i}",
+                runtime_dir=str(tmp_path / f"r{i}"),
+                event_log=str(tmp_path / f"r{i}" / "e.jsonl"),
+            )
+
+        await asyncio.gather(*[reg_one(i) for i in range(20)])
+        uids = {t.uid for t in reg.list_tickets()}
+        assert uids == {f"builder-os:{i}" for i in range(20)}
 
 
 # -- SessionBinding pointer fields -------------------------------------------

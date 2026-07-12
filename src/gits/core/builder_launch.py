@@ -29,9 +29,11 @@ inject a runner and never touch a subprocess.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import secrets
+import shlex
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +42,14 @@ logger = logging.getLogger(__name__)
 
 # (returncode, stdout, stderr)
 Runner = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
+
+# Fail-closed subprocess timeout (minor: a hung CLI/Eva/fs op must never hold a
+# Discord handler forever). Exceeded ⇒ the child is killed and the runner
+# reports a nonzero rc, so ``_run_ok`` raises like any other failure.
+_CLI_TIMEOUT_S = 90.0
+# rc surfaced when a builder-os subprocess is killed for exceeding the timeout
+# (mirrors the shell/coreutils convention for a timed-out command).
+_RC_TIMEOUT = 124
 
 # Fields a LaunchSpec must carry for ghost to launch from it (§3.4). The full
 # execution profile (cli/cli_args/model) is resolved builder-os-side and carried
@@ -140,9 +150,11 @@ class BuilderLauncher:
         builder_os_root: Path | None = None,
         runner: Runner | None = None,
         token_factory: Callable[[], str] | None = None,
+        timeout: float = _CLI_TIMEOUT_S,
     ):
         self._cmd = builder_os_cmd
         self._root = builder_os_root
+        self._timeout = timeout
         self._runner = runner or self._default_runner
         # 32 bytes of urandom → 64 hex chars. Ghost-side authority; builder-os
         # only ever sees the SHA-256 (persisted at admit, §11.5).
@@ -165,19 +177,56 @@ class BuilderLauncher:
 
     # -- ticket verbs -------------------------------------------------------
 
-    async def admit(self, issue: int, repo: str | None, token: str) -> LaunchSpec:
+    async def admit(
+        self, issue: int, repo: str | None, token: str, *, requester: str | None = None,
+    ) -> LaunchSpec:
         """``ticket admit`` → LaunchSpec. Supplies the ghost-minted token (T3).
 
         builder-os persists ``sha256(token)`` at ``runtime_dir/auth/
         capability.sha256`` — the token itself is never written into
         ``runtime-state/``; it lives only in ghost's registry.
+
+        **B4 — remote requester auth.** When *requester* (the resolved
+        ``human_builder_id``) is supplied, ghost admits on that human's behalf
+        over the remote (Discord) seam: it passes ``--requester <hid> --remote``
+        so admission evaluates ``local_operator=False`` and validates the
+        requester against the pinned contract. A ``/bos start`` always has a
+        fail-closed-resolved actor, so it always admits remote; the argument is
+        optional only so a purely local operator invocation stays possible.
         """
         args = ["ticket", "admit", "--issue", str(issue)]
         if repo:
             args += ["--repo", repo]
         args += ["--capability-token", token]
+        if requester:
+            args += ["--requester", requester, "--remote"]
         out = await self._run_ok(args)
         return LaunchSpec.from_json(out)
+
+    async def dispose(self, uid: str, decision_id: str) -> str:
+        """``ticket dispose`` — execute a recorded disposition decision (§6.3, B1).
+
+        The completion choice was already recorded (``driver respond``); this
+        drives the disposition it selected (merge / close / …). Fail-closed:
+        a nonzero exit (illegal transition, guard refusal) raises
+        :class:`BuilderLaunchError`, so ghost never advances to ``cleanup`` on a
+        dispose that did not actually happen.
+        """
+        return await self._run_ok(
+            ["ticket", "dispose", "--ticket", uid, "--decision", decision_id])
+
+    async def cleanup(self, uid: str) -> str:
+        """``ticket cleanup`` — tear down a disposed ticket (idempotent, B1).
+
+        Returns the CLI's stdout token. **Contract nuance:** the current
+        builder-os ``cleanup`` exits 0 even on a soft ``cleanup_failed`` (it
+        prints the outcome to stdout rather than keying it into the exit code),
+        so the caller MUST inspect the returned token — ``"terminated"`` means
+        torn down, anything else means cleanup did not complete and the ticket
+        must stay registered. A hard failure (ticket not found, etc.) still
+        raises via the nonzero-exit path.
+        """
+        return (await self._run_ok(["ticket", "cleanup", "--ticket", uid])).strip()
 
     async def resume(
         self, uid: str, *, takeover: bool = False, fenced_confirmed: bool = True
@@ -270,15 +319,31 @@ class BuilderLauncher:
         return out
 
     async def _default_runner(self, args: list[str]) -> tuple[int, str, str]:
-        """Invoke the builder-os CLI as a subprocess (deploy-time ``builder_os_cmd``)."""
-        cmd = self._cmd.split() + args
+        """Invoke the builder-os CLI as a subprocess (deploy-time ``builder_os_cmd``).
+
+        ``builder_os_cmd`` is split with :func:`shlex.split` so a deploy-time
+        wrapper with quoted paths (e.g. ``"/opt/my venv/bin/builder-os"``)
+        survives. The wait is bounded by ``self._timeout``: a hung CLI is killed
+        and reported as a nonzero (``124``) rc so ``_run_ok`` fails closed rather
+        than pinning a Discord handler forever.
+        """
+        cmd = shlex.split(self._cmd) + args
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._root) if self._root else None,
         )
-        out_b, err_b = await proc.communicate()
+        try:
+            out_b, err_b = await asyncio.wait_for(proc.communicate(), self._timeout)
+        except TimeoutError:
+            proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.communicate()  # reap the killed child
+            verb = " ".join(args[:2])
+            logger.warning(
+                "builder-os %s timed out after %.0fs — killed", verb, self._timeout)
+            return _RC_TIMEOUT, "", f"builder-os {verb} timed out after {self._timeout:.0f}s"
         return (
             proc.returncode or 0,
             out_b.decode("utf-8", "replace"),

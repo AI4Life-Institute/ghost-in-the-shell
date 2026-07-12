@@ -257,16 +257,54 @@ async def test_resume_takeover_fences_then_relaunches(settings):
     await engine.session_mgr.bind(
         platform="discord", channel_id=THREAD, window_id="@old",
         window_name="bos", work_dir="/abs/worktree", builder_ticket_uid=UID)
+    # (B5) truthful liveness: the old window is alive until it is killed, then
+    # absent — so the post-kill liveness check confirms fencing.
+    _dead: set[str] = set()
+
+    async def _kill(win_id):
+        _dead.add(win_id)
+        return True
+
+    async def _exists(win_id):
+        return win_id not in _dead
+
+    engine.tmux.kill_window = AsyncMock(side_effect=_kill)
+    engine.tmux.window_exists = AsyncMock(side_effect=_exists)
 
     await engine.handle_bos_resume(THREAD, USER_MAPPED, ticket=None, takeover=True)
 
     # old window killed FIRST (fence), then resume --takeover --fenced-confirmed
-    engine.tmux.kill_window.assert_awaited_once_with("@old")
+    engine.tmux.kill_window.assert_any_await("@old")
     call = runner.call_for("ticket", "resume")
     assert "--takeover" in call and "--fenced-confirmed" in call
     # relaunched with a fresh window, binding repointed
     engine.tmux.create_window.assert_awaited_once()
     assert engine.session_mgr.get_binding(THREAD).window_id == "@5"
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_when_fencing_cannot_be_confirmed(settings):
+    """(B5) A kill that leaves the window alive ⇒ ghost refuses the resume rather
+    than asserting --fenced-confirmed. Old code killed-and-hoped, then always
+    passed --fenced-confirmed; this proves it now fails closed."""
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@old",
+        window_name="bos", work_dir="/abs/worktree", builder_ticket_uid=UID)
+    # kill "succeeds" but the window stubbornly survives (zombie) — never fenced.
+    engine.tmux.kill_window = AsyncMock(return_value=True)
+    engine.tmux.window_exists = AsyncMock(return_value=True)
+
+    await engine.handle_bos_resume(THREAD, USER_MAPPED, ticket=None, takeover=False)
+
+    # resume is NOT invoked; a refusal card names the fencing failure.
+    assert runner.call_for("ticket", "resume") is None
+    engine.tmux.create_window.assert_not_awaited()
+    assert any("Fencing failed" in (e.title or "") for e in adapter.embeds())
 
 
 # ── status / rerun-review / forward ─────────────────────────────────────────
@@ -330,6 +368,173 @@ async def test_unmapped_user_refused_no_side_effect(settings, call):
     engine.tmux.create_window.assert_not_awaited()
     engine.tmux.kill_window.assert_not_awaited()
     assert engine.builder_registry.get(UID) is None
+
+
+# ── B1: disposition full loop (dispose → cleanup → unregister) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_disposition_full_loop_dispose_cleanup_unregister(settings):
+    """A disposition button drives the real terminal loop against the CLI
+    contract (faked executor): driver respond → ticket dispose → ticket cleanup
+    → registry unregister + pane teardown. Old code injected a consume-input
+    nudge (illegal from READY_FOR_HUMAN), so nothing terminal happened."""
+    from gits.core.builder_renderer import make_disposition_cb
+
+    responses = _default_responses()
+    responses[("driver", "respond")] = (0, "", "")
+    responses[("ticket", "dispose")] = (0, "disposition DISPOSED", "")
+    responses[("ticket", "cleanup")] = (0, "terminated", "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    engine.builder_response._runner = runner  # share the fake for driver respond
+
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        capability_token="cap", driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@5",
+        window_name="bos", work_dir="/w", builder_ticket_uid=UID)
+    engine.builder_renderer._ticket_state(UID)["decisions"]["Dz"] = {
+        "status": "open", "kind": "disposition", "channel_id": THREAD,
+        "question": "Merge?", "options": [{"id": "merge", "label": "Merge"}]}
+
+    await engine.builder_response.handle_click(
+        THREAD, USER_MAPPED, make_disposition_cb(UID, "Dz", "merge"))
+
+    assert runner.call_for("ticket", "dispose") == [
+        "ticket", "dispose", "--ticket", UID, "--decision", "Dz"]
+    assert runner.call_for("ticket", "cleanup") is not None
+    assert engine.builder_registry.get(UID) is None       # unregistered
+    engine.tmux.kill_window.assert_any_await("@5")         # pane torn down
+
+
+# ── B2: start token durability (crash between admit and register) ────────────
+
+
+@pytest.mark.asyncio
+async def test_start_crash_between_admit_and_register_reuses_token(settings):
+    from gits.core.builder_start_journal import request_key
+
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    # distinct tokens per mint, so reuse-vs-remint is observable.
+    tokens = iter(["TOK-A", "TOK-B", "TOK-C"])
+    engine.builder_launcher._token_factory = lambda: next(tokens)
+
+    # crash the FIRST registry write (after admit) — the fatal window.
+    real_register = engine.builder_registry.register
+    n = {"v": 0}
+
+    async def flaky_register(*a, **k):
+        n["v"] += 1
+        if n["v"] == 1:
+            raise RuntimeError("crash after admit, before persist")
+        return await real_register(*a, **k)
+
+    engine.builder_registry.register = flaky_register
+
+    with pytest.raises(RuntimeError):
+        await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    # journal holds the first token; not cleared (register failed).
+    assert engine.builder_start_journal.token_for(request_key("builder-os", 10)) == "TOK-A"
+
+    # retry succeeds and REUSES TOK-A (no re-mint), so the persisted hash matches.
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    assert engine.builder_registry.get(UID).capability_token == "TOK-A"
+    admits = [c for c in runner.calls if c[:2] == ["ticket", "admit"]]
+    assert len(admits) == 2
+    assert all(a[a.index("--capability-token") + 1] == "TOK-A" for a in admits)
+    # window closed → journal cleared.
+    assert engine.builder_start_journal.token_for(request_key("builder-os", 10)) is None
+
+
+# ── B3: replay binds (no double-launch) + start race ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_start_replay_binds_without_launch(settings):
+    responses = _default_responses()
+    responses[("ticket", "admit")] = (0, _spec(replay=True), "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+
+    engine.tmux.create_window.assert_not_awaited()        # no second CLI
+    rec = engine.builder_registry.get(UID)                # pointers registered
+    assert rec is not None and rec.capability_token == "TOKENFIXED"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_same_request_admits_once(settings):
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await asyncio.gather(
+        engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os"),
+        engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os"),
+    )
+    admits = [c for c in runner.calls if c[:2] == ["ticket", "admit"]]
+    assert len(admits) == 1                                # start lock + R11
+    engine.tmux.create_window.assert_awaited_once()
+
+
+# ── B4: /bos start admits remote with the resolved requester ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_start_admits_remote_with_requester(settings):
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    admit = runner.call_for("ticket", "admit")
+    assert admit[admit.index("--requester") + 1] == ACTOR
+    assert "--remote" in admit
+
+
+# ── B6: resume is a dumb executor (--resume, not a fresh brief) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_resume_launches_with_resume_arg_not_fresh_brief(settings):
+    responses = _default_responses()
+    # builder-os emits the executable profile: --resume <sid>, initial_prompt null.
+    responses[("ticket", "resume")] = (0, _spec(
+        cli_args=["--permission-mode", "acceptEdits", "--resume", "cli-777"],
+        initial_prompt=None), "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@old",
+        window_name="bos", work_dir="/abs/worktree", builder_ticket_uid=UID)
+    dead: set[str] = set()
+    engine.tmux.kill_window = AsyncMock(side_effect=lambda w: dead.add(w) or True)
+    engine.tmux.window_exists = AsyncMock(side_effect=lambda w: w not in dead)
+
+    await engine.handle_bos_resume(THREAD, USER_MAPPED, ticket=None, takeover=False)
+
+    cmd = engine.tmux.create_window.call_args.kwargs["command"]
+    assert "--resume cli-777" in cmd            # transcript carried
+    assert "BRIEF.md" not in cmd                # dumb executor: no fresh brief
+
+
+# ── minor: /bos respond reports the real outcome ─────────────────────────────
+
+
+def test_bos_respond_reply_is_truthful():
+    from gits.core.builder_response import RespondOutcome
+    reply = Engine._bos_respond_reply
+    assert "already decided" in reply("D1", RespondOutcome.DUPLICATE)
+    assert "unauthorized" in reply("D1", RespondOutcome.UNAUTHORIZED).lower()
+    assert "Recorded" in reply("D1", RespondOutcome.RECORDED)
+    assert "terminated" in reply("D1", RespondOutcome.DISPOSED)
+    # none of the failure states should read as a bare success.
+    for oc in (RespondOutcome.DUPLICATE, RespondOutcome.UNAUTHORIZED,
+               RespondOutcome.FAILED, RespondOutcome.UNMAPPED):
+        assert "Submitted" not in reply("D1", oc)
 
 
 # ── dormancy (no config invoked → inert, no subprocess, byte-identical) ──────

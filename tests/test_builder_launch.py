@@ -8,6 +8,7 @@ builder-os's documented sink (``admit`` writes ``sha256(token)`` to
 (DI/test-only stubs; prod fail-closes on an env leak).
 """
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -153,6 +154,115 @@ async def test_admit_without_repo_omits_flag():
     bl = BuilderLauncher(builder_os_root=Path("/tmp"), runner=runner)
     await bl.admit(issue=10, repo=None, token="T")
     assert "--repo" not in runner.call_for("ticket", "admit")
+
+
+# ── B4: remote requester auth ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_admit_passes_requester_and_remote():
+    """B4: a requester ⇒ `--requester <hid> --remote` so admission evaluates
+    local_operator=False and validates the requester against the pinned
+    contract. Old code never forwarded the resolved human id."""
+    runner = Runner({("ticket", "admit"): (0, _spec_json(), "")})
+    bl = BuilderLauncher(builder_os_root=Path("/tmp"), runner=runner)
+    await bl.admit(issue=10, repo="builder-os", token="T", requester="liangchen")
+    call = runner.call_for("ticket", "admit")
+    assert call[call.index("--requester") + 1] == "liangchen"
+    assert "--remote" in call
+
+
+@pytest.mark.asyncio
+async def test_admit_local_when_no_requester():
+    runner = Runner({("ticket", "admit"): (0, _spec_json(), "")})
+    bl = BuilderLauncher(builder_os_root=Path("/tmp"), runner=runner)
+    await bl.admit(issue=10, repo="builder-os", token="T")
+    call = runner.call_for("ticket", "admit")
+    assert "--requester" not in call and "--remote" not in call
+
+
+# ── B1: dispose / cleanup verbs ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispose_args_and_fail_closed():
+    runner = Runner({("ticket", "dispose"): (0, "disposition DISPOSED", "")})
+    bl = BuilderLauncher(builder_os_root=Path("/tmp"), runner=runner)
+    await bl.dispose(UID, "D1")
+    assert runner.call_for("ticket", "dispose") == [
+        "ticket", "dispose", "--ticket", UID, "--decision", "D1"]
+
+    runner = Runner({("ticket", "dispose"): (5, "", "error: illegal transition")})
+    bl = BuilderLauncher(builder_os_root=Path("/tmp"), runner=runner)
+    with pytest.raises(BuilderLaunchError, match="illegal transition"):
+        await bl.dispose(UID, "D1")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_returns_stdout_token():
+    """cleanup exits 0 even on a soft `cleanup_failed`, keying the outcome into
+    stdout — so the returned token, not the exit code, is the signal."""
+    runner = Runner({("ticket", "cleanup"): (0, "terminated\n", "")})
+    bl = BuilderLauncher(builder_os_root=Path("/tmp"), runner=runner)
+    assert await bl.cleanup(UID) == "terminated"
+
+    runner = Runner({("ticket", "cleanup"): (0, "cleanup_failed\n", "")})
+    bl = BuilderLauncher(builder_os_root=Path("/tmp"), runner=runner)
+    assert await bl.cleanup(UID) == "cleanup_failed"
+
+
+# ── minors: shlex-split cmd + fail-closed subprocess timeout ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_default_runner_shlex_splits_quoted_cmd(monkeypatch):
+    """`builder_os_cmd` with a quoted path splits correctly (shlex, not str.split)."""
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok", b""
+
+    async def fake_exec(*args, **kwargs):
+        captured["argv"] = args
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    bl = BuilderLauncher(
+        builder_os_cmd='"/opt/my venv/bin/builder-os" run', builder_os_root=Path("/tmp"))
+    rc, out, _ = await bl._default_runner(["ticket", "status"])
+    assert captured["argv"] == (
+        "/opt/my venv/bin/builder-os", "run", "ticket", "status")
+    assert rc == 0 and out == "ok"
+
+
+@pytest.mark.asyncio
+async def test_default_runner_timeout_kills_and_fails_closed(monkeypatch):
+    """A hung CLI is killed and reported nonzero so the handler fails closed
+    instead of hanging forever."""
+    state = {"killed": False}
+
+    class HangProc:
+        returncode = None
+
+        async def communicate(self):
+            if not state["killed"]:
+                await asyncio.sleep(10)  # the awaited call hangs
+            return b"", b""
+
+        def kill(self):
+            state["killed"] = True
+
+    async def fake_exec(*args, **kwargs):
+        return HangProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    bl = BuilderLauncher(builder_os_root=Path("/tmp"), timeout=0.05)
+    rc, _, err = await bl._default_runner(["ticket", "status"])
+    assert rc == 124 and "timed out" in err
+    assert state["killed"] is True
 
 
 @pytest.mark.asyncio

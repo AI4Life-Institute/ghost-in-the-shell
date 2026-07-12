@@ -37,8 +37,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..utils.atomic_write import atomic_write_json
+from ..utils.lock import credential_lock
 
 logger = logging.getLogger(__name__)
+
+# How long a register/unregister waits for the cross-process registry mutex
+# before giving up (fail-closed — a stuck lock must not hang a Discord handler).
+_REGISTRY_LOCK_TIMEOUT_S = 10.0
 
 # Fields ghost knows about. Unknown keys in a stored record are preserved on
 # read (forward-compat) but not required.
@@ -85,6 +90,13 @@ class BuilderRegistry:
         self._file = registry_file
         # Resolution boundary for repo-relative builder-os paths (M2).
         self._root = builder_os_root.expanduser() if builder_os_root else None
+        # Cross-process mutex for the register/unregister read-modify-write (B3):
+        # the daemon and any concurrent `gits` CLI serialize on this, matching the
+        # credential-vault idiom. A sibling lockfile, never the registry itself.
+        self._lock_file = registry_file.with_name(registry_file.name + ".lock")
+        # Last-observed integrity fault (minor): distinguishes a *corrupt* file
+        # (surfaced) from a *missing* one (dormant, silent). Updated on every read.
+        self._corrupt: str | None = None
 
     # -- reads --------------------------------------------------------------
 
@@ -92,20 +104,33 @@ class BuilderRegistry:
         """Return the parsed registry dict, or ``{}`` if absent/corrupt.
 
         A missing file is the dormant default (zero builder tickets ⇒ the
-        monitor is a no-op). A corrupt file is logged and treated as empty so a
-        single bad write can never crash the poll loop.
+        monitor is a no-op). A corrupt file is still treated as empty so a single
+        bad write can never crash the poll loop — but the corruption is recorded
+        in ``self._corrupt`` so the monitor can surface an explicit builder-global
+        fault rather than silently pretending zero tickets (minor).
         """
         if not self._file.exists():
+            self._corrupt = None
             return {}
         try:
             data = json.loads(self._file.read_text())
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Failed to read %s — treating as empty", self._file, exc_info=True)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.error("Failed to read builder registry %s: %s", self._file, exc)
+            self._corrupt = f"{self._file} is unreadable/corrupt: {exc}"
             return {}
         if not isinstance(data, dict):
-            logger.warning("%s is not a JSON object — treating as empty", self._file)
+            logger.error("%s is not a JSON object — corrupt", self._file)
+            self._corrupt = f"{self._file} is not a JSON object"
             return {}
+        self._corrupt = None
         return data
+
+    def integrity_fault(self) -> str | None:
+        """Return a fault message if the registry file exists but is corrupt,
+        else ``None`` (absent = dormant, valid = healthy). One cheap read; the
+        monitor calls this each poll to surface corruption explicitly (minor)."""
+        self._read_raw()
+        return self._corrupt
 
     def list_tickets(self) -> list[BuilderTicket]:
         """All registered tickets (empty list if the registry is absent)."""
@@ -155,8 +180,12 @@ class BuilderRegistry:
         capability_token: str | None = None,
         assistant_channel_id: str | None = None,
     ) -> BuilderTicket:
-        """Register (or replace) a ticket. Paths are resolved absolute here (M2)."""
-        data = self._read_raw()
+        """Register (or replace) a ticket. Paths are resolved absolute here (M2).
+
+        The read-modify-write is serialized under a cross-process file mutex (B3)
+        so a concurrent register/unregister (e.g. the monitor's disposition
+        unregister racing a ``/bos start``) can't lose a write.
+        """
         record = {
             "runtime_dir": self._resolve(runtime_dir),
             "event_log": self._resolve(event_log),
@@ -168,17 +197,21 @@ class BuilderRegistry:
         # Drop None-valued optional fields to keep the file minimal (paths stay).
         _keep = ("runtime_dir", "event_log")
         record = {k: v for k, v in record.items() if v is not None or k in _keep}
-        data[uid] = record
-        await atomic_write_json(self._file, data)
+        async with credential_lock(self._lock_file, timeout=_REGISTRY_LOCK_TIMEOUT_S):
+            data = self._read_raw()
+            data[uid] = record
+            await atomic_write_json(self._file, data)
         logger.info("Registered builder ticket %s (event_log=%s)", uid, record["event_log"])
         return BuilderTicket.from_dict(uid, record)
 
     async def unregister(self, uid: str) -> BuilderTicket | None:
-        """Remove a ticket. Returns the removed entry or None."""
-        data = self._read_raw()
-        rec = data.pop(uid, None)
-        if rec is None:
-            return None
-        await atomic_write_json(self._file, data)
+        """Remove a ticket. Returns the removed entry or None. RMW under the same
+        cross-process mutex as :meth:`register` (B3)."""
+        async with credential_lock(self._lock_file, timeout=_REGISTRY_LOCK_TIMEOUT_S):
+            data = self._read_raw()
+            rec = data.pop(uid, None)
+            if rec is None:
+                return None
+            await atomic_write_json(self._file, data)
         logger.info("Unregistered builder ticket %s", uid)
         return BuilderTicket.from_dict(uid, rec) if isinstance(rec, dict) else None

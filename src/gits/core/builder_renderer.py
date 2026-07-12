@@ -459,6 +459,16 @@ class BuilderRenderer:
             keep_buttons=False,
         )
 
+    async def mark_disposed(self, uid: str, decision_id: str, *, banner: str) -> None:
+        """Flip a disposition card to its terminal state (B1): recorded →
+        disposed → cleaned up → terminated. Buttons removed (single-use, and the
+        ticket is being unregistered)."""
+        rec = self.decision_record(uid, decision_id)
+        if rec is not None:
+            rec["status"] = "disposed"
+        await self._flip_card(uid, decision_id, banner=banner, keep_buttons=False)
+        await self._persist()
+
     async def render_guided_reply(self, uid: str, channel_id: str) -> None:
         """Suppression guided reply (§5.3): a conversational thread reply while
         BLOCKED is held; re-show the pending decision + how to respond."""
