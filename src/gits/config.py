@@ -34,21 +34,6 @@ class Settings(BaseSettings):
     jsonl_poll_interval: float = 2.0
     health_check_interval: float = 5.0
 
-    # ── Builder OS (dormant until ~/.gits/builder_tickets.json exists) ──
-    # Resolution boundary for builder-os repo-relative paths (0002 §5.1, M2).
-    # Absolute paths stored in the registry are resolved once against this at
-    # registration time; the monitor never depends on cwd.
-    builder_os_root: Path | None = None
-    builder_event_poll_interval: float = 2.0
-    # Command that invokes the builder-os CLI (G4 response adapter, 0002 §5.6).
-    # ``driver respond`` args are appended. Split on whitespace; default assumes
-    # a ``builder-os`` console script on PATH. Override for a venv/wrapper
-    # (e.g. ``uv run --project /path builder-os``). Tests mock the subprocess.
-    builder_os_cmd: str = "builder-os"
-    # Coalesce window for driver.progress lines: at most one rendered progress
-    # line per ticket per this many seconds (F7 / 0002 §5.2).
-    builder_progress_coalesce_seconds: float = 60.0
-
     # ── Security ──────────────────────────────────────────────────────
     allowed_paths: list[str] = []
 
@@ -99,45 +84,3 @@ class Settings(BaseSettings):
     @property
     def quota_patterns_file(self) -> Path:
         return self.state_dir / "quota_patterns.yaml"
-
-    @property
-    def builder_tickets_file(self) -> Path:
-        """Ghost-owned builder ticket registry (0002 §5.1, G1)."""
-        return self.state_dir / "builder_tickets.json"
-
-    @property
-    def builder_event_offsets_file(self) -> Path:
-        """BuilderEventMonitor offset + projection-receipt store (0002 §5.4)."""
-        return self.state_dir / "builder_event_offsets.json"
-
-    @property
-    def builder_humans_file(self) -> Path:
-        """Ghost-local actor map for the response adapter (0002 §5.6, §11.4).
-
-        ``{"<discord_user_id>": "<human_builder_id>"}``. Fail-closed: absent or
-        unmapped ⇒ the adapter refuses a decision. Machine config, created at
-        activation — never seeded in the repo. (The eventual home is an
-        ``discord_user_id`` field on the org node; kept ghost-local for the MVP
-        so the org schema is untouched.)
-        """
-        return self.state_dir / "builder_humans.json"
-
-    @property
-    def builder_renderer_state_file(self) -> Path:
-        """BuilderRenderer dedup + card index (0002 §5.2, §4.3).
-
-        Persists ``event_id → discord_message_id`` and a per-decision card
-        record so replay renders nothing new and the "recorded → delivered"
-        flip can find the card after a restart.
-        """
-        return self.state_dir / "builder_renderer.json"
-
-    @property
-    def builder_forced_forward_log(self) -> Path:
-        """Ghost-side audit of ``/bos forward`` overrides (0002 §5.3).
-
-        Ghost never writes into builder-os ``runtime-state/`` (§5.5), so the
-        forced-forward audit record lives here rather than in the ticket's
-        ``inputs.jsonl``. See the response adapter for the record shape.
-        """
-        return self.state_dir / "builder_forced_forwards.jsonl"

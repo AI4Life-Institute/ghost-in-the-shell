@@ -39,7 +39,6 @@ from discord.ext import commands
 from ..base import (
     Button,
     ButtonCallback,
-    Embed,
     IncomingMessage,
     MessageCallback,
     OutgoingMessage,
@@ -253,8 +252,6 @@ class DiscordAdapter(PlatformAdapter):
                     kwargs["file"] = discord.File(
                         io.BytesIO(msg.image), filename="screenshot.png"
                     )
-                if msg.embed:
-                    kwargs["embed"] = self._build_embed(msg.embed)
                 if msg.select_options or msg.buttons:
                     kwargs["view"] = self._build_view(
                         button_rows=msg.buttons,
@@ -306,8 +303,6 @@ class DiscordAdapter(PlatformAdapter):
         kwargs: dict[str, Any] = {}
         if msg.text is not None:
             kwargs["content"] = msg.text[:2000]
-        if msg.embed:
-            kwargs["embed"] = self._build_embed(msg.embed)
         if msg.select_options or msg.buttons:
             kwargs["view"] = self._build_view(
                 button_rows=msg.buttons,
@@ -325,22 +320,6 @@ class DiscordAdapter(PlatformAdapter):
 
         message = await channel.fetch_message(int(message_id))
         await message.delete()
-
-    async def pin_message(self, channel_id: str, message_id: str) -> None:
-        """Pin a Discord message (lifecycle cards, 0002 §5.2)."""
-        channel = self.bot.get_channel(int(channel_id))
-        if channel is None:
-            channel = await self.bot.fetch_channel(int(channel_id))
-        message = await channel.fetch_message(int(message_id))
-        await message.pin()
-
-    async def unpin_message(self, channel_id: str, message_id: str) -> None:
-        """Unpin a Discord message."""
-        channel = self.bot.get_channel(int(channel_id))
-        if channel is None:
-            channel = await self.bot.fetch_channel(int(channel_id))
-        message = await channel.fetch_message(int(message_id))
-        await message.unpin()
 
     def on_message(self, callback: MessageCallback) -> None:
         self._message_callbacks.append(callback)
@@ -930,10 +909,6 @@ class DiscordAdapter(PlatformAdapter):
 
         # ── A. Native Commands ────────────────────────────────────────
 
-        # Builder-OS /bos group (G6) — registered unconditionally; dormant +
-        # fail-closed until builder-os is configured (0002 §5.5/§5.7).
-        self._setup_bos_commands(tree)
-
         @tree.command(name="bind", description="Bind this channel to a project directory")
         @app_commands.describe(
             path="Project directory path",
@@ -1429,151 +1404,6 @@ class DiscordAdapter(PlatformAdapter):
                 break
         return choices
 
-    def _setup_bos_commands(self, tree: app_commands.CommandTree) -> None:
-        """Register the Builder-OS ``/bos`` command group (G6, 0002 §5.5/§5.7).
-
-        Registered **unconditionally** (T6/T7 dormancy precedent: dormancy means
-        existing paths byte-identical + zero new behavior without machine config,
-        not zero new surface). Every verb is fail-closed on identity in the engine
-        (``builder_humans.json``) and inert until builder-os is configured, so the
-        group is visible but does nothing pre-activation. Handlers are thin: check
-        access, defer, delegate to ``engine.handle_bos_*``. "Activation" =
-        creating ``builder_humans.json`` + ``builder_tickets.json``-reachable
-        config + ``builder_os_cmd`` + a PM2 restart.
-        """
-        bos = app_commands.Group(
-            name="bos",
-            description="Builder-OS ticket controls (launch/steer/resume)",
-        )
-
-        async def _guard(interaction: discord.Interaction) -> bool:
-            """Access check + defer. False ⇒ handler must return immediately."""
-            if not self._check_interaction_access(interaction):
-                await interaction.response.send_message(
-                    "Access denied.", ephemeral=True
-                )
-                return False
-            await interaction.response.defer()
-            if not self._engine:
-                await interaction.followup.send("⚠️ Engine not ready.")
-                return False
-            return True
-
-        @bos.command(
-            name="start",
-            description="Admit a builder issue and launch its driver session",
-        )
-        @app_commands.describe(
-            issue="GitHub issue number", repo="Repo alias (optional)"
-        )
-        async def cmd_bos_start(
-            interaction: discord.Interaction, issue: int, repo: str | None = None
-        ):
-            if not await _guard(interaction):
-                return
-            await self._engine.handle_bos_start(
-                str(interaction.channel_id), str(interaction.user.id),
-                issue, repo, interaction,
-            )
-
-        @bos.command(
-            name="status",
-            description="Show a ticket's current state and legal next verbs",
-        )
-        @app_commands.describe(
-            ticket="Ticket uid (defaults to this thread's ticket)"
-        )
-        async def cmd_bos_status(
-            interaction: discord.Interaction, ticket: str | None = None
-        ):
-            if not await _guard(interaction):
-                return
-            await self._engine.handle_bos_status(
-                str(interaction.channel_id), str(interaction.user.id),
-                ticket, interaction,
-            )
-
-        @bos.command(
-            name="respond",
-            description="Answer this thread's open builder decision",
-        )
-        @app_commands.describe(choice="The option id to choose")
-        async def cmd_bos_respond(interaction: discord.Interaction, choice: str):
-            if not await _guard(interaction):
-                return
-            await self._engine.handle_bos_respond(
-                str(interaction.channel_id), str(interaction.user.id),
-                choice, interaction,
-            )
-
-        @bos.command(
-            name="resume",
-            description="Relaunch a ticket's driver session (fenced)",
-        )
-        @app_commands.describe(
-            ticket="Ticket uid (defaults to this thread's ticket)",
-            takeover="Fence out a live/zombie session (bumps epoch)",
-        )
-        async def cmd_bos_resume(
-            interaction: discord.Interaction,
-            ticket: str | None = None, takeover: bool = False,
-        ):
-            if not await _guard(interaction):
-                return
-            await self._engine.handle_bos_resume(
-                str(interaction.channel_id), str(interaction.user.id),
-                ticket, takeover, interaction,
-            )
-
-        @bos.command(
-            name="forward",
-            description="Force-forward text to the driver pane (bypass suppression)",
-        )
-        @app_commands.describe(text="Text to inject into the driver pane")
-        async def cmd_bos_forward(interaction: discord.Interaction, text: str):
-            if not await _guard(interaction):
-                return
-            await self._engine.handle_bos_forward(
-                str(interaction.channel_id), str(interaction.user.id),
-                text, interaction,
-            )
-
-        @bos.command(
-            name="rerun-review",
-            description="Request a new review round for the ticket's candidate",
-        )
-        @app_commands.describe(
-            ticket="Ticket uid (defaults to this thread's ticket)"
-        )
-        async def cmd_bos_rerun_review(
-            interaction: discord.Interaction, ticket: str | None = None
-        ):
-            if not await _guard(interaction):
-                return
-            await self._engine.handle_bos_rerun_review(
-                str(interaction.channel_id), str(interaction.user.id),
-                ticket, interaction,
-            )
-
-        @bos.command(
-            name="rebind-thread",
-            description="Repoint a ticket's home thread to this channel",
-        )
-        @app_commands.describe(
-            ticket="Ticket uid (defaults to this thread's ticket)"
-        )
-        async def cmd_bos_rebind_thread(
-            interaction: discord.Interaction, ticket: str | None = None
-        ):
-            if not await _guard(interaction):
-                return
-            await self._engine.handle_bos_rebind_thread(
-                str(interaction.channel_id), str(interaction.user.id),
-                ticket, interaction,
-            )
-
-        tree.add_command(bos)
-
     def _register_forward_command(
         self, tree: app_commands.CommandTree, name: str, description: str
     ) -> None:
@@ -1677,26 +1507,6 @@ class DiscordAdapter(PlatformAdapter):
                 pass
 
         return choices[:25]
-
-    # ------------------------------------------------------------------
-    # Embed builder
-    # ------------------------------------------------------------------
-
-    def _build_embed(self, embed: Embed) -> discord.Embed:
-        """Convert our platform-agnostic Embed model to a discord.py Embed."""
-        kwargs: dict[str, Any] = {}
-        if embed.title:
-            kwargs["title"] = embed.title[:256]
-        if embed.description:
-            kwargs["description"] = embed.description[:4096]
-        if embed.color is not None:
-            kwargs["color"] = embed.color
-        de = discord.Embed(**kwargs)
-        for name, value, inline in embed.fields[:25]:
-            de.add_field(name=name[:256], value=(value or "​")[:1024], inline=inline)
-        if embed.footer:
-            de.set_footer(text=embed.footer[:2048])
-        return de
 
     # ------------------------------------------------------------------
     # Button builder
