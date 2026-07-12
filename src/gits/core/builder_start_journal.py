@@ -42,11 +42,17 @@ hash *only-if-absent*, so the hash-race *winner* need not be the earliest-insert
 journal entry, and reconcile could then register a *losing* token. The engine
 closes this by keying the ``/bos start`` lock on the **issue number** (any two
 starts that could resolve to one uid share an issue), so same-ticket starts
-serialize and the ordering assumption holds. The **only** remaining residual is a
-crash in the single ``await`` between admit *returning* and :meth:`reconcile`
-persisting the uid binding — genuinely irreducible without a transactional admit
-across the subprocess boundary, and orders of magnitude smaller than the
-admit→register window this closes.
+serialize and the ordering assumption holds.
+
+The former "irreducible" residual — a crash in the single ``await`` between admit
+*returning* and :meth:`reconcile` persisting the uid binding — is itself closed by
+**hash selection**: builder-os emits ``LaunchSpec.capability_sha256`` (aq4rf9), and
+:meth:`reconcile` picks the journalled token whose ``sha256`` matches it. Because
+that hash is exactly what builder-os persisted, the right token is chosen even if
+no prior attempt ever recorded a uid binding — so once aq4rf9 lands there is no
+permanent-unauthorization window left. Until then, ghost falls back to
+uid-earliest selection (correct for every case except that one sub-``await``
+crash).
 
 Durability
 ----------
@@ -56,6 +62,7 @@ Same idiom as the registry: an atomic write under the cross-process
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -109,26 +116,49 @@ class BuilderStartJournal:
             logger.info("start journal: minted token for %s (crash-safe)", key)
             return token
 
-    async def reconcile(self, key: str, ticket_uid: str, current_token: str) -> str:
+    async def reconcile(
+        self, key: str, ticket_uid: str, current_token: str,
+        *, capability_sha256: str | None = None,
+    ) -> str:
         """Bind *key* to the canonical *ticket_uid* and return the **authoritative**
-        token for it — the earliest one already recorded for this uid across any
-        request form (insertion order = admit order), else *current_token*.
+        token for it — the one builder-os actually persisted the hash of.
 
-        Called immediately after admit resolves the uid. This is what makes a
-        cross-form retry safe: attempt 1 (``issue:10``) admits token A and stamps
-        its uid before crashing at the registry write; attempt 2
-        (``issue:10 repo:builder-os``) mints token B, admits (builder-os keeps
-        A's hash), then reconciles → finds attempt 1's A bound to this uid →
-        returns A, which is what gets registered. The human stays authorized.
+        Selection order:
+
+        1. **By hash (B2, exact).** When *capability_sha256* is supplied (builder-os
+           emits it on the LaunchSpec, aq4rf9), pick the journalled token whose
+           ``sha256`` equals it. This is what builder-os literally hashed, so it is
+           correct **regardless of whether a prior attempt's uid binding was ever
+           persisted** — it closes even the post-admit/pre-reconcile crash window.
+        2. **By uid, earliest (fallback).** Without the hash, pick the earliest
+           token already recorded for this uid (insertion order = admit order,
+           which holds because same-issue starts are serialized). Safe for
+           sequential and (issue-serialized) concurrent cross-form retries.
+        3. *current_token* if neither matches (first admit for this uid).
+
+        Example (cross-form retry): attempt 1 (``issue:10``) admits token A;
+        attempt 2 (``issue:10 repo:builder-os``) mints B, admits (builder-os keeps
+        A's hash). Reconcile returns A — by hash if emitted, else as the earliest
+        uid entry — and A is what gets registered, so the human stays authorized.
         """
         async with credential_lock(self._lock_file, timeout=_LOCK_TIMEOUT_S):
             data = self._read()
             authoritative = None
-            for entry in data.values():  # dict preserves insertion (=admit) order
-                if (isinstance(entry, dict) and entry.get("ticket_uid") == ticket_uid
-                        and entry.get("token")):
-                    authoritative = entry["token"]
-                    break
+            reason = ""
+            if capability_sha256:
+                for entry in data.values():
+                    tok = entry.get("token") if isinstance(entry, dict) else None
+                    if tok and hashlib.sha256(tok.encode()).hexdigest() == capability_sha256:
+                        authoritative = tok
+                        reason = "by-hash"
+                        break
+            if authoritative is None:
+                for entry in data.values():  # dict preserves insertion (=admit) order
+                    if (isinstance(entry, dict) and entry.get("ticket_uid") == ticket_uid
+                            and entry.get("token")):
+                        authoritative = entry["token"]
+                        reason = "by-uid"
+                        break
             if authoritative is None:
                 authoritative = current_token
             cur = data.get(key)
@@ -141,7 +171,7 @@ class BuilderStartJournal:
             if authoritative != current_token:
                 logger.info(
                     "start journal: reconciled %s to the original token for %s "
-                    "(cross-form retry — crash-safe)", key, ticket_uid)
+                    "(%s — crash-safe)", key, ticket_uid, reason)
             return authoritative
 
     async def clear(self, key: str, *, ticket_uid: str | None = None) -> None:

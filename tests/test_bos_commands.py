@@ -382,8 +382,10 @@ async def test_disposition_full_loop_dispose_cleanup_unregister(settings):
     from gits.core.builder_renderer import make_disposition_cb
 
     responses = _default_responses()
+    responses[("driver", "status")] = (
+        0, json.dumps({**_STATUS, "state": "READY_FOR_HUMAN"}), "")
     responses[("driver", "respond")] = (0, "", "")
-    responses[("ticket", "dispose")] = (0, "disposition DISPOSED", "")
+    responses[("ticket", "dispose")] = (0, "driver.disposed DISPOSED", "")
     responses[("ticket", "cleanup")] = (0, "terminated", "")
     runner = Runner(responses)
     engine, adapter = _mk_engine(settings, runner=runner)
@@ -407,6 +409,109 @@ async def test_disposition_full_loop_dispose_cleanup_unregister(settings):
     assert runner.call_for("ticket", "cleanup") is not None
     assert engine.builder_registry.get(UID) is None       # unregistered
     engine.tmux.kill_window.assert_any_await("@5")         # pane torn down
+
+
+def _seed_open_disposition(engine, choice_id="merge", label="Merge"):
+    engine.builder_renderer._ticket_state(UID)["decisions"]["Dz"] = {
+        "status": "open", "kind": "disposition", "channel_id": THREAD,
+        "question": "Disposition?", "options": [{"id": choice_id, "label": label}]}
+
+
+@pytest.mark.asyncio
+async def test_disposition_request_changes_keeps_ticket_and_nudges(settings):
+    """CR3 blocker 1: request_changes → CR_REWORK is NOT terminal. Ghost keeps the
+    ticket registered + pane alive and nudges the Driver; it must NOT cleanup.
+    Old code treated every successful dispose as terminal → cleanup refuses from
+    CR_REWORK and the disposition reads as incomplete."""
+    from gits.core.builder_renderer import make_disposition_cb
+
+    responses = _default_responses()
+    responses[("driver", "status")] = (
+        0, json.dumps({**_STATUS, "state": "READY_FOR_HUMAN"}), "")
+    responses[("driver", "respond")] = (0, "", "")
+    responses[("ticket", "dispose")] = (0, "review.changes_requested CR_REWORK", "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    engine.builder_response._runner = runner
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        capability_token="cap", driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@5",
+        window_name="bos", work_dir="/w", coding_cli="claude", builder_ticket_uid=UID)
+    _seed_open_disposition(engine, "request_changes", "Request changes")
+
+    await engine.builder_response.handle_click(
+        THREAD, USER_MAPPED, make_disposition_cb(UID, "Dz", "request_changes"))
+
+    assert runner.call_for("ticket", "dispose") is not None
+    assert runner.call_for("ticket", "cleanup") is None    # NOT cleaned up
+    assert engine.builder_registry.get(UID) is not None    # ticket kept registered
+    engine.tmux.kill_window.assert_not_awaited()           # pane kept alive
+    engine.tmux.send_text.assert_awaited()                 # Driver nudged to continue
+    assert engine.builder_renderer.decision_record(UID, "Dz")["status"] == "changes_requested"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_disposition_resumes_terminal_workflow(settings):
+    """CR3 blocker 2: ghost crashed after `driver respond` but before dispose. The
+    next click gets RC_DUPLICATE — it must RESUME the state-driven terminal
+    workflow (status READY_FOR_HUMAN → dispose → cleanup → teardown), not dead-end
+    on 'already decided'. Old code returned DUPLICATE and did nothing terminal."""
+    from gits.core.builder_renderer import make_disposition_cb
+
+    responses = _default_responses()
+    responses[("driver", "status")] = (
+        0, json.dumps({**_STATUS, "state": "READY_FOR_HUMAN"}), "")
+    responses[("driver", "respond")] = (9, "", "error: already answered")  # durable already
+    responses[("ticket", "dispose")] = (0, "driver.disposed DISPOSED", "")
+    responses[("ticket", "cleanup")] = (0, "terminated", "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    engine.builder_response._runner = runner
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        capability_token="cap", driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@5",
+        window_name="bos", work_dir="/w", builder_ticket_uid=UID)
+    _seed_open_disposition(engine)
+
+    await engine.builder_response.handle_click(
+        THREAD, USER_MAPPED, make_disposition_cb(UID, "Dz", "merge"))
+
+    # the duplicate RESUMED the unfinished terminal workflow.
+    assert runner.call_for("ticket", "dispose") is not None
+    assert runner.call_for("ticket", "cleanup") is not None
+    assert engine.builder_registry.get(UID) is None
+
+
+@pytest.mark.asyncio
+async def test_journal_reconcile_selects_by_capability_hash(tmp_path):
+    """CR3 blocker 3 (B2 last window): with builder-os's persisted hash on the
+    LaunchSpec, reconcile selects the exact matching token even when NO prior
+    attempt recorded a uid binding — closing the post-admit/pre-reconcile crash
+    window that uid-earliest selection alone cannot."""
+    import hashlib
+
+    from gits.core.builder_start_journal import BuilderStartJournal
+
+    j = BuilderStartJournal(tmp_path / "journal.json")
+    # attempt 1 crashed BEFORE stamping the uid: token present, ticket_uid absent.
+    await j.get_or_create_token("#10", lambda: "TOK-A")
+    # attempt 2 (cross-form) minted a different token.
+    assert await j.get_or_create_token("builder-os#10", lambda: "TOK-B") == "TOK-B"
+
+    # builder-os emits sha256(TOK-A) → reconcile picks TOK-A by hash, though the
+    # uid-earliest fallback would miss it (no entry was uid-stamped for the uid).
+    h = hashlib.sha256(b"TOK-A").hexdigest()
+    got = await j.reconcile("builder-os#10", "builder-os:10", "TOK-B", capability_sha256=h)
+    assert got == "TOK-A"
+    # sanity: without the hash, uid-earliest can't recover it (returns the minted one).
+    j2 = BuilderStartJournal(tmp_path / "journal2.json")
+    await j2.get_or_create_token("#10", lambda: "TOK-A")
+    await j2.get_or_create_token("builder-os#10", lambda: "TOK-B")
+    assert await j2.reconcile("builder-os#10", "builder-os:10", "TOK-B") == "TOK-B"
 
 
 # ── B2: start token durability (crash between admit and register) ────────────

@@ -99,6 +99,12 @@ class LaunchSpec:
     model: str | None = None
     display_id: str | None = None
     replay: bool = False
+    # (B2) sha256 of the capability token builder-os has persisted for this
+    # ticket, when known. Emitted by builder-os (aq4rf9); lets ghost select the
+    # exact journalled token that matches — closing the post-admit/pre-reconcile
+    # crash window independent of whether uid reconciliation completed. Absent
+    # (None) until aq4rf9 lands; ghost falls back to uid reconciliation.
+    capability_sha256: str | None = None
 
     @classmethod
     def from_json(cls, text: str) -> LaunchSpec:
@@ -137,6 +143,7 @@ class LaunchSpec:
             model=data.get("model"),
             display_id=data.get("display_id"),
             replay=bool(data.get("replay", False)),
+            capability_sha256=data.get("capability_sha256"),
         )
 
 

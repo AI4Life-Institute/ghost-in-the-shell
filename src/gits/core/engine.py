@@ -2846,31 +2846,76 @@ class Engine:
             return False
 
     async def _builder_dispose(self, uid: str, decision_id: str) -> DispositionOutcome:
-        """B1 disposer seam: drive a recorded READY_FOR_HUMAN disposition to
-        terminal — ``ticket dispose`` → ``ticket cleanup`` → ghost-side teardown
-        + unregister. Returns the outcome so the response adapter renders the
-        truthful card. Fail-closed at each hop: a dispose refusal never advances
-        to cleanup, and a cleanup that did not terminate leaves the ticket
-        registered (its pane/pointer are torn down only on a confirmed teardown).
+        """B1 disposer seam — **state-driven and crash-resumable** (CR3).
+
+        Drives an answered disposition to its terminal outcome by reading the
+        ticket's *actual* state (``driver status``) and resuming from wherever a
+        prior attempt got to, rather than assuming a fresh ``READY_FOR_HUMAN``.
+        This makes it idempotent under a crash between any two steps (respond →
+        dispose → cleanup → teardown), and lets a *duplicate* response resume an
+        unfinished terminal workflow instead of dead-ending on "already decided".
+
+        Not every disposition is terminal (CR3 blocker 1): ``request_changes``
+        emits ``review.changes_requested`` → ``CR_REWORK`` (a new review round,
+        NOT a disposal), so it must NOT be cleaned up — the ticket + pane stay
+        alive and the Driver is nudged to continue. Only ``merge`` /
+        ``close_without_merge`` (``driver.disposed`` → ``DISPOSED``) advance to
+        cleanup → teardown → unregister.
         """
         try:
-            await self.builder_launcher.dispose(uid, decision_id)
+            state = (await self.builder_launcher.status(uid)).get("state")
         except BuilderLaunchError:
-            logger.warning(
-                "dispose failed for %s decision %s", uid, decision_id, exc_info=True)
+            logger.warning("dispose: status read failed for %s", uid, exc_info=True)
             return DispositionOutcome.DISPOSE_FAILED
-        try:
-            result = await self.builder_launcher.cleanup(uid)
-        except BuilderLaunchError:
-            logger.warning("cleanup failed for %s", uid, exc_info=True)
-            return DispositionOutcome.CLEANUP_FAILED
-        if result != "terminated":
-            # cleanup exits 0 even on a soft failure, keying the outcome into
-            # stdout — so a non-"terminated" token is a real failure to surface.
-            logger.warning("cleanup for %s did not terminate: %r", uid, result)
-            return DispositionOutcome.CLEANUP_FAILED
-        await self._teardown_builder_ticket(uid)
-        return DispositionOutcome.DISPOSED
+
+        # (1) answer recorded but not yet executed → dispose; branch on its result.
+        if state == "READY_FOR_HUMAN":
+            try:
+                result = await self.builder_launcher.dispose(uid, decision_id)
+            except BuilderLaunchError:
+                logger.warning(
+                    "dispose failed for %s decision %s", uid, decision_id, exc_info=True)
+                return DispositionOutcome.DISPOSE_FAILED
+            if "CR_REWORK" in result or "changes_requested" in result:
+                # request_changes: not terminal — keep the ticket + pane, nudge
+                # the Driver to continue the reopened CR round.
+                await self._builder_nudge(uid, self._CR_REWORK_NUDGE.format(uid=uid))
+                logger.info("disposition %s: changes requested (CR_REWORK) for %s",
+                            decision_id, uid)
+                return DispositionOutcome.CHANGES_REQUESTED
+            state = "DISPOSED"  # driver.disposed → advance to cleanup
+
+        # A prior request_changes already reopened the round — nothing to tear down.
+        if state == "CR_REWORK":
+            return DispositionOutcome.CHANGES_REQUESTED
+
+        # (2) disposed (or a prior cleanup left it mid-flight) → cleanup.
+        if state in ("DISPOSED", "CLEANUP", "CLEANUP_FAILED"):
+            try:
+                result = await self.builder_launcher.cleanup(uid)
+            except BuilderLaunchError:
+                logger.warning("cleanup failed for %s", uid, exc_info=True)
+                return DispositionOutcome.CLEANUP_FAILED
+            if result != "terminated":
+                # cleanup exits 0 even on a soft failure, keying the outcome into
+                # stdout — a non-"terminated" token is a real failure to surface.
+                logger.warning("cleanup for %s did not terminate: %r", uid, result)
+                return DispositionOutcome.CLEANUP_FAILED
+            state = "TERMINATED"
+
+        # (3) terminated → ghost-side teardown + unregister (idempotent).
+        if state == "TERMINATED":
+            await self._teardown_builder_ticket(uid)
+            return DispositionOutcome.DISPOSED
+
+        logger.warning("dispose: unexpected state %r for %s — not advancing", state, uid)
+        return DispositionOutcome.DISPOSE_FAILED
+
+    # Hint injected into the Driver pane when a disposition reopens a CR round.
+    _CR_REWORK_NUDGE = (
+        "[builder-os] {uid}: changes requested — a new review round is open; "
+        "continue the CR round (run `builder-os driver status` for the pending review)."
+    )
 
     async def _teardown_builder_ticket(self, uid: str) -> None:
         """Ghost-side terminal teardown after a confirmed dispose+cleanup (B1):
@@ -2997,7 +3042,11 @@ class Engine:
         # closes the cross-form retry hole: if a prior attempt (under a different
         # request form) already admitted a token for this uid, reuse it, since
         # builder-os persists the FIRST token's hash and never overwrites it.
-        token = await self.builder_start_journal.reconcile(rkey, uid, token)
+        # When builder-os emits the persisted hash (spec.capability_sha256,
+        # aq4rf9) reconcile selects the exact matching token, closing even the
+        # sub-await post-admit crash window.
+        token = await self.builder_start_journal.reconcile(
+            rkey, uid, token, capability_sha256=spec.capability_sha256)
 
         # (R11) authoritative idempotency — covers the repo-omitted default alias.
         if self.builder_registry.get(uid) is not None:
@@ -3203,6 +3252,8 @@ class Engine:
                 f"✅ Recorded your answer to `{decision_id}` — awaiting driver consume.",
             RespondOutcome.DISPOSED:
                 f"📦 Disposition `{decision_id}` executed — ticket cleaned up and terminated.",
+            RespondOutcome.CHANGES_REQUESTED:
+                f"🔁 Changes requested on `{decision_id}` — new review round open, ticket stays live.",
             RespondOutcome.DISPOSE_FAILED:
                 f"⚠️ Recorded `{decision_id}`, but teardown did not complete — see the card.",
             RespondOutcome.DUPLICATE:

@@ -73,6 +73,7 @@ class RespondOutcome(enum.StrEnum):
 
     RECORDED = "recorded"          # clarification/escalation answer recorded
     DISPOSED = "disposed"          # disposition recorded + disposed + torn down
+    CHANGES_REQUESTED = "changes_requested"  # request_changes → CR_REWORK (not terminal)
     DISPOSE_FAILED = "dispose_failed"  # recorded, but dispose/cleanup did not complete
     DUPLICATE = "duplicate"        # someone else already decided (first-write-wins)
     UNAUTHORIZED = "unauthorized"  # capability token rejected (tamper)
@@ -81,10 +82,12 @@ class RespondOutcome(enum.StrEnum):
 
 
 class DispositionOutcome(enum.StrEnum):
-    """Result of the disposition teardown seam (``dispose`` → ``cleanup`` →
-    unregister), reported back by the engine-wired :data:`Disposer`."""
+    """Result of the disposition seam. ``merge`` / ``close_without_merge`` are
+    terminal (dispose → cleanup → unregister); ``request_changes`` reopens a CR
+    round and is NOT terminal (the ticket + pane stay alive)."""
 
     DISPOSED = "disposed"          # dispose ok, cleanup terminated, unregistered
+    CHANGES_REQUESTED = "changes_requested"  # request_changes → CR_REWORK, kept alive
     DISPOSE_FAILED = "dispose_failed"  # `ticket dispose` refused/failed
     CLEANUP_FAILED = "cleanup_failed"  # disposed, but `ticket cleanup` did not terminate
 
@@ -237,16 +240,19 @@ class BuilderResponseAdapter:
 
         rc, out, err = await self._runner(args)
 
-        # (3) render outcome by stable exit code.
+        # (3a) DISPOSITION (B1 + CR3): advance via dispose→cleanup→unregister, NOT
+        # the consume-input nudge (illegal from READY_FOR_HUMAN). This is driven on
+        # BOTH a fresh record (RC_OK) AND a duplicate (RC_DUPLICATE): a duplicate
+        # means the decision is already durably recorded — e.g. ghost crashed after
+        # `respond` but before the terminal workflow finished — so we must RESUME
+        # the (state-driven, idempotent) workflow, not dead-end on "already
+        # decided". Unauthorized/other still fail closed below.
+        if is_disposition and rc in (RC_OK, RC_DUPLICATE):
+            return await self._drive_disposition(
+                channel_id, uid, decision_id, actor, choice)
+
+        # (3b) clarification/escalation answer — render outcome by stable exit code.
         if rc == RC_OK:
-            # B1: a READY_FOR_HUMAN disposition advances via dispose→cleanup→
-            # unregister; consume-input is illegal from READY_FOR_HUMAN. An
-            # ordinary clarification/escalation answer flips to "recorded, awaiting
-            # consume" and gets the resume nudge. Route disposition straight to
-            # teardown so the card never shows the (wrong) "awaiting consume".
-            if is_disposition:
-                return await self._drive_disposition(
-                    channel_id, uid, decision_id, actor, choice)
             await self._renderer.mark_recorded(uid, decision_id, actor, choice)
             await self._emit_answer_nudge(uid, decision_id)
             return RespondOutcome.RECORDED
@@ -298,6 +304,14 @@ class BuilderResponseAdapter:
                 uid, decision_id,
                 banner=f"📦 Disposed by {actor} ({choice}) — cleaned up and terminated.")
             return RespondOutcome.DISPOSED
+        if outcome == DispositionOutcome.CHANGES_REQUESTED:
+            # request_changes → CR_REWORK: NOT terminal. The ticket + pane stay
+            # alive and the Driver continues the reopened review round.
+            await self._renderer.mark_changes_requested(
+                uid, decision_id,
+                banner=(f"🔁 Changes requested by {actor} — a new review round is "
+                        "open; the Driver is continuing. The ticket stays live."))
+            return RespondOutcome.CHANGES_REQUESTED
         # Recorded, but teardown did not complete — surface it, keep the ticket.
         detail = ("`ticket dispose` refused or failed"
                   if outcome == DispositionOutcome.DISPOSE_FAILED
