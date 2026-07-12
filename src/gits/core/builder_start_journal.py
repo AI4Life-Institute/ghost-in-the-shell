@@ -24,12 +24,19 @@ Keyed by the **start request** (``<repo-or-blank>#<issue>``), not the canonical
 ticket uid: ghost cannot resolve builder-os's default repo alias pre-admit
 without reading contract material (§5.8 forbids contract knowledge in ghost), and
 the canonical uid is only known *after* admit returns. An identical retry — the
-real recovery case — reuses the same request key and therefore the same token.
-The canonical uid is stored on the entry once known, for observability and to let
-a caller reconcile. (Residual: two *different* command forms for the same ticket
-— e.g. ``issue:5`` vs ``issue:5 repo:x`` — key differently; the post-admit
-registry idempotency check catches an already-registered ticket, so the only
-uncovered sliver is a cross-form retry inside the admit→register crash window.)
+common recovery case — reuses the same request key and therefore the same token.
+
+**Cross-form retries** (``issue:10`` then ``issue:10 repo:builder-os``) key
+differently, so the request key alone is not enough: a naive retry would mint a
+NEW token, and because admit persists the FIRST token's hash and never overwrites
+it, the human would be permanently unauthorized. This is closed by
+:meth:`reconcile` — called immediately after admit resolves the canonical uid, it
+binds every request entry to the **earliest** token already recorded for that uid
+(insertion order = admit order), so a cross-form retry reuses the original token.
+The registry write happens with the reconciled token. (Irreducible residual: a
+crash in the single ``await`` between admit *returning* and :meth:`reconcile`
+persisting the uid binding — orders of magnitude smaller than the admit→register
+window this closes, and impossible to eliminate without a transactional admit.)
 
 Durability
 ----------
@@ -92,22 +99,58 @@ class BuilderStartJournal:
             logger.info("start journal: minted token for %s (crash-safe)", key)
             return token
 
-    async def mark_admitted(self, key: str, ticket_uid: str) -> None:
-        """Annotate the entry with the canonical uid once admit resolves it."""
-        async with credential_lock(self._lock_file, timeout=_LOCK_TIMEOUT_S):
-            data = self._read()
-            entry = data.get(key)
-            if isinstance(entry, dict):
-                entry["ticket_uid"] = ticket_uid
-                await atomic_write_json(self._file, data)
+    async def reconcile(self, key: str, ticket_uid: str, current_token: str) -> str:
+        """Bind *key* to the canonical *ticket_uid* and return the **authoritative**
+        token for it — the earliest one already recorded for this uid across any
+        request form (insertion order = admit order), else *current_token*.
 
-    async def clear(self, key: str) -> None:
-        """Drop the entry once the registry write has committed (window closed)."""
+        Called immediately after admit resolves the uid. This is what makes a
+        cross-form retry safe: attempt 1 (``issue:10``) admits token A and stamps
+        its uid before crashing at the registry write; attempt 2
+        (``issue:10 repo:builder-os``) mints token B, admits (builder-os keeps
+        A's hash), then reconciles → finds attempt 1's A bound to this uid →
+        returns A, which is what gets registered. The human stays authorized.
+        """
         async with credential_lock(self._lock_file, timeout=_LOCK_TIMEOUT_S):
             data = self._read()
-            if data.pop(key, None) is not None:
+            authoritative = None
+            for entry in data.values():  # dict preserves insertion (=admit) order
+                if (isinstance(entry, dict) and entry.get("ticket_uid") == ticket_uid
+                        and entry.get("token")):
+                    authoritative = entry["token"]
+                    break
+            if authoritative is None:
+                authoritative = current_token
+            cur = data.get(key)
+            if not isinstance(cur, dict):
+                cur = {}
+            cur["token"] = authoritative
+            cur["ticket_uid"] = ticket_uid
+            data[key] = cur
+            await atomic_write_json(self._file, data)
+            if authoritative != current_token:
+                logger.info(
+                    "start journal: reconciled %s to the original token for %s "
+                    "(cross-form retry — crash-safe)", key, ticket_uid)
+            return authoritative
+
+    async def clear(self, key: str, *, ticket_uid: str | None = None) -> None:
+        """Drop the entry once the registry write has committed (window closed).
+
+        Also drops every other entry bound to *ticket_uid* (a cross-form retry
+        leaves a stale sibling entry that must not leak a token), and is safe to
+        call on a definitive admit failure to avoid a stale-token leak."""
+        async with credential_lock(self._lock_file, timeout=_LOCK_TIMEOUT_S):
+            data = self._read()
+            changed = data.pop(key, None) is not None
+            if ticket_uid is not None:
+                for k in [k for k, e in data.items()
+                          if isinstance(e, dict) and e.get("ticket_uid") == ticket_uid]:
+                    data.pop(k, None)
+                    changed = True
+            if changed:
                 await atomic_write_json(self._file, data)
-                logger.debug("start journal: cleared %s (committed)", key)
+                logger.debug("start journal: cleared %s (uid=%s)", key, ticket_uid)
 
     def token_for(self, key: str) -> str | None:
         """Non-locking peek (for tests / diagnostics)."""

@@ -449,6 +449,85 @@ async def test_start_crash_between_admit_and_register_reuses_token(settings):
     assert engine.builder_start_journal.token_for(request_key("builder-os", 10)) is None
 
 
+@pytest.mark.asyncio
+async def test_cross_form_retry_in_crash_window_keeps_human_authorized(settings, tmp_path):
+    """CR-round-1 major: a cross-FORM retry (`issue:10` then `issue:10
+    repo:builder-os`) inside the admit→register crash window must NOT strand the
+    human. The two forms key the journal differently, so attempt 2 mints a new
+    token — but builder-os persists attempt 1's token hash and never overwrites
+    it, so registering the new token would be permanent unauthorization. Post-
+    admit uid reconciliation reuses attempt 1's token. This asserts against a
+    faithful admit stub (writes sha256(token) only-if-absent, like builder-os)."""
+    import hashlib
+
+    runtime = tmp_path / "rt"
+    cap = runtime / "auth" / "capability.sha256"
+    admit_tokens = []
+
+    async def stub(args):
+        if args[:2] == ["ticket", "admit"]:
+            tok = args[args.index("--capability-token") + 1]
+            admit_tokens.append(tok)
+            if not cap.exists():  # builder-os writes the hash ONLY if absent
+                cap.parent.mkdir(parents=True, exist_ok=True)
+                cap.write_text(hashlib.sha256(tok.encode()).hexdigest() + "\n")
+            return 0, _spec(runtime_dir=str(runtime)), ""
+        return 0, "", ""
+
+    engine, adapter = _mk_engine(settings)
+    engine.builder_launcher._runner = stub
+    tokens = iter(["TOK-A", "TOK-B", "TOK-C"])
+    engine.builder_launcher._token_factory = lambda: next(tokens)
+
+    # attempt 1: repo OMITTED; crash the registry write (admit already done).
+    real_register = engine.builder_registry.register
+    n = {"v": 0}
+
+    async def flaky(*a, **k):
+        n["v"] += 1
+        if n["v"] == 1:
+            raise RuntimeError("crash after admit, before persist")
+        return await real_register(*a, **k)
+
+    engine.builder_registry.register = flaky
+    with pytest.raises(RuntimeError):
+        await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo=None)
+
+    # attempt 2: DIFFERENT form (repo now provided) — the reviewer's scenario.
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+
+    # builder-os hashed TOK-A (first admit) and never overwrote it …
+    assert cap.read_text().strip() == hashlib.sha256(b"TOK-A").hexdigest()
+    # … and ghost registered the SAME token, so the human stays authorized.
+    assert engine.builder_registry.get(UID).capability_token == "TOK-A"
+    # attempt 2 did mint TOK-B (different form) but it was reconciled away.
+    assert admit_tokens == ["TOK-A", "TOK-B"]
+
+
+@pytest.mark.asyncio
+async def test_definitive_admit_failure_clears_journal(settings):
+    """CR-round-1 minor: a definitive admit refusal persists no capability hash,
+    so its journalled token is worthless — clear it, no stale-token leak."""
+    from gits.core.builder_start_journal import request_key
+
+    responses = _default_responses()
+    responses[("ticket", "admit")] = (2, "", "error: gate refused admission")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    assert any("failed" in (e.title or "").lower() for e in adapter.embeds())
+    assert engine.builder_start_journal.token_for(request_key("builder-os", 10)) is None
+
+
+@pytest.mark.asyncio
+async def test_start_locks_reaped_after_completion(settings):
+    """CR-round-1 minor: the per-request start-lock map is bounded (reaped)."""
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    assert engine._bos_start_locks == {}
+
+
 # ── B3: replay binds (no double-launch) + start race ─────────────────────────
 
 

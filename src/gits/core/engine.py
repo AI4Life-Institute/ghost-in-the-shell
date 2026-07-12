@@ -7,6 +7,7 @@ and delegates to TmuxController, SessionManager, ScreenshotEngine, etc.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import shlex
@@ -146,7 +147,9 @@ class Engine:
         # Crash-safe /bos start token journal (B2) + per-request start locks (B3).
         self.builder_start_journal = BuilderStartJournal(
             settings.builder_start_journal_file)
-        self._bos_start_locks: dict[str, asyncio.Lock] = {}
+        # request_key -> [lock, refcount]; reaped when the last holder/waiter
+        # leaves, so the map can't grow unbounded over a long daemon lifetime.
+        self._bos_start_locks: dict[str, list] = {}
         self.builder_event_monitor = BuilderEventMonitor(
             registry=self.builder_registry,
             offsets_file=settings.builder_event_offsets_file,
@@ -2975,15 +2978,23 @@ class Engine:
             spec = await self.builder_launcher.admit(
                 issue, repo, token, requester=actor)
         except BuilderLaunchError as exc:
+            # A definitive admit failure (gate/validation refusal) persists no
+            # capability hash, so the journalled token is worthless — clear it so
+            # a permanently-failing admit can't leak a stale token entry.
+            await self.builder_start_journal.clear(rkey)
             await self._bos_refuse(
                 channel_id, interaction, "⚠️ /bos start failed", str(exc))
             return
         uid = spec.ticket_uid
-        await self.builder_start_journal.mark_admitted(rkey, uid)
+        # (B2) reconcile to the authoritative token for this canonical uid — this
+        # closes the cross-form retry hole: if a prior attempt (under a different
+        # request form) already admitted a token for this uid, reuse it, since
+        # builder-os persists the FIRST token's hash and never overwrites it.
+        token = await self.builder_start_journal.reconcile(rkey, uid, token)
 
         # (R11) authoritative idempotency — covers the repo-omitted default alias.
         if self.builder_registry.get(uid) is not None:
-            await self.builder_start_journal.clear(rkey)
+            await self.builder_start_journal.clear(rkey, ticket_uid=uid)
             await self._bos_start_existing(uid, channel_id, interaction)
             return
 
@@ -2991,7 +3002,7 @@ class Engine:
         # do NOT launch a second CLI (a takeover is `/bos resume --takeover`).
         if spec.replay:
             await self._bos_bind_replay(uid, spec, token, channel_id, interaction)
-            await self.builder_start_journal.clear(rkey)
+            await self.builder_start_journal.clear(rkey, ticket_uid=uid)
             return
 
         # --- side effects (past this point) --------------------------------
@@ -3021,8 +3032,9 @@ class Engine:
             assistant_channel_id=channel_id,
         )
         # (B2) the admit→register crash window is now closed — drop the journal
-        # entry so a later start of the same issue mints a fresh token normally.
-        await self.builder_start_journal.clear(rkey)
+        # entry (and any cross-form sibling for this uid) so a later start of the
+        # same issue mints a fresh token normally.
+        await self.builder_start_journal.clear(rkey, ticket_uid=uid)
         await self.session_mgr.bind(
             platform="discord",
             channel_id=thread_id,
@@ -3046,13 +3058,27 @@ class Engine:
             f"`driver.started` card will follow when builder-os emits it.",
         )
 
-    def _bos_start_lock(self, key: str) -> asyncio.Lock:
-        """Per-request start lock (B3), lazily created (mirrors _binding_lock)."""
-        lock = self._bos_start_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._bos_start_locks[key] = lock
-        return lock
+    @contextlib.asynccontextmanager
+    async def _bos_start_lock(self, key: str):
+        """Per-request start lock (B3), refcounted so the map is bounded.
+
+        A ``[lock, refcount]`` entry is created on first use and evicted when the
+        last concurrent holder/waiter releases — so distinct tickets started over
+        a long daemon lifetime don't leak an ``asyncio.Lock`` each. Waiters bump
+        the refcount before awaiting the lock, so the entry survives contention.
+        """
+        entry = self._bos_start_locks.get(key)
+        if entry is None:
+            entry = [asyncio.Lock(), 0]
+            self._bos_start_locks[key] = entry
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0:
+                self._bos_start_locks.pop(key, None)
 
     async def _bos_bind_replay(
         self, uid: str, spec: LaunchSpec, token: str, channel_id: str, interaction: Any,
