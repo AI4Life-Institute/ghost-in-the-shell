@@ -505,6 +505,66 @@ async def test_cross_form_retry_in_crash_window_keeps_human_authorized(settings,
 
 
 @pytest.mark.asyncio
+async def test_concurrent_cross_form_start_serializes_by_issue(settings, tmp_path):
+    """CR-round-2 major: two CONCURRENT cross-form starts for one issue must not
+    race into the same permanent-unauthorization. reconcile() assumes insertion
+    order == admit order, which only holds if same-ticket starts can't admit
+    concurrently. The start lock is now keyed by issue number, so they serialize;
+    this proves admit never overlaps (max in-flight == 1) and the registered
+    token matches the hash builder-os actually persisted. Old code (lock by
+    request form) let both admit concurrently → max == 2 → this fails."""
+    import hashlib
+
+    runtime = tmp_path / "rt"
+    cap = runtime / "auth" / "capability.sha256"
+    inflight = {"cur": 0, "max": 0}
+
+    async def stub(args):
+        if args[:2] == ["ticket", "admit"]:
+            await asyncio.sleep(0.01)
+            tok = args[args.index("--capability-token") + 1]
+            if not cap.exists():  # builder-os writes the hash only-if-absent
+                cap.parent.mkdir(parents=True, exist_ok=True)
+                cap.write_text(hashlib.sha256(tok.encode()).hexdigest() + "\n")
+            return 0, _spec(runtime_dir=str(runtime)), ""
+        return 0, "", ""
+
+    engine, adapter = _mk_engine(settings)
+    engine.builder_launcher._runner = stub
+    toks = iter(["TOK-A", "TOK-B", "TOK-C", "TOK-D"])
+    engine.builder_launcher._token_factory = lambda: next(toks)
+
+    # Track concurrency of the whole start CRITICAL SECTION (everything under the
+    # start lock). Keyed by issue, the two cross-form starts must never overlap;
+    # keyed by request form (old code) they hold different locks and both enter.
+    orig = engine._handle_bos_start_locked
+
+    async def tracked(*a, **k):
+        inflight["cur"] += 1
+        inflight["max"] = max(inflight["max"], inflight["cur"])
+        try:
+            await asyncio.sleep(0)  # let any non-serialized peer enter here
+            return await orig(*a, **k)
+        finally:
+            inflight["cur"] -= 1
+
+    engine._handle_bos_start_locked = tracked
+
+    # concurrent cross-form starts for the SAME issue (omitted vs explicit repo).
+    await asyncio.gather(
+        engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo=None),
+        engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os"),
+    )
+
+    # serialized by issue → the start critical section never overlapped, so the
+    # journal's insertion-order == admit-order assumption holds.
+    assert inflight["max"] == 1
+    # the registered token matches the hash builder-os actually persisted.
+    registered = engine.builder_registry.get(UID).capability_token
+    assert cap.read_text().strip() == hashlib.sha256(registered.encode()).hexdigest()
+
+
+@pytest.mark.asyncio
 async def test_definitive_admit_failure_clears_journal(settings):
     """CR-round-1 minor: a definitive admit refusal persists no capability hash,
     so its journalled token is worthless — clear it, no stale-token leak."""

@@ -33,10 +33,20 @@ it, the human would be permanently unauthorized. This is closed by
 :meth:`reconcile` — called immediately after admit resolves the canonical uid, it
 binds every request entry to the **earliest** token already recorded for that uid
 (insertion order = admit order), so a cross-form retry reuses the original token.
-The registry write happens with the reconciled token. (Irreducible residual: a
+The registry write happens with the reconciled token.
+
+Insertion order == admit order only holds if starts for the same ticket cannot
+admit concurrently. Two concurrent cross-form starts (``issue:10`` vs
+``issue:10 repo:builder-os``) would otherwise race — admit writes the capability
+hash *only-if-absent*, so the hash-race *winner* need not be the earliest-inserted
+journal entry, and reconcile could then register a *losing* token. The engine
+closes this by keying the ``/bos start`` lock on the **issue number** (any two
+starts that could resolve to one uid share an issue), so same-ticket starts
+serialize and the ordering assumption holds. The **only** remaining residual is a
 crash in the single ``await`` between admit *returning* and :meth:`reconcile`
-persisting the uid binding — orders of magnitude smaller than the admit→register
-window this closes, and impossible to eliminate without a transactional admit.)
+persisting the uid binding — genuinely irreducible without a transactional admit
+across the subprocess boundary, and orders of magnitude smaller than the
+admit→register window this closes.
 
 Durability
 ----------

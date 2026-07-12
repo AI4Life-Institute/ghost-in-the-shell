@@ -2946,11 +2946,18 @@ class Engine:
         if actor is None:
             return
 
-        # (B3) serialize concurrent starts of the SAME request so two clicks
-        # can't double-admit / double-register. Keyed by the request (uid is not
-        # known until admit resolves the default repo alias).
+        # (B3 + CR2) serialize concurrent starts by ISSUE NUMBER, not by request
+        # form. Two starts can only ever resolve to the same ticket uid if they
+        # share an issue number (uid = <repo>:<issue>), so locking on the issue
+        # guarantees any two that *could* collide are serialized — even across arg
+        # forms (`issue:10` vs `issue:10 repo:builder-os`). This is what makes the
+        # journal's insertion-order == admit-order assumption hold under
+        # concurrency, so reconcile() always returns the token builder-os actually
+        # hashed (else a concurrent cross-form admit race could register a losing
+        # token → permanent unauthorization). The journal itself stays keyed by
+        # the request form (rkey); reconcile bridges forms by uid.
         rkey = _bos_request_key(repo, issue)
-        async with self._bos_start_lock(rkey):
+        async with self._bos_start_lock(f"issue:{issue}"):
             await self._handle_bos_start_locked(
                 channel_id, actor, issue, repo, rkey, interaction)
 
