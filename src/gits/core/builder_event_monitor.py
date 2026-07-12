@@ -27,9 +27,16 @@ seam (T7 renders the card). Dedup is durable: projection **receipts**
 ``{event_id → discord_message_id}`` are persisted in the same store as offsets,
 written before the offset advances, so replay never re-delivers a receipted
 event. The guarantee is honestly **at-least-once** (0002 §4.3, which supersedes
-issue #8's "exactly-once" wording): the crash window between a successful post
-and receipt persistence yields at most one duplicate, which T7's renderer
-repairs — that repair and all card rendering are T7, out of scope here.
+issue #8's "exactly-once" wording): the crash window is the interval between a
+successful ``on_event`` post and the *debounced* (≤10s) receipt persistence, so
+an event delivered but not yet receipted is re-posted after a crash. The seam
+consumer (T7's ``BuilderRenderer``) closes this: it keeps its own
+``event_id → message_id`` index and persists it *synchronously per post* —
+strictly more durable than this store's debounced receipts — so a replay finds
+the event already rendered and returns the existing id, posting nothing new. The
+residual is the sub-millisecond gap between the platform ACK and that atomic
+write, bounded to at most one duplicate card and repaired renderer-side; all
+card rendering + that repair are T7, out of scope here.
 
 Dormant by default: with no ``~/.gits/builder_tickets.json`` the poll loop is a
 stat-and-sleep no-op — zero behavior change, no store file created. A later
