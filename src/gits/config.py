@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     jsonl_poll_interval: float = 2.0
     health_check_interval: float = 5.0
 
+    # ── Builder OS (dormant until ~/.gits/builder_tickets.json exists) ──
+    # Resolution boundary for builder-os repo-relative paths (0002 §5.1, M2).
+    # Absolute paths stored in the registry are resolved once against this at
+    # registration time; the monitor never depends on cwd.
+    builder_os_root: Path | None = None
+    builder_event_poll_interval: float = 2.0
+
     # ── Security ──────────────────────────────────────────────────────
     allowed_paths: list[str] = []
 
@@ -84,3 +91,13 @@ class Settings(BaseSettings):
     @property
     def quota_patterns_file(self) -> Path:
         return self.state_dir / "quota_patterns.yaml"
+
+    @property
+    def builder_tickets_file(self) -> Path:
+        """Ghost-owned builder ticket registry (0002 §5.1, G1)."""
+        return self.state_dir / "builder_tickets.json"
+
+    @property
+    def builder_event_offsets_file(self) -> Path:
+        """BuilderEventMonitor offset + projection-receipt store (0002 §5.4)."""
+        return self.state_dir / "builder_event_offsets.json"
