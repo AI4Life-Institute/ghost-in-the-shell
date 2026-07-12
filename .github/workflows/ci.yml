@@ -4,7 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
+    branches: [master, builder-os-rollout-v2]
 
 jobs:
   test:
@@ -23,8 +23,92 @@ jobs:
           git config --global user.email "ci@github.com"
           git config --global user.name "CI"
 
+      # The general suite must NOT depend on builder-os availability, so the
+      # cross-repo gate module is excluded here and runs only in the dedicated
+      # `builder-os-integration` job below.
       - name: Run tests
-        run: uv sync --extra dev && uv run pytest --tb=short -q --cov=gits --cov-report=term-missing
+        run: |
+          uv sync --extra dev && uv run pytest --tb=short -q \
+            --cov=gits --cov-report=term-missing \
+            --ignore=tests/test_builder_os_integration.py
+
+  builder-os-integration:
+    # tv6q3n / codex gate #8 — the cross-repo merge gate for builder-os-rollout-v2.
+    # Drives the REAL ghost chain against the REAL builder-os CLI (pinned SHA) on a
+    # throwaway repo. Deliberately SEPARATE from `test`: a mis-provisioned runner
+    # must turn THIS job red without ever weakening or silently skipping the gate.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      BOS_PIN: ec23fdb2c9cabeb0ee8bd6f244d7d0a41bac1cfa  # builder-os master (#21+#22)
+    steps:
+      - name: Checkout ghost
+        uses: actions/checkout@v4
+
+      # The private builder-os repo is NOT readable with the default GITHUB_TOKEN.
+      # A missing secret must FAIL LOUD (a skipped gate is a false pass), never
+      # degrade to a skip — flag it so the operator provisions BOS_CHECKOUT_TOKEN.
+      - name: Require cross-repo checkout secret
+        env:
+          BOS_CHECKOUT_TOKEN: ${{ secrets.BOS_CHECKOUT_TOKEN }}
+        run: |
+          if [ -z "$BOS_CHECKOUT_TOKEN" ]; then
+            echo "::error title=tv6q3n gate::secret BOS_CHECKOUT_TOKEN is not set — the merge gate cannot check out the private builder-os repo. A missing secret must FAIL the gate (never skip / never green). Provision a PAT/deploy key with builder-os read access."
+            exit 1
+          fi
+
+      - name: Checkout builder-os @ pinned SHA
+        uses: actions/checkout@v4
+        with:
+          repository: AI4Life-Institute/builder-os
+          ref: ${{ env.BOS_PIN }}
+          token: ${{ secrets.BOS_CHECKOUT_TOKEN }}
+          path: builder-os
+          fetch-depth: 0
+
+      - name: Verify builder-os is at the pinned SHA
+        run: |
+          cd builder-os
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$HEAD_SHA" != "$BOS_PIN" ]; then
+            echo "::error title=tv6q3n gate::builder-os HEAD $HEAD_SHA != pinned $BOS_PIN"
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install tmux
+        run: sudo apt-get install -y tmux
+
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@github.com"
+          git config --global user.name "CI"
+
+      - name: Build builder-os venv (real driver CLI)
+        run: cd builder-os && uv sync
+
+      - name: Build ghost venv
+        run: uv sync --extra dev
+
+      - name: Run the cross-repo integration gate (fail-loud, no skip)
+        env:
+          # NOTE: TV6Q3N_ALLOW_SKIP is intentionally NOT set — in the gate job a
+          # skip is a false pass and must be impossible.
+          BOS_REPO: ${{ github.workspace }}/builder-os
+          BOS_PYTHON: ${{ github.workspace }}/builder-os/.venv/bin/python
+        run: |
+          test -x "$BOS_PYTHON" || { echo "::error title=tv6q3n gate::builder-os venv python missing at $BOS_PYTHON"; exit 1; }
+          # Guard against a silently-shrunken gate: require >= 11 scenarios collected.
+          COLLECTED=$(uv run pytest tests/test_builder_os_integration.py --collect-only -q \
+            | grep -cE '::test_' || true)
+          echo "gate scenarios collected: $COLLECTED"
+          if [ "${COLLECTED:-0}" -lt 11 ]; then
+            echo "::error title=tv6q3n gate::only $COLLECTED gate tests collected (<11) — refusing to run a shrunken gate"
+            exit 1
+          fi
+          uv run pytest tests/test_builder_os_integration.py --tb=short -q
 
   release:
     needs: test

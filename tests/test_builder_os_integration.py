@@ -12,6 +12,8 @@ so scenarios are isolated and order-independent.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from gits.core.builder_response import RespondOutcome
@@ -27,14 +29,41 @@ from tests.builder_integration.harness import (
     write_humans,
 )
 
-# The gate drives the REAL builder-os CLI (pinned SHA) via its venv python. On a
-# host that hasn't provisioned that checkout the module skips with a loud reason
-# rather than erroring; the merge-gate CI provisions it (BOS_REPO / BOS_PYTHON).
-pytestmark = pytest.mark.skipif(
-    not BOS_PYTHON.exists(),
-    reason=(f"builder-os toolchain not found at {BOS_PYTHON} — set BOS_REPO/BOS_PYTHON "
-            "to the pinned builder-os checkout to run the tv6q3n integration gate"),
-)
+# --------------------------------------------------------------------------- #
+# Merge-gate posture: this gate MUST run. A silent skip on a mis-provisioned CI
+# reads as a false pass (the T9 AC17 false-green class), so the DEFAULT when the
+# builder-os toolchain is missing is to **fail loud**, never skip. A local dev
+# without builder-os can opt into skipping explicitly with TV6Q3N_ALLOW_SKIP=1;
+# CI never sets it, so a mis-provisioned runner goes RED, never green.
+# --------------------------------------------------------------------------- #
+_ALLOW_SKIP = os.environ.get("TV6Q3N_ALLOW_SKIP") == "1"
+GATE_SCENARIO_MIN = 11   # happy path + 10 fault scenarios (guard against silent loss)
+
+
+@pytest.fixture(autouse=True)
+def _require_builder_os_toolchain():
+    if BOS_PYTHON.exists():
+        return
+    if _ALLOW_SKIP:
+        pytest.skip(f"builder-os toolchain absent at {BOS_PYTHON} — TV6Q3N_ALLOW_SKIP dev opt-out")
+    pytest.fail(
+        f"tv6q3n MERGE GATE cannot run: builder-os toolchain not found at {BOS_PYTHON}. "
+        "A skipped gate is a FALSE PASS — provision BOS_REPO/BOS_PYTHON to the pinned "
+        "builder-os checkout (or set TV6Q3N_ALLOW_SKIP=1 for a local dev opt-out).",
+        pytrace=False,
+    )
+
+
+def test_gate_scenario_count_is_complete():
+    """Belt-and-suspenders against silent scenario loss: the gate must carry the
+    happy path + all 10 fault scenarios. Catches an accidental deletion that
+    would otherwise shrink the gate without turning it red."""
+    import tests.test_builder_os_integration as mod
+
+    scenarios = [n for n in dir(mod)
+                 if n.startswith("test_") and (n.startswith("test_s") or "happy" in n)]
+    assert len(scenarios) >= GATE_SCENARIO_MIN, \
+        f"expected ≥{GATE_SCENARIO_MIN} gate scenarios, found {len(scenarios)}: {sorted(scenarios)}"
 
 MAPPED_USER = "555"      # present in builder_humans.json → "liangchen"
 UNMAPPED_USER = "999"    # absent → fail-closed
@@ -195,6 +224,29 @@ async def test_s7_requester_admission_and_failclosed_unmapped(wired):
 
 
 # --------------------------------------------------------------------------- #
+# Scenario 7b — negative auth: a wrong capability token is rejected (tamper)
+# --------------------------------------------------------------------------- #
+async def test_s7b_wrong_capability_token_rejected(wired):
+    env, drv, settings, adapter, engine = wired
+    did = drv.drive_to_ready()
+    # ghost holds a WRONG token (mint mismatch / tamper). The actor gate passes
+    # (mapped id) so this isolates the capability-token check: builder-os compares
+    # sha256(token) to the hash frozen at admit and rejects the mismatch (exit 8).
+    await register_ticket(engine, env, drv.session_id, channel_id=THREAD,
+                          assistant_channel_id=ASSIST, capability_token="WRONG-CAP-TOKEN")
+    await pump(engine, 2)
+
+    outcome = await engine.builder_response.respond(THREAD, MAPPED_USER, env.uid, did, "merge")
+    assert outcome == RespondOutcome.UNAUTHORIZED
+    # nothing recorded, nothing disposed, no merge — and the ticket survives
+    assert "driver.disposed" not in env.event_types()
+    assert "merge bos/4" not in env.clone_log()
+    assert engine.builder_registry.get(env.uid) is not None
+    # the correct token, by contrast, authorises (proven green by the happy path):
+    # so the hash match is load-bearing here, not assumed.
+
+
+# --------------------------------------------------------------------------- #
 # Scenario 8 — resume fencing: refuse unless the prior window is confirmed absent (B5)
 # --------------------------------------------------------------------------- #
 async def test_s8_resume_refuses_without_fencing(wired):
@@ -295,6 +347,9 @@ async def test_s9_request_changes_keeps_ticket_no_cleanup(wired):
     # (which would refuse from CR_REWORK)
     assert engine.builder_registry.get(env.uid) is not None
     assert env.read_state()["state"] == "CR_REWORK"
+    # pane-alive (explicit): the terminal teardown never ran, so the driver pane
+    # was not killed — the CR round can continue in it.
+    engine.tmux.kill_window.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #

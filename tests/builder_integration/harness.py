@@ -395,15 +395,23 @@ def write_humans(settings, mapping: dict) -> None:
     f.write_text(json.dumps(mapping))
 
 
+_USE_ENV_TOKEN = object()  # sentinel: default to the env's real capability token
+
+
 async def register_ticket(engine, env: BosEnv, driver_session_id: str, *,
-                          channel_id: str = "thread-1", assistant_channel_id: str = "assist-1"):
+                          channel_id: str = "thread-1", assistant_channel_id: str = "assist-1",
+                          capability_token=_USE_ENV_TOKEN):
+    """Register the ticket in ghost's registry. ``capability_token`` defaults to
+    the env's real token; pass a wrong string or ``None`` (missing) to exercise
+    the auth-rejection path."""
+    token = env.capability_token if capability_token is _USE_ENV_TOKEN else capability_token
     return await engine.builder_registry.register(
         env.uid,
         runtime_dir=str(env.runtime_dir),
         event_log=str(env.event_log),
         channel_id=channel_id,
         driver_session_id=driver_session_id,
-        capability_token=env.capability_token,
+        capability_token=token,
         assistant_channel_id=assistant_channel_id,
     )
 

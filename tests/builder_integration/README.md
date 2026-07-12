@@ -26,8 +26,14 @@ PYTHONPATH=$PWD/src python -m pytest tests/test_builder_os_integration.py -q
 ```
 
 `BOS_REPO`/`BOS_PYTHON` default to `/Users/sharon/src/builder-os` for local dev.
-If the builder-os venv python is absent the module **skips** (loud reason) rather
-than failing — CI must provision the pinned checkout so the gate actually runs.
+
+**Merge-gate posture (no skip-as-pass).** This gate *must* run — a silent skip
+reads as a false pass. So if the builder-os toolchain is absent the module
+**fails loud (RED)** by default; a mis-provisioned CI runner goes red, never
+green. A local dev without builder-os can opt into skipping explicitly with
+`TV6Q3N_ALLOW_SKIP=1` (CI never sets it). A `test_gate_scenario_count_is_complete`
+guard additionally fails if the scenario set ever shrinks below the happy path +
+10 faults.
 
 ## Shape (why it's honest)
 
