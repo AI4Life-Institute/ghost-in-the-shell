@@ -125,6 +125,9 @@ class Projection:
 # Seam callback types.
 OnEvent = Callable[[str, BuilderEvent], Awaitable["str | None"]]
 OnFault = Callable[[str, str, str], Awaitable[None]]
+# Builder-*global* fault (not per-ticket): the registry file itself is corrupt.
+# Missing = dormant (silent); corrupt = surfaced (minor).
+OnGlobalFault = Callable[[str], Awaitable[None]]
 
 
 class BuilderEventMonitor:
@@ -171,6 +174,10 @@ class BuilderEventMonitor:
         # is tracked, but nothing is delivered (harmless).
         self._on_event: OnEvent | None = None
         self._on_fault: OnFault | None = None
+        self._on_global_fault: OnGlobalFault | None = None
+        # Last-surfaced registry-corruption message, for dedup (fire once per
+        # distinct fault; clear + log recovery when the file becomes valid again).
+        self._registry_fault: str | None = None
 
         self._load()
 
@@ -185,6 +192,14 @@ class BuilderEventMonitor:
         """Register the fault seam: ``(ticket_uid, kind, detail)``. Invoked once
         when a ticket freezes (schema/protocol/sequence); T7 renders the card."""
         self._on_fault = callback
+
+    def on_global_fault(self, callback: OnGlobalFault) -> None:
+        """Register the builder-global fault seam: ``(detail)``. Invoked once
+        when the registry file itself is corrupt (distinct from a *missing* file,
+        which is the silent dormant default). Lets the operator learn that
+        builder rendering is degraded, rather than the corruption being masked as
+        zero tickets (minor)."""
+        self._on_global_fault = callback
 
     # -- read-only projection accessors (for T7 / §5.3 suppression) ---------
 
@@ -239,6 +254,14 @@ class BuilderEventMonitor:
         """One poll iteration. No registry ⇒ immediate no-op (dormant default)."""
         if not self._registry.exists():
             return
+        # A *present but corrupt* registry is not "zero tickets" — surface it as
+        # a builder-global fault (once) and skip iteration; iterating a corrupt
+        # view (which reads as empty) would silently stall every live ticket.
+        fault = self._registry.integrity_fault()
+        if fault is not None:
+            await self._surface_registry_fault(fault)
+            return
+        self._clear_registry_fault()
         for ticket in self._registry.list_tickets():
             try:
                 await self._check_ticket(ticket)
@@ -246,6 +269,23 @@ class BuilderEventMonitor:
                 logger.warning(
                     "BuilderEventMonitor error for ticket %s", ticket.uid, exc_info=True
                 )
+
+    async def _surface_registry_fault(self, detail: str) -> None:
+        """Emit the builder-global fault once per distinct corruption (minor)."""
+        if detail == self._registry_fault:
+            return  # already surfaced this exact fault
+        self._registry_fault = detail
+        logger.error("Builder registry fault — rendering degraded: %s", detail)
+        if self._on_global_fault is not None:
+            try:
+                await self._on_global_fault(detail)
+            except Exception:
+                logger.warning("on_global_fault seam raised", exc_info=True)
+
+    def _clear_registry_fault(self) -> None:
+        if self._registry_fault is not None:
+            logger.info("Builder registry fault cleared — registry readable again")
+            self._registry_fault = None
 
     # -- per-ticket ---------------------------------------------------------
 

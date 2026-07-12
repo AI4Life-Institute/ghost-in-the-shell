@@ -7,6 +7,7 @@ and delegates to TmuxController, SessionManager, ScreenshotEngine, etc.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import shlex
@@ -32,7 +33,8 @@ from .builder_humans import BuilderHumans
 from .builder_launch import BuilderLauncher, BuilderLaunchError, LaunchSpec
 from .builder_registry import BuilderRegistry
 from .builder_renderer import BuilderRenderer
-from .builder_response import BuilderResponseAdapter
+from .builder_response import BuilderResponseAdapter, DispositionOutcome, RespondOutcome
+from .builder_start_journal import BuilderStartJournal, request_key as _bos_request_key
 from .guard import GuardHandler
 from .health import HealthMonitor
 from .jsonl_monitor import JsonlMonitor
@@ -142,6 +144,12 @@ class Engine:
             registry_file=settings.builder_tickets_file,
             builder_os_root=settings.builder_os_root,
         )
+        # Crash-safe /bos start token journal (B2) + per-request start locks (B3).
+        self.builder_start_journal = BuilderStartJournal(
+            settings.builder_start_journal_file)
+        # request_key -> [lock, refcount]; reaped when the last holder/waiter
+        # leaves, so the map can't grow unbounded over a long daemon lifetime.
+        self._bos_start_locks: dict[str, list] = {}
         self.builder_event_monitor = BuilderEventMonitor(
             registry=self.builder_registry,
             offsets_file=settings.builder_event_offsets_file,
@@ -164,6 +172,7 @@ class Engine:
             builder_os_root=settings.builder_os_root,
             forced_forward_log=settings.builder_forced_forward_log,
             nudge=self._builder_nudge,
+            disposer=self._builder_dispose,
         )
         # G5/G6 launch + lifecycle orchestrator (T8). Shells the builder-os CLI
         # for the /bos entry points and parses the LaunchSpec seam; the tmux
@@ -280,6 +289,7 @@ class Engine:
         # G4 response adapter handles button clicks (see handle_button_click).
         self.builder_event_monitor.on_event(self.builder_renderer.on_event)
         self.builder_event_monitor.on_fault(self.builder_renderer.on_fault)
+        self.builder_event_monitor.on_global_fault(self._builder_global_fault)
         self.builder_event_monitor.start()
 
         # Quota notifier (no-op until subscriptions are registered)
@@ -2805,6 +2815,134 @@ class Engine:
                 return binding
         return None
 
+    async def _fence_prior_window(self, uid: str, binding) -> bool:
+        """B5: return True iff the prior driver window is *verified* absent.
+
+        No binding ⇒ nothing to fence (absent). Otherwise: if the window is
+        already gone, fenced. If it is alive, kill it and re-check liveness — a
+        kill that raised, or a window that survives the kill, is NOT fenced
+        (returns False). Absence is established by the liveness check, never
+        assumed from a kill call that may have failed.
+        """
+        if binding is None:
+            return True
+        try:
+            if not await self.tmux.window_exists(binding.window_id):
+                return True  # already dead — nothing to kill, verified absent
+        except Exception:
+            logger.warning(
+                "fence: liveness pre-check failed for %s", uid, exc_info=True)
+            # fall through: attempt the kill + post-check anyway
+        try:
+            await self.tmux.kill_window(binding.window_id)
+        except Exception:
+            logger.warning("fence: kill_window raised for %s", uid, exc_info=True)
+            return False
+        try:
+            return not await self.tmux.window_exists(binding.window_id)
+        except Exception:
+            logger.warning(
+                "fence: post-kill liveness check failed for %s", uid, exc_info=True)
+            return False
+
+    async def _builder_dispose(self, uid: str, decision_id: str) -> DispositionOutcome:
+        """B1 disposer seam — **state-driven and crash-resumable** (CR3).
+
+        Drives an answered disposition to its terminal outcome by reading the
+        ticket's *actual* state (``driver status``) and resuming from wherever a
+        prior attempt got to, rather than assuming a fresh ``READY_FOR_HUMAN``.
+        This makes it idempotent under a crash between any two steps (respond →
+        dispose → cleanup → teardown), and lets a *duplicate* response resume an
+        unfinished terminal workflow instead of dead-ending on "already decided".
+
+        Not every disposition is terminal (CR3 blocker 1): ``request_changes``
+        emits ``review.changes_requested`` → ``CR_REWORK`` (a new review round,
+        NOT a disposal), so it must NOT be cleaned up — the ticket + pane stay
+        alive and the Driver is nudged to continue. Only ``merge`` /
+        ``close_without_merge`` (``driver.disposed`` → ``DISPOSED``) advance to
+        cleanup → teardown → unregister.
+        """
+        try:
+            state = (await self.builder_launcher.status(uid)).get("state")
+        except BuilderLaunchError:
+            logger.warning("dispose: status read failed for %s", uid, exc_info=True)
+            return DispositionOutcome.DISPOSE_FAILED
+
+        # (1) answer recorded but not yet executed → dispose; branch on its result.
+        if state == "READY_FOR_HUMAN":
+            try:
+                result = await self.builder_launcher.dispose(uid, decision_id)
+            except BuilderLaunchError:
+                logger.warning(
+                    "dispose failed for %s decision %s", uid, decision_id, exc_info=True)
+                return DispositionOutcome.DISPOSE_FAILED
+            if "CR_REWORK" in result or "changes_requested" in result:
+                # request_changes: not terminal — keep the ticket + pane, nudge
+                # the Driver to continue the reopened CR round.
+                await self._builder_nudge(uid, self._CR_REWORK_NUDGE.format(uid=uid))
+                logger.info("disposition %s: changes requested (CR_REWORK) for %s",
+                            decision_id, uid)
+                return DispositionOutcome.CHANGES_REQUESTED
+            state = "DISPOSED"  # driver.disposed → advance to cleanup
+
+        # A prior request_changes already reopened the round — nothing to tear down.
+        if state == "CR_REWORK":
+            return DispositionOutcome.CHANGES_REQUESTED
+
+        # (2) disposed (or a prior cleanup left it mid-flight) → cleanup.
+        if state in ("DISPOSED", "CLEANUP", "CLEANUP_FAILED"):
+            try:
+                result = await self.builder_launcher.cleanup(uid)
+            except BuilderLaunchError:
+                logger.warning("cleanup failed for %s", uid, exc_info=True)
+                return DispositionOutcome.CLEANUP_FAILED
+            if result != "terminated":
+                # cleanup exits 0 even on a soft failure, keying the outcome into
+                # stdout — a non-"terminated" token is a real failure to surface.
+                logger.warning("cleanup for %s did not terminate: %r", uid, result)
+                return DispositionOutcome.CLEANUP_FAILED
+            state = "TERMINATED"
+
+        # (3) terminated → ghost-side teardown + unregister (idempotent).
+        if state == "TERMINATED":
+            await self._teardown_builder_ticket(uid)
+            return DispositionOutcome.DISPOSED
+
+        logger.warning("dispose: unexpected state %r for %s — not advancing", state, uid)
+        return DispositionOutcome.DISPOSE_FAILED
+
+    # Hint injected into the Driver pane when a disposition reopens a CR round.
+    _CR_REWORK_NUDGE = (
+        "[builder-os] {uid}: changes requested — a new review round is open; "
+        "continue the CR round (run `builder-os driver status` for the pending review)."
+    )
+
+    async def _teardown_builder_ticket(self, uid: str) -> None:
+        """Ghost-side terminal teardown after a confirmed dispose+cleanup (B1):
+        kill the driver pane (if any), unbind the thread, unregister the ticket."""
+        binding = self._binding_for_ticket(uid)
+        if binding is not None:
+            try:
+                await self.tmux.kill_window(binding.window_id)
+            except Exception:
+                logger.warning(
+                    "teardown: kill_window failed for %s", uid, exc_info=True)
+            await self.session_mgr.unbind(binding.channel_id)
+        await self.builder_registry.unregister(uid)
+        logger.info("builder ticket %s torn down (disposed → cleaned up)", uid)
+
+    async def _builder_global_fault(self, detail: str) -> None:
+        """Builder-global fault seam (minor): the registry file itself is corrupt.
+
+        No per-ticket thread exists to render into, so this surfaces the fault in
+        the operator-visible log at ERROR (the monitor dedups, so it fires once
+        per distinct fault). Distinct from a *missing* registry, which is the
+        silent dormant default.
+        """
+        logger.error(
+            "BUILDER REGISTRY CORRUPT — builder ticket rendering is degraded "
+            "until the file is repaired or removed: %s", detail)
+
     async def forced_forward(self, channel_id: str, user_id: str, text: str) -> bool:
         """`/bos forward` mechanics (§5.3): bypass suppression, audit, inject.
 
@@ -2853,23 +2991,74 @@ class Engine:
         if actor is None:
             return
 
+        # (B3 + CR2) serialize concurrent starts by ISSUE NUMBER, not by request
+        # form. Two starts can only ever resolve to the same ticket uid if they
+        # share an issue number (uid = <repo>:<issue>), so locking on the issue
+        # guarantees any two that *could* collide are serialized — even across arg
+        # forms (`issue:10` vs `issue:10 repo:builder-os`). This is what makes the
+        # journal's insertion-order == admit-order assumption hold under
+        # concurrency, so reconcile() always returns the token builder-os actually
+        # hashed (else a concurrent cross-form admit race could register a losing
+        # token → permanent unauthorization). The journal itself stays keyed by
+        # the request form (rkey); reconcile bridges forms by uid.
+        rkey = _bos_request_key(repo, issue)
+        async with self._bos_start_lock(f"issue:{issue}"):
+            await self._handle_bos_start_locked(
+                channel_id, actor, issue, repo, rkey, interaction)
+
+    async def _handle_bos_start_locked(
+        self, channel_id: str, actor: str, issue: int, repo: str | None,
+        rkey: str, interaction: Any,
+    ) -> None:
+        """The start choreography, under the per-request start lock (B3)."""
         # (R11) idempotency pre-check when the uid is nameable without admitting.
         if repo and self.builder_registry.get(f"{repo}:{issue}") is not None:
             await self._bos_start_existing(f"{repo}:{issue}", channel_id, interaction)
             return
 
-        token = self.builder_launcher.mint_token()
+        # (B2) journal the capability token BEFORE admit. A crash between admit
+        # and the registry write is then retryable without minting a NEW token —
+        # which would be fatal, since builder-os persists the FIRST token's hash
+        # and never overwrites it, so a new token would leave every later human
+        # response permanently unauthorized. A retry reuses this same token.
+        token = await self.builder_start_journal.get_or_create_token(
+            rkey, self.builder_launcher.mint_token)
         try:
-            spec = await self.builder_launcher.admit(issue, repo, token)
+            # (B4) admit on the resolved human's behalf over the remote seam:
+            # --requester <hid> --remote ⇒ admission evaluates local_operator=False
+            # and validates the requester against the pinned contract.
+            spec = await self.builder_launcher.admit(
+                issue, repo, token, requester=actor)
         except BuilderLaunchError as exc:
+            # A definitive admit failure (gate/validation refusal) persists no
+            # capability hash, so the journalled token is worthless — clear it so
+            # a permanently-failing admit can't leak a stale token entry.
+            await self.builder_start_journal.clear(rkey)
             await self._bos_refuse(
                 channel_id, interaction, "⚠️ /bos start failed", str(exc))
             return
         uid = spec.ticket_uid
+        # (B2) reconcile to the authoritative token for this canonical uid — this
+        # closes the cross-form retry hole: if a prior attempt (under a different
+        # request form) already admitted a token for this uid, reuse it, since
+        # builder-os persists the FIRST token's hash and never overwrites it.
+        # When builder-os emits the persisted hash (spec.capability_sha256,
+        # aq4rf9) reconcile selects the exact matching token, closing even the
+        # sub-await post-admit crash window.
+        token = await self.builder_start_journal.reconcile(
+            rkey, uid, token, capability_sha256=spec.capability_sha256)
 
         # (R11) authoritative idempotency — covers the repo-omitted default alias.
         if self.builder_registry.get(uid) is not None:
+            await self.builder_start_journal.clear(rkey, ticket_uid=uid)
             await self._bos_start_existing(uid, channel_id, interaction)
+            return
+
+        # (B3) replay ⇒ builder-os already has a live driver session; bind to it,
+        # do NOT launch a second CLI (a takeover is `/bos resume --takeover`).
+        if spec.replay:
+            await self._bos_bind_replay(uid, spec, token, channel_id, interaction)
+            await self.builder_start_journal.clear(rkey, ticket_uid=uid)
             return
 
         # --- side effects (past this point) --------------------------------
@@ -2898,6 +3087,10 @@ class Engine:
             capability_token=token,
             assistant_channel_id=channel_id,
         )
+        # (B2) the admit→register crash window is now closed — drop the journal
+        # entry (and any cross-form sibling for this uid) so a later start of the
+        # same issue mints a fresh token normally.
+        await self.builder_start_journal.clear(rkey, ticket_uid=uid)
         await self.session_mgr.bind(
             platform="discord",
             channel_id=thread_id,
@@ -2920,6 +3113,60 @@ class Engine:
             f"(issue #{issue}). Launching in <#{thread_id}>; the "
             f"`driver.started` card will follow when builder-os emits it.",
         )
+
+    @contextlib.asynccontextmanager
+    async def _bos_start_lock(self, key: str):
+        """Per-request start lock (B3), refcounted so the map is bounded.
+
+        A ``[lock, refcount]`` entry is created on first use and evicted when the
+        last concurrent holder/waiter releases — so distinct tickets started over
+        a long daemon lifetime don't leak an ``asyncio.Lock`` each. Waiters bump
+        the refcount before awaiting the lock, so the entry survives contention.
+        """
+        entry = self._bos_start_locks.get(key)
+        if entry is None:
+            entry = [asyncio.Lock(), 0]
+            self._bos_start_locks[key] = entry
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0:
+                self._bos_start_locks.pop(key, None)
+
+    async def _bos_bind_replay(
+        self, uid: str, spec: LaunchSpec, token: str, channel_id: str, interaction: Any,
+    ) -> None:
+        """B3 replay-on-start: bind to builder-os's existing live session instead
+        of launching a second CLI. Registers the ghost pointers (crash-recovery of
+        a lost registry). If a prior binding's window survives, ghost re-attaches
+        the monitor; otherwise the operator is pointed at `/bos resume`, which is
+        the verb that (re)establishes a live driver pane."""
+        binding = self._binding_for_ticket(uid)
+        target_channel = binding.channel_id if binding is not None else channel_id
+        await self.builder_registry.register(
+            uid,
+            runtime_dir=spec.runtime_dir,
+            event_log=spec.event_log,
+            channel_id=target_channel,
+            driver_session_id=spec.driver_session_id,
+            capability_token=token,
+            assistant_channel_id=channel_id,
+        )
+        if binding is not None and await self.tmux.window_exists(binding.window_id):
+            self.monitor.start_polling(target_channel, binding.window_id)
+            await self._bos_ack(
+                channel_id, interaction,
+                f"🔁 `/bos start` — **{uid}** already has a live builder-os "
+                f"session; bound to it (<#{target_channel}>) without relaunching.")
+        else:
+            await self._bos_ack(
+                channel_id, interaction,
+                f"ℹ️ `/bos start` — **{uid}** is already admitted with a live "
+                f"builder-os session, but ghost has no live pane for it. Run "
+                f"`/bos resume ticket:{uid}` to attach a driver window.")
 
     async def _bos_start_existing(
         self, uid: str, channel_id: str, interaction: Any,
@@ -2989,9 +3236,35 @@ class Engine:
                 channel_id, interaction, "🟢 No open decision",
                 f"**{uid}** has no decision awaiting an answer right now.")
             return
-        await self.builder_response.respond(channel_id, user_id, uid, decision_id, choice)
+        outcome = await self.builder_response.respond(
+            channel_id, user_id, uid, decision_id, choice)
+        # Minor: report the REAL result, not an unconditional "Submitted" — a
+        # duplicate / unauthorized / internal failure must read as such (the
+        # response adapter already posts the detailed card; this is the ack).
         if interaction is not None:
-            await self._reply(interaction, f"Submitted your answer to `{decision_id}`.")
+            await self._reply(interaction, self._bos_respond_reply(decision_id, outcome))
+
+    @staticmethod
+    def _bos_respond_reply(decision_id: str, outcome: RespondOutcome) -> str:
+        """Map a :class:`RespondOutcome` to the short interaction ack."""
+        return {
+            RespondOutcome.RECORDED:
+                f"✅ Recorded your answer to `{decision_id}` — awaiting driver consume.",
+            RespondOutcome.DISPOSED:
+                f"📦 Disposition `{decision_id}` executed — ticket cleaned up and terminated.",
+            RespondOutcome.CHANGES_REQUESTED:
+                f"🔁 Changes requested on `{decision_id}` — new review round open, ticket stays live.",
+            RespondOutcome.DISPOSE_FAILED:
+                f"⚠️ Recorded `{decision_id}`, but teardown did not complete — see the card.",
+            RespondOutcome.DUPLICATE:
+                f"⛔ `{decision_id}` was already decided (first-write-wins) — see the card.",
+            RespondOutcome.UNAUTHORIZED:
+                f"⛔ Rejected `{decision_id}` — unauthorized (tamper).",
+            RespondOutcome.UNMAPPED:
+                "🚫 Refused — your Discord identity is not mapped to a builder identity.",
+            RespondOutcome.FAILED:
+                f"⚠️ `{decision_id}` failed — see the card for details.",
+        }.get(outcome, f"Submitted `{decision_id}`.")
 
     async def handle_bos_resume(
         self, channel_id: str, user_id: str, ticket: str | None = None,
@@ -3018,14 +3291,21 @@ class Engine:
             return
 
         binding = self._binding_for_ticket(uid)
-        # Fence: confirm the prior session is dead by killing its window first.
-        if binding is not None:
-            try:
-                await self.tmux.kill_window(binding.window_id)
-            except Exception:
-                logger.warning(
-                    "bos resume: failed to kill prior window for %s", uid,
-                    exc_info=True)
+        # (B5) Truthful fencing. Only assert ``--fenced-confirmed`` when the prior
+        # window is *verified absent* — either already gone, or killed AND a
+        # liveness check confirms its absence. A kill that failed (or a window
+        # that survives the kill) must NOT be reported as fenced; ghost refuses
+        # rather than lying to builder-os, which would let a zombie CLI keep
+        # mutating the ticket behind a resume that claimed the field was clear.
+        if not await self._fence_prior_window(uid, binding):
+            await self._bos_refuse(
+                channel_id, interaction, "⛔ Fencing failed — resume refused",
+                f"Could not confirm the prior driver window for **{uid}** is "
+                f"dead, so ghost will not assert fencing (a surviving session "
+                f"could corrupt the ticket). Retry `/bos resume"
+                f"{'' if takeover else ' takeover:true'}` — takeover bumps the "
+                f"epoch to fence a zombie — or kill the window manually first.")
+            return
 
         try:
             spec = await self.builder_launcher.resume(

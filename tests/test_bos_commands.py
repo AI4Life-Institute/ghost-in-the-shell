@@ -257,16 +257,54 @@ async def test_resume_takeover_fences_then_relaunches(settings):
     await engine.session_mgr.bind(
         platform="discord", channel_id=THREAD, window_id="@old",
         window_name="bos", work_dir="/abs/worktree", builder_ticket_uid=UID)
+    # (B5) truthful liveness: the old window is alive until it is killed, then
+    # absent — so the post-kill liveness check confirms fencing.
+    _dead: set[str] = set()
+
+    async def _kill(win_id):
+        _dead.add(win_id)
+        return True
+
+    async def _exists(win_id):
+        return win_id not in _dead
+
+    engine.tmux.kill_window = AsyncMock(side_effect=_kill)
+    engine.tmux.window_exists = AsyncMock(side_effect=_exists)
 
     await engine.handle_bos_resume(THREAD, USER_MAPPED, ticket=None, takeover=True)
 
     # old window killed FIRST (fence), then resume --takeover --fenced-confirmed
-    engine.tmux.kill_window.assert_awaited_once_with("@old")
+    engine.tmux.kill_window.assert_any_await("@old")
     call = runner.call_for("ticket", "resume")
     assert "--takeover" in call and "--fenced-confirmed" in call
     # relaunched with a fresh window, binding repointed
     engine.tmux.create_window.assert_awaited_once()
     assert engine.session_mgr.get_binding(THREAD).window_id == "@5"
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_when_fencing_cannot_be_confirmed(settings):
+    """(B5) A kill that leaves the window alive ⇒ ghost refuses the resume rather
+    than asserting --fenced-confirmed. Old code killed-and-hoped, then always
+    passed --fenced-confirmed; this proves it now fails closed."""
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@old",
+        window_name="bos", work_dir="/abs/worktree", builder_ticket_uid=UID)
+    # kill "succeeds" but the window stubbornly survives (zombie) — never fenced.
+    engine.tmux.kill_window = AsyncMock(return_value=True)
+    engine.tmux.window_exists = AsyncMock(return_value=True)
+
+    await engine.handle_bos_resume(THREAD, USER_MAPPED, ticket=None, takeover=False)
+
+    # resume is NOT invoked; a refusal card names the fencing failure.
+    assert runner.call_for("ticket", "resume") is None
+    engine.tmux.create_window.assert_not_awaited()
+    assert any("Fencing failed" in (e.title or "") for e in adapter.embeds())
 
 
 # ── status / rerun-review / forward ─────────────────────────────────────────
@@ -330,6 +368,417 @@ async def test_unmapped_user_refused_no_side_effect(settings, call):
     engine.tmux.create_window.assert_not_awaited()
     engine.tmux.kill_window.assert_not_awaited()
     assert engine.builder_registry.get(UID) is None
+
+
+# ── B1: disposition full loop (dispose → cleanup → unregister) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_disposition_full_loop_dispose_cleanup_unregister(settings):
+    """A disposition button drives the real terminal loop against the CLI
+    contract (faked executor): driver respond → ticket dispose → ticket cleanup
+    → registry unregister + pane teardown. Old code injected a consume-input
+    nudge (illegal from READY_FOR_HUMAN), so nothing terminal happened."""
+    from gits.core.builder_renderer import make_disposition_cb
+
+    responses = _default_responses()
+    responses[("driver", "status")] = (
+        0, json.dumps({**_STATUS, "state": "READY_FOR_HUMAN"}), "")
+    responses[("driver", "respond")] = (0, "", "")
+    responses[("ticket", "dispose")] = (0, "driver.disposed DISPOSED", "")
+    responses[("ticket", "cleanup")] = (0, "terminated", "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    engine.builder_response._runner = runner  # share the fake for driver respond
+
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        capability_token="cap", driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@5",
+        window_name="bos", work_dir="/w", builder_ticket_uid=UID)
+    engine.builder_renderer._ticket_state(UID)["decisions"]["Dz"] = {
+        "status": "open", "kind": "disposition", "channel_id": THREAD,
+        "question": "Merge?", "options": [{"id": "merge", "label": "Merge"}]}
+
+    await engine.builder_response.handle_click(
+        THREAD, USER_MAPPED, make_disposition_cb(UID, "Dz", "merge"))
+
+    assert runner.call_for("ticket", "dispose") == [
+        "ticket", "dispose", "--ticket", UID, "--decision", "Dz"]
+    assert runner.call_for("ticket", "cleanup") is not None
+    assert engine.builder_registry.get(UID) is None       # unregistered
+    engine.tmux.kill_window.assert_any_await("@5")         # pane torn down
+
+
+def _seed_open_disposition(engine, choice_id="merge", label="Merge"):
+    engine.builder_renderer._ticket_state(UID)["decisions"]["Dz"] = {
+        "status": "open", "kind": "disposition", "channel_id": THREAD,
+        "question": "Disposition?", "options": [{"id": choice_id, "label": label}]}
+
+
+@pytest.mark.asyncio
+async def test_disposition_request_changes_keeps_ticket_and_nudges(settings):
+    """CR3 blocker 1: request_changes → CR_REWORK is NOT terminal. Ghost keeps the
+    ticket registered + pane alive and nudges the Driver; it must NOT cleanup.
+    Old code treated every successful dispose as terminal → cleanup refuses from
+    CR_REWORK and the disposition reads as incomplete."""
+    from gits.core.builder_renderer import make_disposition_cb
+
+    responses = _default_responses()
+    responses[("driver", "status")] = (
+        0, json.dumps({**_STATUS, "state": "READY_FOR_HUMAN"}), "")
+    responses[("driver", "respond")] = (0, "", "")
+    responses[("ticket", "dispose")] = (0, "review.changes_requested CR_REWORK", "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    engine.builder_response._runner = runner
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        capability_token="cap", driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@5",
+        window_name="bos", work_dir="/w", coding_cli="claude", builder_ticket_uid=UID)
+    _seed_open_disposition(engine, "request_changes", "Request changes")
+
+    await engine.builder_response.handle_click(
+        THREAD, USER_MAPPED, make_disposition_cb(UID, "Dz", "request_changes"))
+
+    assert runner.call_for("ticket", "dispose") is not None
+    assert runner.call_for("ticket", "cleanup") is None    # NOT cleaned up
+    assert engine.builder_registry.get(UID) is not None    # ticket kept registered
+    engine.tmux.kill_window.assert_not_awaited()           # pane kept alive
+    engine.tmux.send_text.assert_awaited()                 # Driver nudged to continue
+    assert engine.builder_renderer.decision_record(UID, "Dz")["status"] == "changes_requested"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_disposition_resumes_terminal_workflow(settings):
+    """CR3 blocker 2: ghost crashed after `driver respond` but before dispose. The
+    next click gets RC_DUPLICATE — it must RESUME the state-driven terminal
+    workflow (status READY_FOR_HUMAN → dispose → cleanup → teardown), not dead-end
+    on 'already decided'. Old code returned DUPLICATE and did nothing terminal."""
+    from gits.core.builder_renderer import make_disposition_cb
+
+    responses = _default_responses()
+    responses[("driver", "status")] = (
+        0, json.dumps({**_STATUS, "state": "READY_FOR_HUMAN"}), "")
+    responses[("driver", "respond")] = (9, "", "error: already answered")  # durable already
+    responses[("ticket", "dispose")] = (0, "driver.disposed DISPOSED", "")
+    responses[("ticket", "cleanup")] = (0, "terminated", "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    engine.builder_response._runner = runner
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        capability_token="cap", driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@5",
+        window_name="bos", work_dir="/w", builder_ticket_uid=UID)
+    _seed_open_disposition(engine)
+
+    await engine.builder_response.handle_click(
+        THREAD, USER_MAPPED, make_disposition_cb(UID, "Dz", "merge"))
+
+    # the duplicate RESUMED the unfinished terminal workflow.
+    assert runner.call_for("ticket", "dispose") is not None
+    assert runner.call_for("ticket", "cleanup") is not None
+    assert engine.builder_registry.get(UID) is None
+
+
+@pytest.mark.asyncio
+async def test_journal_reconcile_selects_by_capability_hash(tmp_path):
+    """CR3 blocker 3 (B2 last window): with builder-os's persisted hash on the
+    LaunchSpec, reconcile selects the exact matching token even when NO prior
+    attempt recorded a uid binding — closing the post-admit/pre-reconcile crash
+    window that uid-earliest selection alone cannot."""
+    import hashlib
+
+    from gits.core.builder_start_journal import BuilderStartJournal
+
+    j = BuilderStartJournal(tmp_path / "journal.json")
+    # attempt 1 crashed BEFORE stamping the uid: token present, ticket_uid absent.
+    await j.get_or_create_token("#10", lambda: "TOK-A")
+    # attempt 2 (cross-form) minted a different token.
+    assert await j.get_or_create_token("builder-os#10", lambda: "TOK-B") == "TOK-B"
+
+    # builder-os emits sha256(TOK-A) → reconcile picks TOK-A by hash, though the
+    # uid-earliest fallback would miss it (no entry was uid-stamped for the uid).
+    h = hashlib.sha256(b"TOK-A").hexdigest()
+    got = await j.reconcile("builder-os#10", "builder-os:10", "TOK-B", capability_sha256=h)
+    assert got == "TOK-A"
+    # sanity: without the hash, uid-earliest can't recover it (returns the minted one).
+    j2 = BuilderStartJournal(tmp_path / "journal2.json")
+    await j2.get_or_create_token("#10", lambda: "TOK-A")
+    await j2.get_or_create_token("builder-os#10", lambda: "TOK-B")
+    assert await j2.reconcile("builder-os#10", "builder-os:10", "TOK-B") == "TOK-B"
+
+
+# ── B2: start token durability (crash between admit and register) ────────────
+
+
+@pytest.mark.asyncio
+async def test_start_crash_between_admit_and_register_reuses_token(settings):
+    from gits.core.builder_start_journal import request_key
+
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    # distinct tokens per mint, so reuse-vs-remint is observable.
+    tokens = iter(["TOK-A", "TOK-B", "TOK-C"])
+    engine.builder_launcher._token_factory = lambda: next(tokens)
+
+    # crash the FIRST registry write (after admit) — the fatal window.
+    real_register = engine.builder_registry.register
+    n = {"v": 0}
+
+    async def flaky_register(*a, **k):
+        n["v"] += 1
+        if n["v"] == 1:
+            raise RuntimeError("crash after admit, before persist")
+        return await real_register(*a, **k)
+
+    engine.builder_registry.register = flaky_register
+
+    with pytest.raises(RuntimeError):
+        await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    # journal holds the first token; not cleared (register failed).
+    assert engine.builder_start_journal.token_for(request_key("builder-os", 10)) == "TOK-A"
+
+    # retry succeeds and REUSES TOK-A (no re-mint), so the persisted hash matches.
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    assert engine.builder_registry.get(UID).capability_token == "TOK-A"
+    admits = [c for c in runner.calls if c[:2] == ["ticket", "admit"]]
+    assert len(admits) == 2
+    assert all(a[a.index("--capability-token") + 1] == "TOK-A" for a in admits)
+    # window closed → journal cleared.
+    assert engine.builder_start_journal.token_for(request_key("builder-os", 10)) is None
+
+
+@pytest.mark.asyncio
+async def test_cross_form_retry_in_crash_window_keeps_human_authorized(settings, tmp_path):
+    """CR-round-1 major: a cross-FORM retry (`issue:10` then `issue:10
+    repo:builder-os`) inside the admit→register crash window must NOT strand the
+    human. The two forms key the journal differently, so attempt 2 mints a new
+    token — but builder-os persists attempt 1's token hash and never overwrites
+    it, so registering the new token would be permanent unauthorization. Post-
+    admit uid reconciliation reuses attempt 1's token. This asserts against a
+    faithful admit stub (writes sha256(token) only-if-absent, like builder-os)."""
+    import hashlib
+
+    runtime = tmp_path / "rt"
+    cap = runtime / "auth" / "capability.sha256"
+    admit_tokens = []
+
+    async def stub(args):
+        if args[:2] == ["ticket", "admit"]:
+            tok = args[args.index("--capability-token") + 1]
+            admit_tokens.append(tok)
+            if not cap.exists():  # builder-os writes the hash ONLY if absent
+                cap.parent.mkdir(parents=True, exist_ok=True)
+                cap.write_text(hashlib.sha256(tok.encode()).hexdigest() + "\n")
+            return 0, _spec(runtime_dir=str(runtime)), ""
+        return 0, "", ""
+
+    engine, adapter = _mk_engine(settings)
+    engine.builder_launcher._runner = stub
+    tokens = iter(["TOK-A", "TOK-B", "TOK-C"])
+    engine.builder_launcher._token_factory = lambda: next(tokens)
+
+    # attempt 1: repo OMITTED; crash the registry write (admit already done).
+    real_register = engine.builder_registry.register
+    n = {"v": 0}
+
+    async def flaky(*a, **k):
+        n["v"] += 1
+        if n["v"] == 1:
+            raise RuntimeError("crash after admit, before persist")
+        return await real_register(*a, **k)
+
+    engine.builder_registry.register = flaky
+    with pytest.raises(RuntimeError):
+        await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo=None)
+
+    # attempt 2: DIFFERENT form (repo now provided) — the reviewer's scenario.
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+
+    # builder-os hashed TOK-A (first admit) and never overwrote it …
+    assert cap.read_text().strip() == hashlib.sha256(b"TOK-A").hexdigest()
+    # … and ghost registered the SAME token, so the human stays authorized.
+    assert engine.builder_registry.get(UID).capability_token == "TOK-A"
+    # attempt 2 did mint TOK-B (different form) but it was reconciled away.
+    assert admit_tokens == ["TOK-A", "TOK-B"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cross_form_start_serializes_by_issue(settings, tmp_path):
+    """CR-round-2 major: two CONCURRENT cross-form starts for one issue must not
+    race into the same permanent-unauthorization. reconcile() assumes insertion
+    order == admit order, which only holds if same-ticket starts can't admit
+    concurrently. The start lock is now keyed by issue number, so they serialize;
+    this proves admit never overlaps (max in-flight == 1) and the registered
+    token matches the hash builder-os actually persisted. Old code (lock by
+    request form) let both admit concurrently → max == 2 → this fails."""
+    import hashlib
+
+    runtime = tmp_path / "rt"
+    cap = runtime / "auth" / "capability.sha256"
+    inflight = {"cur": 0, "max": 0}
+
+    async def stub(args):
+        if args[:2] == ["ticket", "admit"]:
+            await asyncio.sleep(0.01)
+            tok = args[args.index("--capability-token") + 1]
+            if not cap.exists():  # builder-os writes the hash only-if-absent
+                cap.parent.mkdir(parents=True, exist_ok=True)
+                cap.write_text(hashlib.sha256(tok.encode()).hexdigest() + "\n")
+            return 0, _spec(runtime_dir=str(runtime)), ""
+        return 0, "", ""
+
+    engine, adapter = _mk_engine(settings)
+    engine.builder_launcher._runner = stub
+    toks = iter(["TOK-A", "TOK-B", "TOK-C", "TOK-D"])
+    engine.builder_launcher._token_factory = lambda: next(toks)
+
+    # Track concurrency of the whole start CRITICAL SECTION (everything under the
+    # start lock). Keyed by issue, the two cross-form starts must never overlap;
+    # keyed by request form (old code) they hold different locks and both enter.
+    orig = engine._handle_bos_start_locked
+
+    async def tracked(*a, **k):
+        inflight["cur"] += 1
+        inflight["max"] = max(inflight["max"], inflight["cur"])
+        try:
+            await asyncio.sleep(0)  # let any non-serialized peer enter here
+            return await orig(*a, **k)
+        finally:
+            inflight["cur"] -= 1
+
+    engine._handle_bos_start_locked = tracked
+
+    # concurrent cross-form starts for the SAME issue (omitted vs explicit repo).
+    await asyncio.gather(
+        engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo=None),
+        engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os"),
+    )
+
+    # serialized by issue → the start critical section never overlapped, so the
+    # journal's insertion-order == admit-order assumption holds.
+    assert inflight["max"] == 1
+    # the registered token matches the hash builder-os actually persisted.
+    registered = engine.builder_registry.get(UID).capability_token
+    assert cap.read_text().strip() == hashlib.sha256(registered.encode()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_definitive_admit_failure_clears_journal(settings):
+    """CR-round-1 minor: a definitive admit refusal persists no capability hash,
+    so its journalled token is worthless — clear it, no stale-token leak."""
+    from gits.core.builder_start_journal import request_key
+
+    responses = _default_responses()
+    responses[("ticket", "admit")] = (2, "", "error: gate refused admission")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    assert any("failed" in (e.title or "").lower() for e in adapter.embeds())
+    assert engine.builder_start_journal.token_for(request_key("builder-os", 10)) is None
+
+
+@pytest.mark.asyncio
+async def test_start_locks_reaped_after_completion(settings):
+    """CR-round-1 minor: the per-request start-lock map is bounded (reaped)."""
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    assert engine._bos_start_locks == {}
+
+
+# ── B3: replay binds (no double-launch) + start race ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_start_replay_binds_without_launch(settings):
+    responses = _default_responses()
+    responses[("ticket", "admit")] = (0, _spec(replay=True), "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+
+    engine.tmux.create_window.assert_not_awaited()        # no second CLI
+    rec = engine.builder_registry.get(UID)                # pointers registered
+    assert rec is not None and rec.capability_token == "TOKENFIXED"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_same_request_admits_once(settings):
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await asyncio.gather(
+        engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os"),
+        engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os"),
+    )
+    admits = [c for c in runner.calls if c[:2] == ["ticket", "admit"]]
+    assert len(admits) == 1                                # start lock + R11
+    engine.tmux.create_window.assert_awaited_once()
+
+
+# ── B4: /bos start admits remote with the resolved requester ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_start_admits_remote_with_requester(settings):
+    runner = Runner(_default_responses())
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.handle_bos_start(CHAN, USER_MAPPED, issue=10, repo="builder-os")
+    admit = runner.call_for("ticket", "admit")
+    assert admit[admit.index("--requester") + 1] == ACTOR
+    assert "--remote" in admit
+
+
+# ── B6: resume is a dumb executor (--resume, not a fresh brief) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_resume_launches_with_resume_arg_not_fresh_brief(settings):
+    responses = _default_responses()
+    # builder-os emits the executable profile: --resume <sid>, initial_prompt null.
+    responses[("ticket", "resume")] = (0, _spec(
+        cli_args=["--permission-mode", "acceptEdits", "--resume", "cli-777"],
+        initial_prompt=None), "")
+    runner = Runner(responses)
+    engine, adapter = _mk_engine(settings, runner=runner)
+    await engine.builder_registry.register(
+        UID, runtime_dir="/r", event_log="/e", channel_id=THREAD,
+        driver_session_id="drv-1")
+    await engine.session_mgr.bind(
+        platform="discord", channel_id=THREAD, window_id="@old",
+        window_name="bos", work_dir="/abs/worktree", builder_ticket_uid=UID)
+    dead: set[str] = set()
+    engine.tmux.kill_window = AsyncMock(side_effect=lambda w: dead.add(w) or True)
+    engine.tmux.window_exists = AsyncMock(side_effect=lambda w: w not in dead)
+
+    await engine.handle_bos_resume(THREAD, USER_MAPPED, ticket=None, takeover=False)
+
+    cmd = engine.tmux.create_window.call_args.kwargs["command"]
+    assert "--resume cli-777" in cmd            # transcript carried
+    assert "BRIEF.md" not in cmd                # dumb executor: no fresh brief
+
+
+# ── minor: /bos respond reports the real outcome ─────────────────────────────
+
+
+def test_bos_respond_reply_is_truthful():
+    from gits.core.builder_response import RespondOutcome
+    reply = Engine._bos_respond_reply
+    assert "already decided" in reply("D1", RespondOutcome.DUPLICATE)
+    assert "unauthorized" in reply("D1", RespondOutcome.UNAUTHORIZED).lower()
+    assert "Recorded" in reply("D1", RespondOutcome.RECORDED)
+    assert "terminated" in reply("D1", RespondOutcome.DISPOSED)
+    # none of the failure states should read as a bare success.
+    for oc in (RespondOutcome.DUPLICATE, RespondOutcome.UNAUTHORIZED,
+               RespondOutcome.FAILED, RespondOutcome.UNMAPPED):
+        assert "Submitted" not in reply("D1", oc)
 
 
 # ── dormancy (no config invoked → inert, no subprocess, byte-identical) ──────

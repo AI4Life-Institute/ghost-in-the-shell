@@ -29,8 +29,11 @@ behavior off these"): ``0`` recorded · ``8`` unauthorized · ``9`` duplicate.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import enum
 import json
 import logging
+import shlex
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -47,10 +50,46 @@ RC_OK = 0
 RC_UNAUTHORIZED = 8
 RC_DUPLICATE = 9
 
+# Fail-closed subprocess timeout (minor): a hung `driver respond` must not hold
+# the Discord handler forever. Exceeded ⇒ child killed, nonzero rc reported.
+_CLI_TIMEOUT_S = 90.0
+_RC_TIMEOUT = 124
+
 # (returncode, stdout, stderr)
 Runner = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
 # (ticket_uid, nudge_line) — injects a structured hint into the driver pane.
 Nudge = Callable[[str, str], Awaitable[None]]
+# (ticket_uid, decision_id) → the disposition outcome (B1). Wired by the engine
+# to drive `ticket dispose` → `ticket cleanup` → unregister + teardown; a
+# recorded READY_FOR_HUMAN disposition routes here instead of the (illegal)
+# consume-input nudge.
+Disposer = Callable[[str, str], Awaitable["DispositionOutcome"]]
+
+
+class RespondOutcome(enum.StrEnum):
+    """The real result of an answer/disposition, so the command layer can report
+    it truthfully (minor: ``/bos respond`` must not say "Submitted" on a
+    duplicate / unauthorized / internal failure)."""
+
+    RECORDED = "recorded"          # clarification/escalation answer recorded
+    DISPOSED = "disposed"          # disposition recorded + disposed + torn down
+    CHANGES_REQUESTED = "changes_requested"  # request_changes → CR_REWORK (not terminal)
+    DISPOSE_FAILED = "dispose_failed"  # recorded, but dispose/cleanup did not complete
+    DUPLICATE = "duplicate"        # someone else already decided (first-write-wins)
+    UNAUTHORIZED = "unauthorized"  # capability token rejected (tamper)
+    UNMAPPED = "unmapped"          # Discord id not mapped to a builder identity
+    FAILED = "failed"              # builder-os internal / unexpected failure
+
+
+class DispositionOutcome(enum.StrEnum):
+    """Result of the disposition seam. ``merge`` / ``close_without_merge`` are
+    terminal (dispose → cleanup → unregister); ``request_changes`` reopens a CR
+    round and is NOT terminal (the ticket + pane stay alive)."""
+
+    DISPOSED = "disposed"          # dispose ok, cleanup terminated, unregistered
+    CHANGES_REQUESTED = "changes_requested"  # request_changes → CR_REWORK, kept alive
+    DISPOSE_FAILED = "dispose_failed"  # `ticket dispose` refused/failed
+    CLEANUP_FAILED = "cleanup_failed"  # disposed, but `ticket cleanup` did not terminate
 
 
 class BuilderResponseAdapter:
@@ -67,7 +106,9 @@ class BuilderResponseAdapter:
         forced_forward_log: Path | None = None,
         runner: Runner | None = None,
         nudge: Nudge | None = None,
+        disposer: Disposer | None = None,
         clock: Callable[[], float] = time.time,
+        timeout: float = _CLI_TIMEOUT_S,
     ):
         self._humans = humans
         self._registry = registry
@@ -77,7 +118,9 @@ class BuilderResponseAdapter:
         self._forced_forward_log = forced_forward_log
         self._runner = runner or self._default_runner
         self._nudge = nudge
+        self._disposer = disposer
         self._clock = clock
+        self._timeout = timeout
         self._adapter = None
 
     def set_adapter(self, adapter) -> None:
@@ -104,8 +147,14 @@ class BuilderResponseAdapter:
             await self._handle_observation(channel_id, uid, decision_id, choice)
             return True
 
-        # Decision / disposition: authenticated, single-use.
-        await self._handle_decision(channel_id, user_id, uid, decision_id, choice)
+        # Decision / disposition: authenticated, single-use. The callback kind is
+        # authoritative — a ``disp`` button is a READY_FOR_HUMAN disposition
+        # (record → dispose → cleanup → unregister), a ``d`` button is an ordinary
+        # clarification/escalation answer (record → consume-input nudge). B1.
+        await self._handle_decision(
+            channel_id, user_id, uid, decision_id, choice,
+            is_disposition=(kind == "disp"),
+        )
         return True
 
     # -- observation (non-consuming) ---------------------------------------
@@ -126,7 +175,7 @@ class BuilderResponseAdapter:
 
     async def respond(
         self, channel_id: str, user_id: str, uid: str, decision_id: str, choice: str,
-    ) -> None:
+    ) -> RespondOutcome:
         """`/bos respond` → the same authenticated, single-use path as a button.
 
         A thin, explicit entrypoint for the T8 slash command: the command layer
@@ -135,14 +184,26 @@ class BuilderResponseAdapter:
         pass-through + two-phase render all live in :meth:`_handle_decision`, so
         button clicks and ``/bos respond`` are provably one code path (fail-closed
         on identity, keyed off builder-os exit codes).
+
+        The open decision may itself be a disposition (the completion card is
+        answerable by ``/bos respond`` too), so route by the tracked record kind
+        — a disposition must drive dispose→cleanup→unregister, never the illegal
+        consume-input nudge (B1). Returns the real :class:`RespondOutcome` so the
+        command layer reports the true result, not an unconditional "Submitted".
         """
-        await self._handle_decision(channel_id, user_id, uid, decision_id, choice)
+        rec = self._renderer.decision_record(uid, decision_id) or {}
+        is_disposition = rec.get("kind") == "disposition"
+        return await self._handle_decision(
+            channel_id, user_id, uid, decision_id, choice,
+            is_disposition=is_disposition,
+        )
 
     # -- decision (authenticated, single-use) ------------------------------
 
     async def _handle_decision(
         self, channel_id: str, user_id: str, uid: str, decision_id: str, choice: str,
-    ) -> None:
+        *, is_disposition: bool = False,
+    ) -> RespondOutcome:
         # (1) actor resolution — fail closed. Unmapped ⇒ refuse, write nothing.
         actor = self._humans.resolve(user_id)
         if actor is None:
@@ -160,7 +221,7 @@ class BuilderResponseAdapter:
                 color=0xE74C3C,
                 footer=f"ticket {uid} · decision {decision_id}",
             )))
-            return
+            return RespondOutcome.UNMAPPED
 
         # (2) capability token pass-through (ghost never validates it).
         ticket = self._registry.get(uid)
@@ -179,26 +240,91 @@ class BuilderResponseAdapter:
 
         rc, out, err = await self._runner(args)
 
-        # (3) render outcome by stable exit code.
+        # (3a) DISPOSITION (B1 + CR3): advance via dispose→cleanup→unregister, NOT
+        # the consume-input nudge (illegal from READY_FOR_HUMAN). This is driven on
+        # BOTH a fresh record (RC_OK) AND a duplicate (RC_DUPLICATE): a duplicate
+        # means the decision is already durably recorded — e.g. ghost crashed after
+        # `respond` but before the terminal workflow finished — so we must RESUME
+        # the (state-driven, idempotent) workflow, not dead-end on "already
+        # decided". Unauthorized/other still fail closed below.
+        if is_disposition and rc in (RC_OK, RC_DUPLICATE):
+            return await self._drive_disposition(
+                channel_id, uid, decision_id, actor, choice)
+
+        # (3b) clarification/escalation answer — render outcome by stable exit code.
         if rc == RC_OK:
             await self._renderer.mark_recorded(uid, decision_id, actor, choice)
             await self._emit_answer_nudge(uid, decision_id)
+            return RespondOutcome.RECORDED
         elif rc == RC_DUPLICATE:
             detail = (_first_line(err)
                       or f"decision {decision_id} already decided (first-write-wins).")
             await self._renderer.mark_duplicate(uid, decision_id, detail)
+            return RespondOutcome.DUPLICATE
         elif rc == RC_UNAUTHORIZED:
             await self._send(channel_id, OutgoingMessage(embed=Embed(
                 title="⛔ Rejected — unauthorized (tamper)",
                 description=(_first_line(err) or "capability token rejected."),
                 color=0x992D22, footer=f"ticket {uid} · decision {decision_id}",
             )))
+            return RespondOutcome.UNAUTHORIZED
         else:
             await self._send(channel_id, OutgoingMessage(embed=Embed(
                 title="⚠️ respond failed",
                 description=(_first_line(err) or f"builder-os exited {rc}."),
                 color=0xE67E22, footer=f"ticket {uid} · decision {decision_id}",
             )))
+            return RespondOutcome.FAILED
+
+    async def _drive_disposition(
+        self, channel_id: str, uid: str, decision_id: str, actor: str, choice: str,
+    ) -> RespondOutcome:
+        """Route a recorded disposition into ``dispose`` → ``cleanup`` →
+        unregister via the engine-wired :data:`Disposer` seam (B1).
+
+        The choice is already recorded (``driver respond`` returned OK). Without
+        a wired disposer the decision is marked recorded (no teardown) — safe, and
+        matches the T7 default where the seam is optional. With one, the outcome
+        card reflects the real terminal result: disposed+terminated, or a refusal
+        that leaves the ticket registered for a retry.
+        """
+        if self._disposer is None:
+            logger.info(
+                "disposition %s recorded for %s but no disposer wired — "
+                "not tearing down", decision_id, uid)
+            await self._renderer.mark_recorded(uid, decision_id, actor, choice)
+            return RespondOutcome.RECORDED
+        try:
+            outcome = await self._disposer(uid, decision_id)
+        except Exception:
+            logger.warning("disposition teardown raised for %s", uid, exc_info=True)
+            outcome = DispositionOutcome.DISPOSE_FAILED
+        if outcome == DispositionOutcome.DISPOSED:
+            await self._renderer.mark_disposed(
+                uid, decision_id,
+                banner=f"📦 Disposed by {actor} ({choice}) — cleaned up and terminated.")
+            return RespondOutcome.DISPOSED
+        if outcome == DispositionOutcome.CHANGES_REQUESTED:
+            # request_changes → CR_REWORK: NOT terminal. The ticket + pane stay
+            # alive and the Driver continues the reopened review round.
+            await self._renderer.mark_changes_requested(
+                uid, decision_id,
+                banner=(f"🔁 Changes requested by {actor} — a new review round is "
+                        "open; the Driver is continuing. The ticket stays live."))
+            return RespondOutcome.CHANGES_REQUESTED
+        # Recorded, but teardown did not complete — surface it, keep the ticket.
+        detail = ("`ticket dispose` refused or failed"
+                  if outcome == DispositionOutcome.DISPOSE_FAILED
+                  else "disposed, but `ticket cleanup` did not terminate")
+        await self._send(channel_id, OutgoingMessage(embed=Embed(
+            title="⚠️ Disposition incomplete",
+            description=(
+                f"Your **{choice}** decision was recorded, but {detail}. The "
+                "ticket is still registered — re-run once the cause is cleared."
+            ),
+            color=0xE67E22, footer=f"ticket {uid} · decision {decision_id}",
+        )))
+        return RespondOutcome.DISPOSE_FAILED
 
     async def _emit_answer_nudge(self, uid: str, decision_id: str) -> None:
         """§7.4 nudge on an answered decision — a resume hint into the pane."""
@@ -265,15 +391,27 @@ class BuilderResponseAdapter:
 
     async def _default_runner(self, args: list[str]) -> tuple[int, str, str]:
         """Invoke the builder-os CLI as a subprocess. ``builder_os_cmd`` is split
-        on whitespace and the verb args appended; cwd = ``builder_os_root``."""
-        cmd = self._cmd.split() + args
+        with :func:`shlex.split` (quoted-path safe) and the verb args appended;
+        cwd = ``builder_os_root``. The wait is bounded by ``self._timeout``: a
+        hung ``driver respond`` is killed and reported as a nonzero (``124``) rc
+        so the button/command handler fails closed instead of hanging."""
+        cmd = shlex.split(self._cmd) + args
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._root) if self._root else None,
         )
-        out_b, err_b = await proc.communicate()
+        try:
+            out_b, err_b = await asyncio.wait_for(proc.communicate(), self._timeout)
+        except TimeoutError:
+            proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.communicate()
+            logger.warning(
+                "builder-os %s timed out after %.0fs — killed", " ".join(args[:2]),
+                self._timeout)
+            return _RC_TIMEOUT, "", f"builder-os {' '.join(args[:2])} timed out"
         return (
             proc.returncode or 0,
             out_b.decode("utf-8", "replace"),

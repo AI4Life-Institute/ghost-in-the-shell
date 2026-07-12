@@ -120,6 +120,40 @@ class TestDormancy:
         assert not (tmp_path / "builder_event_offsets.json").exists()
 
 
+class TestRegistryIntegrity:
+    """Minor: a *corrupt* registry is surfaced as a builder-global fault (not
+    silently treated as zero tickets); a *missing* registry stays dormant."""
+
+    async def test_corrupt_registry_surfaces_global_fault_once(self, tmp_path):
+        f = tmp_path / "builder_tickets.json"
+        f.write_text("{ not valid json")
+        mon = BuilderEventMonitor(
+            BuilderRegistry(f), offsets_file=tmp_path / "off.json")
+        faults = []
+
+        async def on_gf(detail):
+            faults.append(detail)
+
+        mon.on_global_fault(on_gf)
+        await mon._poll_once()
+        await mon._poll_once()  # same fault → deduped, not re-fired
+        assert len(faults) == 1
+        assert "corrupt" in faults[0].lower() or "unreadable" in faults[0].lower()
+
+    async def test_missing_registry_no_global_fault(self, tmp_path):
+        mon = BuilderEventMonitor(
+            BuilderRegistry(tmp_path / "builder_tickets.json"),
+            offsets_file=tmp_path / "off.json")
+        faults = []
+
+        async def on_gf(detail):
+            faults.append(detail)
+
+        mon.on_global_fault(on_gf)
+        await mon._poll_once()
+        assert faults == []
+
+
 # -- AC2: byte-0 -------------------------------------------------------------
 
 

@@ -11,9 +11,14 @@ from gits.core.builder_registry import BuilderRegistry
 from gits.core.builder_renderer import (
     BuilderRenderer,
     make_decision_cb,
+    make_disposition_cb,
     make_observation_cb,
 )
-from gits.core.builder_response import BuilderResponseAdapter
+from gits.core.builder_response import (
+    BuilderResponseAdapter,
+    DispositionOutcome,
+    RespondOutcome,
+)
 
 UID = "builder-os:17"
 CHAN = "1000"
@@ -63,7 +68,7 @@ def _text(msg):
     return "\n".join(parts)
 
 
-def _setup(tmp_path, *, mapping=None, rc=0, out="input-123", err=""):
+def _setup(tmp_path, *, mapping=None, rc=0, out="input-123", err="", disposer=None):
     reg_file = tmp_path / "builder_tickets.json"
     reg_file.write_text(json.dumps({UID: {
         "runtime_dir": "/rt", "event_log": "/rt/events.jsonl",
@@ -90,10 +95,19 @@ def _setup(tmp_path, *, mapping=None, rc=0, out="input-123", err=""):
     adapter = BuilderResponseAdapter(
         humans, reg, renderer,
         builder_os_cmd="builder-os", forced_forward_log=tmp_path / "ff.jsonl",
-        runner=runner, nudge=nudge,
+        runner=runner, nudge=nudge, disposer=disposer,
     )
     adapter.set_adapter(fake)
     return adapter, renderer, fake, runner, nudges
+
+
+def _seed_disposition(renderer, decision_id="Dz"):
+    renderer._ticket_state(UID)["decisions"][decision_id] = {
+        "thread_msg_id": "mth", "mirror_msg_id": "mmir",
+        "channel_id": CHAN, "assistant_channel_id": ASSIST,
+        "status": "open", "kind": "disposition", "question": "Merge?",
+        "options": [{"id": "merge", "label": "Merge"}],
+    }
 
 
 def _seed_decision(renderer, decision_id="D1", *, kind="human_input", resume_token=None):
@@ -187,6 +201,74 @@ async def test_observation_click_is_non_consuming(tmp_path):
     assert renderer.decision_record(UID, "D-disp")["status"] == "open"
     # The referenced material is re-surfaced.
     assert any("cand-1" in _text(m) for (_, m, _) in fake.sent)
+
+
+# --- B1: disposition routing (dispose, not consume-input) ------------------
+
+
+async def test_disposition_records_then_disposes_no_consume_nudge(tmp_path):
+    """A READY_FOR_HUMAN disposition records the choice, then routes into the
+    dispose→cleanup→unregister seam — NOT the consume-input nudge (which is
+    illegal from READY_FOR_HUMAN). Old code always injected the nudge."""
+    disposed = []
+
+    async def disposer(uid, did):
+        disposed.append((uid, did))
+        return DispositionOutcome.DISPOSED
+
+    adapter, renderer, fake, runner, nudges = _setup(
+        tmp_path, mapping={"u1": "liangchen"}, rc=0, disposer=disposer)
+    _seed_disposition(renderer, "Dz")
+
+    await adapter.handle_click(CHAN, "u1", make_disposition_cb(UID, "Dz", "merge"))
+
+    # driver respond recorded the choice …
+    assert runner.calls and runner.calls[0][:2] == ["driver", "respond"]
+    # … then the disposer drove the terminal loop …
+    assert disposed == [(UID, "Dz")]
+    # … and NO consume-input nudge was injected.
+    assert nudges == []
+    # card flips to its terminal disposed state
+    assert renderer.decision_record(UID, "Dz")["status"] == "disposed"
+
+
+async def test_disposition_teardown_failure_keeps_ticket_and_reports(tmp_path):
+    async def disposer(uid, did):
+        return DispositionOutcome.CLEANUP_FAILED
+
+    adapter, renderer, fake, runner, nudges = _setup(
+        tmp_path, mapping={"u1": "liangchen"}, rc=0, disposer=disposer)
+    _seed_disposition(renderer, "Dz")
+    out = await adapter.respond(CHAN, "u1", UID, "Dz", "merge")
+    assert out == RespondOutcome.DISPOSE_FAILED
+    assert any("Disposition incomplete" in _text(m) for (_, m, _) in fake.sent)
+
+
+async def test_respond_routes_disposition_by_record_kind(tmp_path):
+    """`/bos respond` on an open *disposition* must also dispose, not nudge —
+    routing is by the tracked record kind, not just the button callback."""
+    disposed = []
+
+    async def disposer(uid, did):
+        disposed.append(did)
+        return DispositionOutcome.DISPOSED
+
+    adapter, renderer, fake, runner, nudges = _setup(
+        tmp_path, mapping={"u1": "liangchen"}, rc=0, disposer=disposer)
+    _seed_disposition(renderer, "Dz")
+    out = await adapter.respond(CHAN, "u1", UID, "Dz", "merge")
+    assert out == RespondOutcome.DISPOSED
+    assert disposed == ["Dz"] and nudges == []
+
+
+async def test_respond_returns_outcome_for_each_exit_code(tmp_path):
+    for rc, expect in [(0, RespondOutcome.RECORDED), (9, RespondOutcome.DUPLICATE),
+                       (8, RespondOutcome.UNAUTHORIZED), (3, RespondOutcome.FAILED)]:
+        adapter, renderer, fake, runner, nudges = _setup(
+            tmp_path, mapping={"u1": "liangchen"}, rc=rc, err="error: x")
+        _seed_decision(renderer)
+        out = await adapter.respond(CHAN, "u1", UID, "D1", "red")
+        assert out == expect, f"rc={rc}"
 
 
 # --- non-builder callbacks are ignored -------------------------------------
