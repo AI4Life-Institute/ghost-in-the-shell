@@ -205,6 +205,11 @@ class BuilderRenderer:
         Dedup first: an event already in our own index is a T6 replay — return
         the stored id and render nothing new.
         """
+        # (B7) Opportunistic, independent mirror self-heal: any decision whose
+        # Assistant mirror failed after a committed primary delivery is retried
+        # here, on the next event for this ticket, without blocking anything.
+        await self.repair_pending_mirrors(uid)
+
         ts = self._ticket_state(uid)
         eid = ev.event_id
         if eid in ts["events"]:
@@ -332,17 +337,13 @@ class BuilderRenderer:
         )
         buttons = [self._option_buttons(uid, decision_id, options, make_decision_cb)]
 
-        msg_id = await self._post_lifecycle(
-            uid, embed, pin=True, mirror=True, buttons=buttons,
-            dedup_key=ev.event_id, event_id=ev.event_id,
-        )
-        # Track the decision so the response adapter can flip the card and the
-        # suppression gate can re-show it.
+        # (B7) The decision record is persisted atomically with the primary
+        # delivery inside _post_lifecycle — never after the mirror — so a mirror
+        # failure can't leave the response adapter / suppression gate without it.
+        decision = None
         if decision_id:
             ticket = self._registry.get(uid)
-            self._ticket_state(uid)["decisions"][decision_id] = {
-                "thread_msg_id": msg_id,
-                "mirror_msg_id": self._last_mirror_id,
+            decision = {"id": decision_id, "record": {
                 "channel_id": ticket.channel_id if ticket else None,
                 "assistant_channel_id": ticket.assistant_channel_id if ticket else None,
                 "status": "open",
@@ -350,9 +351,11 @@ class BuilderRenderer:
                 "question": question,
                 "options": options,
                 "resume_token": payload.get("resume_token"),
-            }
-            await self._persist()
-        return msg_id
+            }}
+        return await self._post_lifecycle(
+            uid, embed, pin=True, mirror=True, buttons=buttons,
+            dedup_key=ev.event_id, event_id=ev.event_id, decision=decision,
+        )
 
     async def _on_ready(self, uid: str, ev: BuilderEvent) -> str | None:
         """Completion card: observations[] and decisions[] rendered distinctly."""
@@ -391,15 +394,10 @@ class BuilderRenderer:
             button_rows.append(
                 self._option_buttons(uid, decision_id, decisions, make_disposition_cb))
 
-        msg_id = await self._post_lifecycle(
-            uid, embed, pin=True, mirror=True, buttons=button_rows or None,
-            dedup_key=ev.event_id, event_id=ev.event_id,
-        )
+        decision = None
         if decision_id:
             ticket = self._registry.get(uid)
-            self._ticket_state(uid)["decisions"][decision_id] = {
-                "thread_msg_id": msg_id,
-                "mirror_msg_id": self._last_mirror_id,
+            decision = {"id": decision_id, "record": {
                 "channel_id": ticket.channel_id if ticket else None,
                 "assistant_channel_id": ticket.assistant_channel_id if ticket else None,
                 "status": "open",
@@ -409,9 +407,11 @@ class BuilderRenderer:
                 "observations": observations,
                 "candidate_ref": candidate_ref,
                 "summary_ref": summary_ref,
-            }
-            await self._persist()
-        return msg_id
+            }}
+        return await self._post_lifecycle(
+            uid, embed, pin=True, mirror=True, buttons=button_rows or None,
+            dedup_key=ev.event_id, event_id=ev.event_id, decision=decision,
+        )
 
     async def _on_consumed(self, uid: str, ev: BuilderEvent) -> str | None:
         """``driver.human_input_consumed`` → flip the decision card to delivered
@@ -438,6 +438,9 @@ class BuilderRenderer:
     async def mark_recorded(self, uid: str, decision_id: str, actor: str, choice: str) -> None:
         """Flip a decision card ``open → recorded`` after the answer is written
         (§5.6 "recorded, awaiting driver consume"). Buttons removed (single-use)."""
+        # (B7) A human is interacting with this decision — a good moment to heal a
+        # mirror that failed at open time, independently of the event stream.
+        await self.repair_pending_mirrors(uid)
         rec = self.decision_record(uid, decision_id)
         if not rec:
             return
@@ -501,12 +504,11 @@ class BuilderRenderer:
 
     # -- low-level posting helpers -----------------------------------------
 
-    _last_mirror_id: str | None = None
-
     async def _post_lifecycle(
         self, uid: str, embed: Embed, *, pin: bool, mirror: bool,
         buttons: list[list[Button]] | None = None,
         dedup_key: str, event_id: str | None = None,
+        decision: dict | None = None,
     ) -> str | None:
         """Post a card to the thread (pinned) + mirror it (Assistant channel).
 
@@ -520,6 +522,19 @@ class BuilderRenderer:
         re-pin the freeze card (§4.3), exactly as it must not re-post an event
         card. ``on_event`` still short-circuits earlier for efficiency; this is
         the load-bearing guard for the fault path, which has no such pre-check.
+
+        **Durability ordering (B7).** The authoritative decision record (when a
+        card opens one — *decision* is ``{"id", "record"}``) is written and
+        persisted **atomically with the dedup key, immediately after the primary
+        thread delivery** — *before* the mirror is attempted. Previously the
+        record was written by the caller AFTER this returned, so a mirror failure
+        (which raised) left the dedup key persisted but the record uncreated; the
+        monitor's retry then dedup-returned early and the record was never made,
+        silently breaking ``/bos respond``, the escalation resume token,
+        suppression re-show, and mirror repair. The mirror is now an independent,
+        best-effort projection that never blocks or fails the primary: a failure
+        is flagged ``mirror_pending`` on the record and repaired later
+        (:meth:`repair_pending_mirrors`).
         """
         ts = self._ticket_state(uid)
         key = event_id or dedup_key
@@ -527,7 +542,6 @@ class BuilderRenderer:
             return ts["events"][key]
 
         ticket = self._registry.get(uid)
-        self._last_mirror_id = None
         if ticket is None or not ticket.channel_id:
             logger.warning("No channel for builder ticket %s — cannot render card", uid)
             return None
@@ -538,19 +552,65 @@ class BuilderRenderer:
             # Post failed: raise so the monitor pins + retries (don't record).
             raise RuntimeError(f"card post failed for {uid}")
 
+        will_mirror = bool(mirror and ticket.assistant_channel_id)
         ts["events"][key] = thread_id
-        await self._persist()  # durable BEFORE returning to the monitor
+        if decision is not None:
+            rec = dict(decision["record"])
+            rec["thread_msg_id"] = thread_id
+            rec["mirror_msg_id"] = None
+            if will_mirror:
+                # Stash the card so an independent repair can re-send the exact
+                # same mirror without a live event to rebuild it from.
+                rec["mirror_pending"] = True
+                rec["_mirror"] = _serialize_card(embed, buttons)
+            ts["decisions"][decision["id"]] = rec
+        await self._persist()  # record + dedup key durable BEFORE the mirror
 
         if pin:
             await self._safe_pin(ticket.channel_id, thread_id)
-        if mirror and ticket.assistant_channel_id:
-            self._last_mirror_id = await self._safe_send(
-                ticket.assistant_channel_id,
-                OutgoingMessage(embed=embed, buttons=buttons),
-            )
-            if self._last_mirror_id:
-                await self._safe_pin(ticket.assistant_channel_id, self._last_mirror_id)
+        if will_mirror:
+            await self._mirror_card(
+                uid, ticket.assistant_channel_id, embed, buttons,
+                decision_id=decision["id"] if decision else None)
         return thread_id
+
+    async def _mirror_card(
+        self, uid: str, channel_id: str, embed: Embed,
+        buttons: list[list[Button]] | None, *, decision_id: str | None,
+    ) -> None:
+        """Best-effort Assistant-channel mirror (B7). Never raises — a failure is
+        recorded as ``mirror_pending`` on the decision record for later repair, so
+        it can never undo or block the already-committed primary projection."""
+        mid = await self._safe_send_optional(
+            channel_id, OutgoingMessage(embed=embed, buttons=buttons))
+        if mid is not None:
+            await self._safe_pin(channel_id, mid)
+        if decision_id is not None:
+            rec = self.decision_record(uid, decision_id)
+            if rec is not None:
+                rec["mirror_msg_id"] = mid
+                rec["mirror_pending"] = mid is None
+                if mid is not None:
+                    rec.pop("_mirror", None)  # delivered — drop the cached card
+                await self._persist()
+
+    async def repair_pending_mirrors(self, uid: str) -> None:
+        """(B7) Independently re-attempt any mirror that failed after a successful
+        primary delivery. Cheap no-op when nothing is pending. Called
+        opportunistically from :meth:`on_event` and :meth:`mark_recorded`, so a
+        transient Assistant-channel failure self-heals on the next event or human
+        interaction — and, because the record is persisted, across a restart —
+        without ever blocking the primary projection."""
+        ticket = self._registry.get(uid)
+        if ticket is None or not ticket.assistant_channel_id:
+            return
+        decisions = self._state.get(uid, {}).get("decisions", {})
+        for did, rec in list(decisions.items()):
+            if not rec.get("mirror_pending") or "_mirror" not in rec:
+                continue
+            embed, buttons = _deserialize_card(rec["_mirror"])
+            await self._mirror_card(
+                uid, ticket.assistant_channel_id, embed, buttons, decision_id=did)
 
     async def _post_line(
         self, uid: str, event_id: str, ticket, text: str, *, persist: bool,
@@ -617,6 +677,20 @@ class BuilderRenderer:
             return None
         return await self._adapter.send_message(channel_id, msg)
 
+    async def _safe_send_optional(
+        self, channel_id: str, msg: OutgoingMessage,
+    ) -> str | None:
+        """Like :meth:`_safe_send` but swallows failures (returns None). Used for
+        the mirror (B7): a non-load-bearing projection must never raise out of
+        the primary path — a failure is repaired later, not propagated."""
+        try:
+            return await self._safe_send(channel_id, msg)
+        except Exception:
+            logger.warning(
+                "BuilderRenderer mirror send failed for %s — will repair later",
+                channel_id, exc_info=True)
+            return None
+
     async def _safe_edit(self, channel_id: str, message_id: str, msg: OutgoingMessage) -> None:
         if self._adapter is None:
             return
@@ -634,3 +708,39 @@ class BuilderRenderer:
         except Exception:
             logger.warning(
                 "BuilderRenderer pin failed for %s/%s", channel_id, message_id, exc_info=True)
+
+
+# -- card (de)serialization for independent mirror repair (B7) --------------
+
+
+def _serialize_card(embed: Embed, buttons: list[list[Button]] | None) -> dict:
+    """Freeze an (embed, buttons) card into the persisted decision record so a
+    failed mirror can be re-sent verbatim later, with no live event to rebuild
+    it from."""
+    return {
+        "embed": {
+            "title": embed.title,
+            "description": embed.description,
+            "fields": [list(f) for f in embed.fields],
+            "color": embed.color,
+            "footer": embed.footer,
+        },
+        "buttons": [[[b.label, b.callback_data] for b in row] for row in (buttons or [])],
+    }
+
+
+def _deserialize_card(data: dict) -> tuple[Embed, list[list[Button]] | None]:
+    """Inverse of :func:`_serialize_card`."""
+    e = data.get("embed", {})
+    embed = Embed(
+        title=e.get("title"),
+        description=e.get("description"),
+        fields=[tuple(f) for f in e.get("fields", [])],
+        color=e.get("color"),
+        footer=e.get("footer"),
+    )
+    rows = [
+        [Button(label=label, callback_data=cb) for label, cb in row]
+        for row in data.get("buttons", [])
+    ]
+    return embed, (rows or None)

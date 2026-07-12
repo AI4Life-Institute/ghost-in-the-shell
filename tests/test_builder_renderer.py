@@ -130,6 +130,72 @@ async def test_ready_for_human_renders_distinct_groups_pinned_and_mirrored(tmp_p
     assert obs_cbs, "expected observation buttons"
 
 
+# --- B7: renderer durability ordering (mirror failure) ---------------------
+
+
+class MirrorFailingAdapter(FakeAdapter):
+    """Fails every send to one channel (the Assistant mirror) until `fail` is
+    cleared — models a mirror-channel outage after a healthy primary post."""
+
+    def __init__(self, fail_channel):
+        super().__init__()
+        self.fail_channel = fail_channel
+        self.fail = True
+
+    async def send_message(self, channel_id, msg):
+        if channel_id == self.fail_channel and self.fail:
+            raise RuntimeError("assistant channel unavailable")
+        return await super().send_message(channel_id, msg)
+
+
+async def test_mirror_failure_still_persists_record_then_repairs(tmp_path):
+    """AC8 / B7. Primary thread delivery succeeds but the Assistant mirror fails.
+
+    Old code raised out of _post_lifecycle AFTER persisting the dedup key but
+    BEFORE the caller wrote the decision record, so the monitor's retry
+    dedup-returned early and the record was never created — breaking /bos respond,
+    the escalation resume token, suppression re-show, and mirror repair. Now the
+    record is persisted atomically with the primary delivery, the mirror is
+    best-effort (never raises), and it self-heals on the next event.
+    """
+    reg = _registry(tmp_path)
+    r = BuilderRenderer(reg, state_file=tmp_path / "renderer.json",
+                        coalesce_seconds=60.0, clock=lambda: 0.0)
+    fake = MirrorFailingAdapter(ASSIST)
+    r.set_adapter(fake)
+
+    ev = bev("driver.human_input_required", "BLOCKED", seq=3,
+             payload={"decision_id": "D9", "question": "Pick one",
+                      "options": [{"id": "a", "label": "A"}]})
+
+    # on_event must NOT raise despite the mirror failure …
+    msg_id = await r.on_event(UID, ev)
+    assert msg_id is not None
+
+    # … and the authoritative decision record exists (respond can find it).
+    rec = r.decision_record(UID, "D9")
+    assert rec is not None and rec["status"] == "open"      # old code: rec is None
+    assert rec["mirror_pending"] is True and rec["mirror_msg_id"] is None
+    assert r.first_open_decision(UID) == "D9"               # /bos respond finds it
+    # primary delivered + pinned; mirror not delivered yet.
+    assert any(ch == CHAN for ch, _, _ in fake.sent)
+    assert not any(ch == ASSIST for ch, _, _ in fake.sent)
+
+    # Independent repair: the Assistant channel recovers; the next event heals
+    # the mirror without any re-post of the primary card.
+    fake.fail = False
+    primary_before = sum(1 for ch, _, _ in fake.sent if ch == CHAN)
+    await r.on_event(UID, bev("driver.progress", "BLOCKED", seq=4,
+                              payload={"note": "still working"}))
+    rec = r.decision_record(UID, "D9")
+    assert rec["mirror_pending"] is False
+    assert rec["mirror_msg_id"] is not None
+    assert any(ch == ASSIST for ch, _, _ in fake.sent)      # mirror delivered
+    assert "_mirror" not in rec                             # cached card dropped
+    # the decision card itself was never re-posted to the thread (dedup holds).
+    assert sum(1 for ch, _, _ in fake.sent if ch == CHAN) == primary_before + 1  # only the progress line
+
+
 async def test_low_salience_event_not_pinned_or_mirrored(tmp_path):
     # AC1: cards come only from lifecycle events. A driver.started is a thin
     # thread line — no pin, no Assistant mirror, no embed.
