@@ -199,20 +199,35 @@ def test_skew_detection_cap_independent():
 # ─────────────────────────────────────────────────────────────────────
 
 
+def _sent(alerts, st):
+    """One reconcile→deliver pass with a transport that always succeeds.
+
+    Edge de-dupe is a property of reconcile *plus* delivery: since ghost#42
+    the state advances only once an alert actually lands, so a test that
+    calls ``reconcile`` alone would never de-dupe. Going through
+    ``deliver`` is also what production does.
+    """
+
+    async def ok(_text):
+        return True
+
+    return asyncio.run(rw.deliver(alerts, st, ok))
+
+
 def test_edge_trigger_dedupe_and_recovery(tmp_path):
     cfg = _cfg()
     st = _state(tmp_path)
     hot = rw.ResourceSample(cores=4, swap_used_pct=95)
 
-    a1 = rw.reconcile(rw.classify_resources(hot, cfg.thresholds, st), st, cfg)
-    a2 = rw.reconcile(rw.classify_resources(hot, cfg.thresholds, st), st, cfg)
+    a1 = _sent(rw.reconcile(rw.classify_resources(hot, cfg.thresholds, st), st, cfg), st)
+    a2 = _sent(rw.reconcile(rw.classify_resources(hot, cfg.thresholds, st), st, cfg), st)
     swap1 = [a for a in a1 if a.metric == "swap"]
     swap2 = [a for a in a2 if a.metric == "swap"]
     assert len(swap1) == 1 and swap1[0].level == LEVEL_CRITICAL
     assert len(swap2) == 0  # sustained → no second alert
 
     cool = rw.ResourceSample(cores=4, swap_used_pct=50)
-    a3 = rw.reconcile(rw.classify_resources(cool, cfg.thresholds, st), st, cfg)
+    a3 = _sent(rw.reconcile(rw.classify_resources(cool, cfg.thresholds, st), st, cfg), st)
     swap3 = [a for a in a3 if a.metric == "swap"]
     assert len(swap3) == 1 and swap3[0].is_recovery
 
@@ -223,9 +238,9 @@ def test_skew_immediate_alert_one_then_clear(tmp_path):
     skewed = rw.TokenSample(skew=True, skew_reason="`a` holds 80%")
     balanced = rw.TokenSample(skew=False)
 
-    a1 = rw.reconcile([rw.classify_skew(skewed, st)], st, cfg)
-    a2 = rw.reconcile([rw.classify_skew(skewed, st)], st, cfg)
-    a3 = rw.reconcile([rw.classify_skew(balanced, st)], st, cfg)
+    a1 = _sent(rw.reconcile([rw.classify_skew(skewed, st)], st, cfg), st)
+    a2 = _sent(rw.reconcile([rw.classify_skew(skewed, st)], st, cfg), st)
+    a3 = _sent(rw.reconcile([rw.classify_skew(balanced, st)], st, cfg), st)
     assert len(a1) == 1 and a1[0].level == LEVEL_WARN
     assert len(a2) == 0
     assert len(a3) == 1 and a3[0].is_recovery

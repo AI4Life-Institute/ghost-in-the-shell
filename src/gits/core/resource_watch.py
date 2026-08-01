@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from statistics import median
 
@@ -479,11 +480,18 @@ def classify_skew(sample: TokenSample, state: WatchdogState) -> Verdict:
 def reconcile(
     verdicts: list[Verdict], state: WatchdogState, config: WatchdogConfig
 ) -> list[Alert]:
-    """Turn verdicts into edge-triggered alerts and advance ``state``.
+    """Turn verdicts into edge-triggered alerts. **Does not touch ``state``.**
 
     An alert is emitted only when a metric's level *changes* (rising edge
     into warn/critical, escalation, or recovery to ok). A sustained level
-    emits nothing. State is updated so the next pass is de-duped.
+    emits nothing.
+
+    Reads ``state`` to find the edge; committing it is :func:`deliver`'s job,
+    because only the sender knows whether the alert actually landed. This
+    function used to call ``state.set_level`` here, which consumed the edge
+    before anything was sent — a send that then failed was indistinguishable
+    from one that succeeded, and the alert was never said again (ghost#42).
+    Pinned by ``test_reconcile_does_not_commit_state``.
     """
     alerts: list[Alert] = []
     for v in verdicts:
@@ -499,8 +507,37 @@ def reconcile(
                 text=format_alert(v, is_recovery, config),
             )
         )
-        state.set_level(v.metric, v.level)
     return alerts
+
+
+async def deliver(
+    alerts: list[Alert],
+    state: WatchdogState,
+    send: Callable[[str], Awaitable[bool]],
+) -> list[Alert]:
+    """Send ``alerts``, advancing ``state`` only for those actually delivered.
+
+    The single place the watchdog's failure posture lives, matching the one
+    :mod:`gits.core.drift_watch` already implements for drift notices: **an
+    undelivered alert is never recorded as delivered**, because the de-dupe
+    ledger is the only thing deciding whether it is ever said again. Trading
+    one network blip for permanent silence is the bad half of that deal.
+
+    Note the posture is *don't advance the edge*, *not* *raise*. ``send`` is
+    expected to swallow its own transport errors and answer ``False``; a
+    watchdog that propagates an exception can take down the loop it runs in,
+    which is a worse failure than the silence it replaced. "Doesn't crash"
+    and "doesn't forget" are separate properties and this gets both.
+
+    An undelivered alert leaves the metric's stored level untouched, so the
+    next sub-tick re-derives the same edge and retries by construction.
+    """
+    delivered: list[Alert] = []
+    for a in alerts:
+        if await send(a.text):
+            state.set_level(a.metric, a.level)
+            delivered.append(a)
+    return delivered
 
 
 # ─────────────────────────────────────────────────────────────────────
