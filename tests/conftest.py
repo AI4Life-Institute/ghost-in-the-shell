@@ -18,7 +18,7 @@ import pytest
 from gits.core import deployments as dm
 
 
-def run_git(args: list[str], cwd: Path) -> str:
+def run_git(args: list[str], cwd: Path, extra_env: dict[str, str] | None = None) -> str:
     env = {
         **os.environ,
         "GIT_CONFIG_GLOBAL": os.devnull,
@@ -28,6 +28,7 @@ def run_git(args: list[str], cwd: Path) -> str:
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@example.com",
         "GIT_TERMINAL_PROMPT": "0",
+        **(extra_env or {}),
     }
     proc = subprocess.run(
         ["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env, check=False

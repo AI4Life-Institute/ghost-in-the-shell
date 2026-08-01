@@ -157,6 +157,17 @@ class Engine:
             state_dir=settings.state_dir,
         )
 
+        # Deployment drift watch — in-process periodic scan (Ghost task
+        # drftnt / ghost#37). No new daemon, and deliberately unreachable
+        # from the guard: the guard runs on every tool call and must never
+        # gain a network call or a notification path.
+        from .drift_watch import DriftWatcher
+        self.drift_watch = DriftWatcher(
+            state_dir=settings.state_dir,
+            notify=self._notify_ops_channel,
+            interval_s=settings.ghost_drift_watch_interval_s,
+        )
+
         # Guard handler (initialized in start())
         self.guard: GuardHandler | None = None
 
@@ -224,6 +235,10 @@ class Engine:
         # OAuth token refresh scheduler (daily, in-process).
         self.token_refresh.start()
 
+        # Deployment drift watch (hourly, in-process).
+        if self.settings.ghost_drift_watch_enabled:
+            self.drift_watch.start()
+
         logger.info("Engine started")
 
     async def stop(self) -> None:
@@ -232,6 +247,7 @@ class Engine:
         self.jsonl_monitor.stop()
         await self.quota_notifier.stop()
         await self.token_refresh.stop()
+        await self.drift_watch.stop()
         await self.health.stop()
         # Cancel all message drainer tasks
         logger.info("Engine stopped")
@@ -272,6 +288,43 @@ class Engine:
                 logger.debug(
                     "broadcast to %s failed", b.channel_id, exc_info=True
                 )
+
+    def _ops_channel_id(self) -> str | None:
+        """The butler home channel of the checkout this code runs from.
+
+        Reusing the binding that already exists rather than minting another
+        channel setting: ghost#18 introduces ``GITS_WATCHDOG_ALERT_CHANNEL``
+        for the same purpose and has not landed, and two half-owned routing
+        keys is worse than either one.
+        """
+        try:
+            from ..butler.identity import load_binding
+
+            root = Path(__file__).resolve().parents[3]
+            return load_binding(cwd=str(root)).get("channel_id") or None
+        except Exception:
+            logger.debug("ops channel lookup failed", exc_info=True)
+            return None
+
+    async def _notify_ops_channel(self, text: str) -> None:
+        """Send an operator alert to the single ops channel.
+
+        Deliberately **not** ``_broadcast_to_bindings``: a machine-level alert
+        fanned out into every working session is the noise that gets the whole
+        mechanism muted (operator answer Q1, 2026-06-01).
+
+        Raises on any failure — the caller records the failure and keeps the
+        incident outstanding, so an undelivered notice is never mistaken for a
+        delivered one.
+        """
+        if self._adapter is None:
+            raise RuntimeError("no platform adapter wired")
+        cid = self._ops_channel_id()
+        if cid is None:
+            raise RuntimeError(
+                "no butler home channel bound — run `ghost butler bind <channel_id>`"
+            )
+        await self._adapter.send_message(cid, OutgoingMessage(text=text))
 
     async def inject_message(self, session_name: str, text: str) -> None:
         """Inject text into a named tmux session (for Guard and other uses)."""

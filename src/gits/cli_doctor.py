@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,15 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
         help="Skip running each deployment's own interpreter to list Settings fields",
     )
     p.add_argument(
+        "--outstanding",
+        action="store_true",
+        help=(
+            "Instead of scanning: list the drift the watcher currently has on "
+            "record and has not seen resolved, including drift it deliberately "
+            "did not notify about"
+        ),
+    )
+    p.add_argument(
         "--preinstall",
         nargs="?",
         const=".",
@@ -62,6 +72,8 @@ def dispatch(args: argparse.Namespace) -> None:
     if getattr(args, "preinstall", None):
         raise SystemExit(_run_preinstall(Path(args.preinstall).expanduser().resolve(),
                                          as_json=args.as_json))
+    if getattr(args, "outstanding", False):
+        raise SystemExit(_run_outstanding(as_json=args.as_json))
     report = dep_mod.collect_report(
         compare_ref=args.compare_ref,
         fetch=args.fetch,
@@ -72,6 +84,98 @@ def dispatch(args: argparse.Namespace) -> None:
     else:
         _print_report(report)
     raise SystemExit(report.exit_code)
+
+
+# ── outstanding ──────────────────────────────────────────────────────────
+
+
+def _age(seconds: float) -> str:
+    hours = seconds / 3600.0
+    return f"{hours:.0f}h" if hours < 48 else f"{hours / 24:.1f}d"
+
+
+def _run_outstanding(*, as_json: bool = False, state_dir: Path | None = None) -> int:
+    """Print what the drift watcher has on record (Ghost task drftnt).
+
+    Answers ghost#37's second question — "can an outstanding unresolved state
+    be queried?" — and covers the two ways this could itself go quiet: drift
+    the watcher chose not to notify about is listed anyway, and a watcher that
+    has stopped scanning says so instead of showing an empty, reassuring list.
+    """
+    from .core import drift_watch as dw
+
+    if state_dir is None:
+        from .config import Settings
+
+        state_dir = Settings().state_dir
+    ledger = dw.outstanding(state_dir)
+    now = time.time()
+
+    if as_json:
+        print(json.dumps(ledger.to_json(), indent=2, sort_keys=True))
+        return 1 if any(i.suppressed_reason is None for i in ledger.incidents.values()) else 0
+
+    if ledger.last_scan_at is None:
+        print("ghost doctor --outstanding")
+        print(
+            "  ? the drift watcher has never run on this machine. That is "
+            "'unknown', not a clean bill of health."
+        )
+        print(f"    (expected state at {state_dir / dw.STATE_FILENAME})")
+        return 0
+
+    print(
+        f"ghost doctor --outstanding   (last scan {_age(now - ledger.last_scan_at)} ago, "
+        f"{ledger.scan_count} scan(s))"
+    )
+    if ledger.is_stale(now, dw.DEFAULT_INTERVAL_S):
+        print(
+            "  ⚠ the watcher has not scanned recently — what follows may be "
+            "stale, and new drift would not be here at all."
+        )
+
+    alerting = [i for i in ledger.incidents.values() if i.suppressed_reason is None]
+    quiet = [i for i in ledger.incidents.values() if i.suppressed_reason is not None]
+
+    if not ledger.incidents:
+        print("  ✓ nothing outstanding")
+    for inc in sorted(alerting, key=lambda i: i.first_seen):
+        notified = (
+            f"{inc.notify_count} notice(s), last {_age(now - inc.last_notified_at)} ago"
+            if inc.last_notified_at
+            else "not yet notified"
+        )
+        print(f"  ✗ {inc.code}  {inc.executable}")
+        print(f"      {inc.detail}")
+        print(f"      outstanding {_age(now - inc.first_seen)} · {notified}")
+        if inc.last_notify_error:
+            print(f"      ⚠ last send failed: {inc.last_notify_error} (will retry)")
+    for inc in sorted(quiet, key=lambda i: i.first_seen):
+        # Recorded but not pushed. Suppression hides the interruption, never
+        # the fact — otherwise "we decided not to say" becomes "nobody knows".
+        print(f"  · {inc.code}  {inc.executable}  (not notified: {inc.suppressed_reason})")
+        print(f"      {inc.detail}")
+        print(f"      outstanding {_age(now - inc.first_seen)}")
+
+    for name, record in sorted(ledger.fetch.items()):
+        # The FETCH_HEAD mtime this watcher overwrites, kept rather than lost.
+        parts = []
+        if record.last_watcher_fetch:
+            parts.append(f"watcher fetched {_age(now - record.last_watcher_fetch)} ago")
+        if record.last_foreign_fetch:
+            parts.append(f"last non-watcher fetch {record.last_foreign_fetch}")
+        if record.last_error:
+            parts.append(f"last error: {record.last_error}")
+        if parts:
+            print(f"  fetch {name}: {'; '.join(parts)}")
+
+    if ledger.recently_resolved:
+        print("  recently resolved:")
+        for inc in ledger.recently_resolved[-5:]:
+            when = _age(now - inc.resolved_at) if inc.resolved_at else "?"
+            print(f"    ✓ {inc.code}  {inc.executable}  ({when} ago)")
+
+    return 1 if alerting else 0
 
 
 # ── preinstall ───────────────────────────────────────────────────────────

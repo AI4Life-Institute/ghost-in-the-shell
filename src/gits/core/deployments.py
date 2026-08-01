@@ -152,6 +152,27 @@ class Distance:
 
 
 @dataclass(frozen=True)
+class FetchOutcome:
+    """What happened when we refreshed the remote refs before measuring.
+
+    Distinguishing *failed to fetch* from *fetched and found nothing* is
+    load-bearing (Ghost task drftnt): when a fetch fails, ``behind`` reads 0
+    off whatever refs were last successfully fetched — and 0 looks exactly
+    like health. A network blip would otherwise impersonate a clean machine.
+
+    ``previous_fetch_at`` carries the ``FETCH_HEAD`` mtime *as observed just
+    before we fetched*, because our own fetch overwrites it. That mtime is
+    how one dates a deployment's last pull; a watcher fetching on a cadence
+    destroys it, so it is relocated here rather than lost.
+    """
+
+    attempted: bool = False
+    ok: bool = False
+    error: str | None = None
+    previous_fetch_at: str | None = None
+
+
+@dataclass(frozen=True)
 class ConfigCompat:
     """Whether a deployment declares every key present in ``config.env``.
 
@@ -180,6 +201,10 @@ class Deployment:
     config: ConfigCompat | None = None
     findings: list[Finding] = field(default_factory=list)
     receipt_requirement: str | None = None
+    #: Commits in ``sha..compare_ref`` touching :data:`HOOK_SURFACE_PREFIXES`.
+    #: Populated by the drift watcher, not by ``build_report``. Named for what
+    #: it counts — it is not a security-fix detector.
+    hook_surface_commits: int | None = None
 
     @property
     def sha(self) -> str | None:
@@ -205,6 +230,7 @@ class Report:
     compare_repo: Path | None = None
     compare_sha: str | None = None
     fetched_at: str | None = None
+    fetch: FetchOutcome | None = None
     config_env: Path | None = None
     config_keys: tuple[str, ...] = ()
     findings: list[Finding] = field(default_factory=list)
@@ -314,7 +340,11 @@ def inspect_worktree(
     rc, branch = _git_line(["symbolic-ref", "--short", "-q", "HEAD"], path)
     branch_name = branch or None if rc == 0 else None
 
-    rc, status, _ = _git(["status", "--porcelain"], path)
+    # ``--no-optional-locks`` keeps a plain read from rewriting the index of a
+    # checkout somebody else is working in: a periodic scanner (Ghost task
+    # drftnt) must be able to look without touching, both to avoid disturbing
+    # the tree and because index mtime is evidence about *human* activity.
+    rc, status, _ = _git(["--no-optional-locks", "status", "--porcelain"], path)
     modified, untracked = _parse_status(status) if rc == 0 else ([], [])
 
     untracked_sources = tuple(
@@ -354,6 +384,59 @@ def measure_distance(repo: Path | None, sha: str | None, compare_ref: str) -> Di
     if len(parts) != 2:
         return Distance(error=f"unexpected rev-list output: {out!r}")
     return Distance(ahead=int(parts[0]), behind=int(parts[1]))
+
+
+#: The paths whose commits get a drift escalated (Ghost task drftnt). This is
+#: the guard/hook surface: code that *refuses operations*, so running a stale
+#: copy of it changes what the machine permits.
+#:
+#: Named for what it measures. It is **not** a security-fix detector and must
+#: never be described as one — the repository has no security marker
+#: convention, and inventing one is a bigger change than this.
+HOOK_SURFACE_PREFIXES = ("src/gits/hooks/",)
+
+
+def count_commits_touching(
+    repo: Path | None,
+    sha: str | None,
+    compare_ref: str,
+    *,
+    prefixes: Sequence[str] = HOOK_SURFACE_PREFIXES,
+) -> int | None:
+    """How many commits in ``sha..compare_ref`` touch ``prefixes``. None if unknown."""
+    if repo is None or not sha or not prefixes:
+        return None
+    rc, out, _ = _git(
+        ["rev-list", "--count", f"{sha}..{compare_ref}", "--", *prefixes], repo
+    )
+    if rc != 0:
+        return None
+    try:
+        return int(out.strip())
+    except ValueError:
+        return None
+
+
+def fetch_origin(repo: Path | None, *, timeout: float = 60.0) -> FetchOutcome:
+    """Refresh ``origin``'s refs in ``repo``, reporting failure as failure.
+
+    Deliberately ``--no-tags --quiet`` and nothing else: no ``--prune``, no
+    refspec, no ``--force``. Fetching writes only remote-tracking refs, which
+    makes it safe to run against a checkout someone else is working in — but
+    only as long as it stays this narrow.
+    """
+    if repo is None:
+        return FetchOutcome(attempted=False, ok=False, error="no repository to fetch in")
+    previous = last_fetch_time(repo)
+    rc, _, err = _git(["fetch", "--no-tags", "--quiet", "origin"], repo, timeout=timeout)
+    if rc != 0:
+        return FetchOutcome(
+            attempted=True,
+            ok=False,
+            error=(err.strip() or f"git fetch exited {rc}"),
+            previous_fetch_at=previous,
+        )
+    return FetchOutcome(attempted=True, ok=True, previous_fetch_at=previous)
 
 
 def last_fetch_time(repo: Path | None) -> str | None:
@@ -773,8 +856,8 @@ def build_report(
         compare_repo = _pick_compare_repo(report.deployments)
     report.compare_repo = compare_repo
 
-    if fetch and compare_repo is not None:
-        _git(["fetch", "--quiet", "origin"], compare_repo, timeout=60)
+    if fetch:
+        report.fetch = fetch_origin(compare_repo)
     report.fetched_at = last_fetch_time(compare_repo)
 
     if compare_repo is not None:
@@ -846,6 +929,11 @@ def _pick_compare_repo(deployments: Sequence[Deployment]) -> Path | None:
     return None
 
 
+def fetch_failed(report: Report) -> bool:
+    """True when a fetch was attempted and did not succeed."""
+    return report.fetch is not None and report.fetch.attempted and not report.fetch.ok
+
+
 def _grade(
     dep: Deployment, report: Report, *, probe_config: bool, probe_timeout: float
 ) -> None:
@@ -875,6 +963,20 @@ def _grade(
                 "behind-master",
                 f"{dep.executable}: {dist.behind} commit(s) behind {report.compare_ref}"
                 + (f", {dist.ahead} ahead" if dist.ahead else ""),
+            )
+        )
+    elif fetch_failed(report):
+        # ``behind`` is 0 against refs from the last *successful* fetch, which
+        # is not the same as 0 against master — and 0 is indistinguishable from
+        # health. Same vacuum as a scan that found no deployments: say we could
+        # not measure rather than let a network blip read as clean.
+        dep.findings.append(
+            Finding(
+                "unknown",
+                "distance-unmeasured",
+                f"{dep.executable}: distance to {report.compare_ref} not measured — "
+                f"the fetch failed ({report.fetch.error if report.fetch else 'unknown'});"
+                " a 0 here would mean 'could not tell', not 'up to date'",
             )
         )
     elif dist.ahead:
