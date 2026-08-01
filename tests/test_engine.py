@@ -602,6 +602,112 @@ class TestHandleMessage:
 
 
 # ------------------------------------------------------------------
+# Utterance reference relay (task [[utrref]])
+# ------------------------------------------------------------------
+
+
+class TestUtteranceRefRelay:
+    """The session must receive a parseable pointer to the message it is
+    reading, so an agent can cite it without asking anyone for evidence."""
+
+    @staticmethod
+    def _forward(engine, tmp_path, **msg_kwargs) -> str:
+        """Bind a channel, forward one message, return the tmux payload."""
+        from gits.adapters.base import IncomingMessage
+
+        async def _test() -> str:
+            await engine.session_mgr.bind(
+                platform=msg_kwargs.get("platform", "discord"),
+                channel_id=msg_kwargs["channel_id"],
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+            )
+            engine.tmux.send_text.reset_mock()
+            await engine.handle_message(IncomingMessage(**msg_kwargs))
+            assert engine.tmux.send_text.call_count == 1
+            return engine.tmux.send_text.call_args.args[1]
+
+        return asyncio.run(_test())
+
+    def test_forwarded_text_carries_parseable_ref(self, engine, tmp_path):
+        payload = self._forward(
+            engine, tmp_path,
+            platform="discord", channel_id="ch-ref", user_id="u-authority",
+            text="可以合", message_id="m-42",
+        )
+
+        assert "可以合" in payload  # operator's words are untouched
+        m = re.search(r"\[ref: (\S+):(\S+?)/(\S+?) · from:(\S+?)\]", payload)
+        assert m is not None, payload
+        assert m.group(1) == "discord"
+        assert m.group(2) == "ch-ref"
+        assert m.group(3) == "m-42"
+        assert m.group(4) == "u-authority"
+
+    def test_missing_message_id_still_forwards_text(self, engine, tmp_path):
+        """Delivery beats citability: a message with no id is forwarded
+        verbatim and handle_message does not raise (Success story #2)."""
+        from gits.adapters.base import IncomingMessage
+        from gits.core.engine import _format_utterance_ref
+
+        payload = self._forward(
+            engine, tmp_path,
+            platform="discord", channel_id="ch-noid", user_id="u1",
+            text="ship it", message_id=None,
+        )
+        # Forwarded, unchanged, with no ref grafted on and no exception
+        # escaping handle_message (the helper above would have propagated it).
+        assert payload == "ship it"
+        assert "[ref:" not in payload
+        assert _format_utterance_ref(IncomingMessage(
+            platform="discord", channel_id="ch-noid", user_id="u1",
+            text="ship it", message_id=None,
+        )) is None
+        assert _format_utterance_ref(IncomingMessage(
+            platform="discord", channel_id="ch-noid", user_id="u1",
+            text="ship it", message_id="",
+        )) is None
+
+    def test_non_discord_adapter_unaffected(self, engine, tmp_path):
+        """Adapters that never set message_id (wechat, desktop) keep working."""
+        payload = self._forward(
+            engine, tmp_path,
+            platform="weixin", channel_id="wxid_abc@im.wechat", user_id="wxid_abc",
+            text="hello",
+        )
+        assert payload == "hello"
+
+    def test_command_payloads_stay_verbatim(self, engine, tmp_path):
+        """`!`/`/` payloads are parsed by the CLI — a ref would be an arg."""
+        for text in ("!git status", "/compact"):
+            payload = self._forward(
+                engine, tmp_path,
+                platform="discord", channel_id=f"ch-cmd-{text[0]}", user_id="u1",
+                text=text, message_id="m-1",
+            )
+            assert payload == text
+
+    def test_image_only_message_does_not_raise(self, engine, tmp_path):
+        from gits.adapters.base import IncomingMessage
+
+        async def _test():
+            await engine.session_mgr.bind(
+                platform="discord", channel_id="ch-img",
+                window_id="@1", window_name="test-window",
+                work_dir=str(tmp_path), coding_cli="claude",
+            )
+            engine.tmux.send_text.reset_mock()
+            await engine.handle_message(IncomingMessage(
+                platform="discord", channel_id="ch-img", user_id="u1",
+                image_paths=["/tmp/a.png"], message_id="m-9",
+            ))
+            sent = [c.args[1] for c in engine.tmux.send_text.call_args_list]
+            assert sent == ["@/tmp/a.png"]  # path stays a clean @-reference
+
+        asyncio.run(_test())
+
+
+# ------------------------------------------------------------------
 # Session Picker tests
 # ------------------------------------------------------------------
 

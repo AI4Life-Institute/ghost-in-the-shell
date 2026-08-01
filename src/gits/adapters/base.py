@@ -39,6 +39,10 @@ class IncomingMessage:
     text: str | None = None
     image_paths: list[str] = field(default_factory=list)
     reply_to: str | None = None
+    # Platform message id of *this* message (task [[utrref]]). Optional:
+    # adapters that cannot supply one leave it None and forwarding still
+    # works — delivery beats citability.
+    message_id: str | None = None
     raw: Any = None  # original platform message object
 
 

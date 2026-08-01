@@ -494,6 +494,7 @@ class DiscordAdapter(PlatformAdapter):
             text=message.content or None,
             image_paths=image_paths,
             reply_to=str(message.reference.message_id) if message.reference else None,
+            message_id=str(message.id),
             raw=message,
         )
 
