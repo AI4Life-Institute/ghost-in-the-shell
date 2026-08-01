@@ -36,6 +36,7 @@ from .terminal_parser import PromptInfo, parse_status_line
 from .tmux import TmuxController
 from .usage_panel import format_usage_panel
 from .utterance_ref import format_ref
+from .watchdog_config import ALERT_CHANNEL_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,11 @@ class Engine:
         # surface guidance to the user.
         self._warn_legacy_artifacts()
 
+        # Complain at startup, not only at first alert: a misconfigured alert
+        # destination should be discoverable before the incident that needs
+        # it, not during (ghost#42).
+        self._complain_if_alert_channel_defaulted()
+
         # Auto-install Claude Code SessionStart hook if not present
         self._ensure_hooks_installed()
 
@@ -302,10 +308,18 @@ class Engine:
     def _ops_channel_id(self) -> str | None:
         """The butler home channel of the checkout this code runs from.
 
-        Reusing the binding that already exists rather than minting another
-        channel setting: ghost#18 introduces ``GITS_WATCHDOG_ALERT_CHANNEL``
-        for the same purpose and has not landed, and two half-owned routing
-        keys is worse than either one.
+        Reuses the binding that already exists rather than minting another
+        channel setting — drift notices deliberately own no config key.
+
+        This is **not** the same route as the watchdog's
+        ``GITS_WATCHDOG_ALERT_CHANNEL``, and the two are not to be merged.
+        ghost#42 read them as two knobs for one audience and proposed
+        converging them; that was checked and is wrong. Drift notices are
+        about *this* checkout and belong to whoever runs it; watchdog alerts
+        are the ghost-efficiency charter's own instrument and go to that
+        team's channel. Merging would move their alerts somewhere they do not
+        read — the failure this ticket exists to remove, re-aimed at someone
+        else (operator answer Q1, 2026-08-01).
         """
         try:
             from ..butler.identity import load_binding
@@ -336,25 +350,83 @@ class Engine:
             )
         await self._adapter.send_message(cid, OutgoingMessage(text=text))
 
-    async def _send_watchdog_alert(self, text: str) -> None:
-        """Send a watchdog alert to the single configured channel.
+    def _complain_if_alert_channel_defaulted(self) -> None:
+        """Say out loud when the alert destination was never configured.
 
-        Deliberately NOT :meth:`_broadcast_to_bindings` — watchdog alerts
-        go to one ops channel (``GITS_WATCHDOG_ALERT_CHANNEL``), not fanned
-        out to every binding (operator answer Q1, 2026-06-01). Falls
-        through silently if no adapter is wired.
+        ghost#42's core line: *the silence of the switch nobody set reads as
+        "nothing is wrong"*. The watchdog's channel has a baked-in default, so
+        it always sends somewhere and never looked misconfigured — "can't
+        tell" and "fine" shared one representation.
+
+        The fix is not to drop the default (that would silently relocate
+        another team's alerts). It is to make *falling back to it* visible, so
+        a reader learns the destination was inherited rather than chosen.
+        Complains once per process; a per-tick warning would be filtered out
+        within a day, which is how alerting mechanisms die.
         """
-        if self._adapter is None:
+        cfg = self.watchdog_config
+        if cfg.alert_channel_configured:
             return
+        if getattr(self, "_alert_channel_complaint_made", False):
+            return
+        self._alert_channel_complaint_made = True
+        logger.warning(
+            "%s is not set — watchdog alerts are going to the built-in "
+            "default channel %s (the vault-weiliu-ghost-efficiency home "
+            "channel). This destination was inherited, not configured; set "
+            "%s to choose it deliberately.",
+            ALERT_CHANNEL_ENV,
+            cfg.alert_channel,
+            ALERT_CHANNEL_ENV,
+        )
+
+    async def _send_watchdog_alert(self, text: str) -> bool:
+        """Send a watchdog alert to the configured channel. Never raises.
+
+        Returns whether the alert was **delivered**. The caller advances the
+        edge-trigger state only on ``True``, so a failed send is retried on
+        the next tick instead of being recorded as said (ghost#42). Reporting
+        the outcome rather than swallowing it is the whole fix; raising here
+        instead would risk the watch loop, which is a worse failure.
+
+        Deliberately NOT :meth:`_broadcast_to_bindings` — watchdog alerts go
+        to one ops channel, not fanned out to every binding (operator answer
+        Q1, 2026-06-01).
+
+        Deliberately NOT merged with :meth:`_notify_ops_channel`. ghost#42
+        proposed one channel resolution for both; that premise was wrong.
+        Watchdog alerts belong to the ghost-efficiency charter and go to that
+        team's channel, drift notices go to this checkout's butler home. Two
+        routes, two audiences — converging them would relocate one team's
+        alerts into a channel they do not read, which is this ticket's failure
+        mode with a new victim (operator answer Q1, 2026-08-01).
+        """
+        self._complain_if_alert_channel_defaulted()
+        if self._adapter is None:
+            return False
         channel = self.watchdog_config.alert_channel
         if not channel:
-            return
+            logger.warning(
+                "watchdog alert dropped: no alert channel resolved (set %s)",
+                ALERT_CHANNEL_ENV,
+            )
+            return False
         try:
             from ..adapters.base import OutgoingMessage
 
             await self._adapter.send_message(channel, OutgoingMessage(text=text))
         except Exception:
-            logger.debug("watchdog alert send to %s failed", channel, exc_info=True)
+            # WARNING, not DEBUG: a dropped operator alert is the event this
+            # whole subsystem exists to prevent, and it must not be the
+            # quietest line in the log.
+            logger.warning(
+                "watchdog alert send to %s failed — keeping it outstanding "
+                "for the next tick",
+                channel,
+                exc_info=True,
+            )
+            return False
+        return True
 
     async def inject_message(self, session_name: str, text: str) -> None:
         """Inject text into a named tmux session (for Guard and other uses)."""

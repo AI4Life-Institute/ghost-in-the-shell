@@ -55,13 +55,15 @@ class Settings(BaseSettings):
     # the CLI raise. See ghost#18.
     #
     # There is deliberately no alert-channel key: notices go to the butler
-    # home channel that already exists. ghost#18 has now landed
-    # GITS_WATCHDOG_ALERT_CHANNEL for the same job (declared below), so the
-    # two routes coexist for the moment: drift notices to the butler home
-    # channel, watchdog alerts to the configured ops channel. Converging
-    # them onto one key is deliberately left as follow-up work rather than
-    # redesigned here — but it is still owed, and until it happens two keys
-    # each own half the routing.
+    # home channel that already exists. ghost#18 landed
+    # GITS_WATCHDOG_ALERT_CHANNEL (declared below) and the two routes coexist
+    # permanently — converging them was taken up as ghost#42 and **rejected**
+    # (operator answer Q1, 2026-08-01). They are not two keys for one
+    # audience: the watchdog's default channel is vault-weiliu-ghost-
+    # efficiency's own home channel, and drift notices belong to whoever runs
+    # this checkout. Merging would move one team's alerts somewhere they do
+    # not read. Do not "tidy" these into one key; see docs/drift-
+    # notification.md § Where notices go.
     ghost_drift_watch_enabled: bool = True
     ghost_drift_watch_interval_s: float = 3600.0
 
