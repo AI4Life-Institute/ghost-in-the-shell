@@ -120,6 +120,15 @@ _WORKTREE_DIR_RE = re.compile(r"^vault-([a-z0-9][a-z0-9_-]*)$")
 
 # --- Consent: the builder-os contract's own shape ---------------------------
 _PRINCIPAL_REF_RE = re.compile(r"\bprincipal_ref\s*[:=]\s*\"?([^\s\"',]+)")
+# Only a FULL permalink counts, and that is deliberate — not an oversight to
+# be "fixed" by also accepting ghost's compact relay reference
+# (``discord:<guild>/<channel>/<message>``, see gits.core.utterance_ref).
+#
+# Pasting a permalink is an act of consent: someone went and got that link.
+# Forwarding is not — ghost appends a compact reference to *every* relayed
+# message automatically. Teaching this regex the compact form would let a
+# forwarded message file a core-OS ticket by itself, with no human having
+# agreed to anything. That is a consent boundary, not a format detail.
 _UTTERANCE_REF_RE = re.compile(
     r"\butterance_ref\s*[:=]\s*\"?"
     r"(https://(?:\w+\.)?discord\.com/channels/\d+/\d+/\d+)"
