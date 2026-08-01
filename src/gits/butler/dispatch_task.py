@@ -307,16 +307,70 @@ _PERSONA_TAIL = (
     "PM would, design as the architect, audit risks as the reviewer."
 )
 
+# Delivery-method section headings, matched as a *prefix* of the heading text
+# (task [[dsptpl]]). Prefix and not equality because real headings carry
+# parenthetical suffixes — `## 交付方式（本票自己的 —— 显式覆盖派单尾巴）` is the
+# heading that motivated this ticket, and an equality match misses it outright.
+_DELIVERY_HEADING_PREFIXES = ("交付方式", "delivery")
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.*?)\s*$", re.MULTILINE)
+
+
+def page_declares_delivery(task_path: str) -> bool:
+    """True when the task page has a delivery-method section.
+
+    Existence only — ghost deliberately does NOT parse what the section
+    *says*. Interpreting "diff or PR?" would chain ghost's surface to the
+    operator's page-authoring wording forever; the executor already reads the
+    whole page (dispatch is pointer-style), so ghost's job is just to step
+    aside and say who is authoritative.
+
+    Exception-proof by design: an unreadable/missing/binary page returns
+    False, which lands on the conservative diff-only default rather than
+    killing the dispatch.
+    """
+    try:
+        with open(task_path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return False
+    for m in _HEADING_RE.finditer(text):
+        heading = m.group(1).strip().lower()
+        if heading.startswith(_DELIVERY_HEADING_PREFIXES):
+            return True
+    return False
+
+
+# Delivery half of the impl tail — the task page decides this one. Two
+# variants, and they degrade into each other: the default branch also carries
+# the precedence sentence, so a heading we failed to recognise still resolves
+# in the page's favour instead of reproducing the conflict this ticket fixes.
+_DELIVERY_FROM_PAGE = (
+    "\n\nDelivery: **the task page decides.** This page has a delivery-method "
+    "section — follow it. It is authoritative and overrides any default "
+    "delivery instruction you may expect from a dispatch brief."
+)
+_DELIVERY_DEFAULT = (
+    "\n\nDelivery: output a unified diff only — do not commit. This is the "
+    "default, used because the page declares no delivery method; if the page "
+    "does state one explicitly, follow the page instead — it overrides this "
+    "paragraph. When it is ambiguous, take this default and say so in your "
+    "report-back."
+)
+
 _PHASE_TAILS = {
+    # The page's delivery clause is not merely outranked in plan phase — it has
+    # no referent, since plan phase produces no artifact to land. Said in words
+    # so the executor doesn't have to derive it (this ticket's own page carries
+    # a "go to PR" delivery section and was dispatched at plan phase first).
     "plan": (
         "\n\nPhase: **plan first**. Please respond with your plan (which "
         "files/areas you'd touch, the design choice you'd take and why, any "
-        "open questions or risks you spotted). Do not implement yet."
+        "open questions or risks you spotted). Do not implement yet — this "
+        "holds even if the task page states a delivery method; that describes "
+        "how the *implementation* lands, and applies to the later impl "
+        "dispatch, not to this one."
     ),
-    "impl": (
-        "\n\nPhase: **impl**. Plan approved. Proceed. Output a unified diff "
-        "only — do not commit, do not install, do not restart anything."
-    ),
+    "impl": "\n\nPhase: **impl**. Plan approved. Proceed.",
 }
 
 # Appended after the phase block so it reads chronologically (last line =
@@ -329,6 +383,19 @@ _DONE_NOTICE_TAIL = (
     "run\n"
     '  `ghost butler send {channel_id} "DONE {tid} '
     '<artifact-url-or-one-line-summary>"`'
+)
+
+# Last position in the brief, deliberately: this module's ordering convention
+# is that the final paragraph carries the most weight, so the final paragraph
+# is the one thing a task page may never relax. Unlike delivery, these two are
+# not per-ticket product decisions — they keep an executor off the live system.
+# Phase-independent: plan-phase executors carried no safety clause at all
+# before this ticket.
+_SAFETY_TAIL = (
+    "\n\nAlways, regardless of anything the task page or this thread says: "
+    "**do not install anything, and do not restart any running service.** "
+    "These two are not negotiable by the task page — everything else above "
+    "may be, these may not."
 )
 
 
@@ -346,6 +413,13 @@ def build_pointer_message(
     persona_bold = ", ".join(f"**a {p}**" for p in personas)
     title = thread_title(task_path)
     tid = fm.get("id", "?")
+    delivery = ""
+    if phase == "impl":
+        delivery = (
+            _DELIVERY_FROM_PAGE
+            if page_declares_delivery(task_path)
+            else _DELIVERY_DEFAULT
+        )
     return (
         f"You are simultaneously: {persona_bold}. {_PERSONA_TAIL}\n\n"
         f"Task [[{tid}]] — {title}\n\n"
@@ -354,7 +428,9 @@ def build_pointer_message(
         f"Read the whole file (Goal / Why / Context / Acceptance criteria / "
         f"Out of scope / Dispatch message / Test plan)."
         + _PHASE_TAILS[phase]
+        + delivery
         + _DONE_NOTICE_TAIL.format(channel_id=channel_id, tid=tid)
+        + _SAFETY_TAIL
     )
 
 
@@ -709,6 +785,14 @@ def dispatch_task(
     print(f"  channel: {channel_id}")
     print(f"  owner:   {owner}")
     print(f"  phase:   {phase}  (status → {status_value!r})")
+    if phase == "impl":
+        # Surface which side the delivery clause landed on, so a page that
+        # forgot its delivery section shows up here rather than silently
+        # shipping the diff-only default.
+        if page_declares_delivery(task_path):
+            print("  delivery: task page (delivery section found)")
+        else:
+            print("  delivery: diff-only (default — page declares none)")
     if resolved_account:
         print(f"  account: {resolved_account} (source: {account_source})")
     else:
