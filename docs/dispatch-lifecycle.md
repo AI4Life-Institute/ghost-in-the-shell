@@ -37,7 +37,9 @@ Raw Discord-primitive calls (creating threads and posting messages by hand to by
 
 The dispatch message ends with the plan-first instruction:
 
-> Please respond with your plan first — which files/areas you'd touch, the design choice you'd take and why, any open questions or risks you spotted. Do not implement yet.
+> Please respond with your plan first — which files/areas you'd touch, the design choice you'd take and why, any open questions or risks you spotted. Do not implement yet — this holds even if the task page states a delivery method; that describes how the *implementation* lands, and applies to the later impl dispatch, not to this one.
+
+A task page's delivery section (below) has no referent at plan phase — there is no artifact to land yet — so the plan-first instruction is unconditional here.
 
 The executor returns a plan. Read it carefully. Watch for:
 
@@ -52,9 +54,21 @@ Review the plan with the operator. The operator decides: **go**, **refine**, or 
 
 Once the plan is approved:
 
-> Plan approved. Proceed. Output a unified diff only — do not commit, do not install, do not restart anything.
+> Plan approved. Proceed.
 
-The executor returns a diff. Status flips to `review` (set by the executor before handing back).
+**Delivery is decided by the task page, safety is not.** The impl brief is assembled from three separately-governed pieces:
+
+| Piece | Who decides | Text |
+|---|---|---|
+| Delivery — page declares a delivery section | **the task page** | *Delivery: the task page decides. This page has a delivery-method section — follow it.* |
+| Delivery — page declares none | dispatch default | *Delivery: output a unified diff only — do not commit.* (…and if the page does state one explicitly, the page still wins) |
+| Safety | **nobody — unconditional** | *Always, regardless of anything the task page or this thread says: do not install anything, and do not restart any running service.* |
+
+A page opts into non-default delivery by carrying a heading whose text starts with `交付方式` or `Delivery` (prefix match, so `## 交付方式（本票走 PR）` counts) — e.g. *"branch off `origin/master` → commit → push → open PR → run CI."* `ghost` checks only that the section **exists**; it never parses what the section says, because the executor reads the whole page anyway and parsing delivery semantics would tie ghost's surface to your page-authoring wording forever.
+
+Forgetting the section is safe: it lands on diff-only, the conservative side. The safety clause sits last in the brief — the position this module reserves for the heaviest instruction — and no page can relax it.
+
+The executor returns a diff (or, for a page-directed delivery, whatever that page specified). Status flips to `review` (set by the executor before handing back).
 
 ## 5. Acceptance
 
