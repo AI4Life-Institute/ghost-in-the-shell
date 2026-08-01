@@ -45,6 +45,22 @@ class Settings(BaseSettings):
     jsonl_poll_interval: float = 2.0
     health_check_interval: float = 5.0
 
+    # ── Deployment drift watch (Ghost task drftnt / ghost#37) ─────────
+    # Only the two knobs an operator actually turns. The alert thresholds
+    # live in gits.core.drift_watch.DriftPolicy as constants on purpose:
+    # this model is validated with extra='forbid' (a pydantic *default*, so
+    # it is not visible in model_config above), and every key declared here
+    # is one that must exist forever — an undeclared key in
+    # ~/.gits/config.env makes every Settings() in the bot, the hooks and
+    # the CLI raise. See ghost#18.
+    #
+    # There is deliberately no alert-channel key: notices go to the butler
+    # home channel that already exists. ghost#18 proposes
+    # GITS_WATCHDOG_ALERT_CHANNEL for the same job; if that lands, the two
+    # should converge on one key rather than each owning half the routing.
+    ghost_drift_watch_enabled: bool = True
+    ghost_drift_watch_interval_s: float = 3600.0
+
     # ── Security ──────────────────────────────────────────────────────
     allowed_paths: list[str] = []
 
