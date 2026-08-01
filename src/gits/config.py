@@ -22,6 +22,17 @@ class Settings(BaseSettings):
     allowed_users: list[int] = []
     allowed_guilds: list[int] = []
 
+    # ── Core-OS ticket origination guard (Ghost task corehk) ──────────
+    # Comma-separated *line* names holding a standing core-OS improvement
+    # mandate; empty means nobody does, so every core-OS ticket needs
+    # disclosed consent. Declared here only so the key is legal in
+    # ~/.gits/config.env — this model is validated with extra='forbid', and
+    # an undeclared key there makes every Settings() raise. The guard itself
+    # (gits.hooks.core_os_ticket) reads config.env with a stdlib parser,
+    # because PreToolUse hooks must not import pydantic.
+    ghost_core_os_mandate: str = ""
+    ghost_core_os_repos: str = ""
+
     # ── tmux ──────────────────────────────────────────────────────────
     tmux_session_name: str = "gits"
     coding_cli_command: str = "claude"
