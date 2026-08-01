@@ -450,9 +450,15 @@ class Engine:
                     msg.text[:80],
                 )
                 track("cmd_message", platform=msg.platform)
+                # Ride the reference in on the same send: a literal newline
+                # through tmux send-keys submits the prompt, which would split
+                # one utterance into two turns. The operator's Discord view is
+                # untouched either way — the ref only exists inside the pane.
+                ref = _format_utterance_ref(msg)
+                payload = f"{msg.text} {ref}" if ref else msg.text
                 try:
                     await self.tmux.send_text(
-                        binding.window_id, msg.text, submit_keys=submit
+                        binding.window_id, payload, submit_keys=submit
                     )
                 except Exception:
                     logger.exception("Failed to send text to tmux")
@@ -3134,6 +3140,30 @@ async def _wait_for_cli_idle(
             pass
     logger.debug(
         "wait_for_cli_idle: timed out after %.0fs for window %s", timeout, window_id
+    )
+
+
+def _format_utterance_ref(msg: IncomingMessage) -> str | None:
+    """Render a compact, machine-parseable pointer to *msg* itself.
+
+    ``[ref: <platform>:<channel_id>/<message_id> · from:<user_id>]``
+
+    ghost hands over the facts it already holds and nothing more — it does
+    not know or care what a consumer does with them (task [[utrref]]).
+    Returns ``None`` when the platform gave us no message id, so callers
+    forward the bare text rather than dropping the message.
+    """
+    if not msg.message_id or not msg.channel_id or not msg.platform:
+        return None
+    # Command payloads are parsed by the CLI, not read as prose: `!cmd` runs a
+    # shell command and `/cmd` a slash command. Appending a ref would become an
+    # extra argument, so those stay verbatim.
+    stripped = (msg.text or "").lstrip()
+    if stripped.startswith(("!", "/")):
+        return None
+    return (
+        f"[ref: {msg.platform}:{msg.channel_id}/{msg.message_id}"
+        f" · from:{msg.user_id}]"
     )
 
 
