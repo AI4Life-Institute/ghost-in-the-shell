@@ -211,11 +211,29 @@ def evaluate(
 
 
 def main() -> None:
-    """Entry point for the ``gits guard`` PreToolUse hook."""
+    """Entry point for the ``gits guard`` PreToolUse hook.
+
+    Runs two independent checks, in order:
+
+    1. :mod:`gits.hooks.core_os_ticket` — refuse core-OS ticket origination
+       without disclosed consent (Ghost task corehk). This one is
+       **fail-closed**, so it is evaluated from the raw stdin text and cannot
+       be skipped by a malformed payload.
+    2. this module's vault impl-preflight (Ghost task j5pn2w).
+    """
+    from . import core_os_ticket
+
+    raw = sys.stdin.read()
     try:
-        payload = json.load(sys.stdin)
+        payload = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        sys.exit(0)
+        payload = None
+
+    allow, message = core_os_ticket.check(payload, raw=raw)
+    if not allow:
+        print(message, file=sys.stderr)
+        sys.exit(2)
+
     if not isinstance(payload, dict):
         sys.exit(0)
 
