@@ -55,11 +55,70 @@ class Settings(BaseSettings):
     # the CLI raise. See ghost#18.
     #
     # There is deliberately no alert-channel key: notices go to the butler
-    # home channel that already exists. ghost#18 proposes
-    # GITS_WATCHDOG_ALERT_CHANNEL for the same job; if that lands, the two
-    # should converge on one key rather than each owning half the routing.
+    # home channel that already exists. ghost#18 has now landed
+    # GITS_WATCHDOG_ALERT_CHANNEL for the same job (declared below), so the
+    # two routes coexist for the moment: drift notices to the butler home
+    # channel, watchdog alerts to the configured ops channel. Converging
+    # them onto one key is deliberately left as follow-up work rather than
+    # redesigned here — but it is still owed, and until it happens two keys
+    # each own half the routing.
     ghost_drift_watch_enabled: bool = True
     ghost_drift_watch_interval_s: float = 3600.0
+
+    # ── Resource + token watchdog (Ghost task jeyuxq / ghost#18) ──────
+    # Declared here only so these keys are legal in ~/.gits/config.env —
+    # this model is validated with extra='forbid' (a pydantic *default*, so
+    # it is not visible in model_config above), and an undeclared key there
+    # makes every Settings() raise. The watchdog itself
+    # (gits.core.watchdog_config) reads config.env with a stdlib parser,
+    # because PreToolUse hooks must not import pydantic.
+    #
+    # These are untyped `str = ""` placeholders on purpose. The real
+    # defaults and the tolerant float/int coercion live in
+    # watchdog_config.py, which is the single source of truth for them.
+    # Typing them here would fork every default across two files that can
+    # silently drift, and would turn an operator's typo into a raise in
+    # *every* Settings() — bot, hooks and CLI — where the watchdog's own
+    # parser merely falls back to its default. Local failure beats global.
+    gits_watchdog_alert_channel: str = ""
+    gits_watchdog_owner_mention: str = ""
+    gits_disk_watch_path: str = ""
+    gits_balance_digest_hour: str = ""
+    # swap-used %
+    gits_swap_warn_pct: str = ""
+    gits_swap_critical_pct: str = ""
+    gits_swap_clear_pct: str = ""
+    # tmux-server fd count
+    gits_tmux_fd_limit: str = ""
+    gits_tmux_fd_warn: str = ""
+    gits_tmux_fd_critical: str = ""
+    gits_tmux_fd_clear: str = ""
+    # load avg as multiple of core count
+    gits_load_warn_ratio: str = ""
+    gits_load_critical_ratio: str = ""
+    gits_load_clear_ratio: str = ""
+    # disk-free %
+    gits_disk_warn_pct: str = ""
+    gits_disk_critical_pct: str = ""
+    gits_disk_clear_pct: str = ""
+    # mem-avail MB
+    gits_mem_warn_mb: str = ""
+    gits_mem_critical_mb: str = ""
+    gits_mem_clear_mb: str = ""
+    # token cap-%
+    gits_token_warn_pct: str = ""
+    gits_token_critical_pct: str = ""
+    gits_token_clear_pct: str = ""
+    # balance skew
+    gits_skew_binding_share: str = ""
+    gits_skew_score_median_mult: str = ""
+    # Per-account token caps: one key per window holding a NAME=VALUE list
+    # ("alice=150000000,bob=2e9"). Deliberately NOT a
+    # GITS_ACCOUNT_5H_CAP_<NAME> family: an arbitrary-suffix key cannot be
+    # declared in a fixed model, so extra='forbid' rejected it and the
+    # feature bricked Settings() for exactly the operator who configured it.
+    gits_account_5h_caps: str = ""
+    gits_account_7d_caps: str = ""
 
     # ── Security ──────────────────────────────────────────────────────
     allowed_paths: list[str] = []
