@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from gits.core import health as health_mod
 from gits.core import resource_watch as rw
+from gits.core import watchdog_config as wc_mod
 from gits.core.health import HealthMonitor
 from gits.core.watchdog_config import Thresholds, load_watchdog_config
 from gits.core.watchdog_state import (
@@ -139,7 +140,7 @@ def test_hysteresis_low_metric_disk(tmp_path):
 
 
 def test_token_caps_from_env_and_inert_when_missing(tmp_path):
-    cfg = _cfg({"GITS_ACCOUNT_5H_CAP_FOO": "100", "GITS_ACCOUNT_7D_CAP_FOO": "1000"})
+    cfg = _cfg({"GITS_ACCOUNT_5H_CAPS": "foo=100", "GITS_ACCOUNT_7D_CAPS": "foo=1000"})
     assert cfg.cap_5h("foo") == 100
     assert cfg.cap_5h("FOO") == 100  # case-insensitive
     assert cfg.cap_5h("bar") is None  # unconfigured → inert
@@ -160,6 +161,25 @@ def test_token_caps_from_env_and_inert_when_missing(tmp_path):
     # foo 5h at 90% → critical; bar has no cap → no verdict at all (inert).
     assert metrics["token5h:foo"] == LEVEL_CRITICAL
     assert not any(m.endswith(":bar") for m in metrics)
+
+
+def test_malformed_cap_list_degrades_locally_and_never_raises():
+    """A typo in the cap list must stay inside this parser.
+
+    This is the whole reason the per-account caps are one declared key
+    instead of a dynamic key family: the same operator typo now costs an
+    inert cap, where before it made every ``Settings()`` raise — bot,
+    hooks and CLI. Malformed entries drop; well-formed neighbours survive.
+    """
+    cfg = _cfg({"GITS_ACCOUNT_5H_CAPS": "good=500,,garbage,bad=xyz,other=250"})
+    assert cfg.cap_5h("good") == 500
+    assert cfg.cap_5h("other") == 250  # survives a bad neighbour
+    assert cfg.cap_5h("garbage") is None  # no '=' → dropped, inert
+    assert cfg.cap_5h("bad") is None  # non-numeric → dropped, inert
+
+    # Entirely unparseable input is still not an exception.
+    assert _cfg({"GITS_ACCOUNT_5H_CAPS": "=,=,="}).caps_5h == {}
+    assert _cfg({"GITS_ACCOUNT_7D_CAPS": ""}).caps_7d == {}
 
 
 def test_skew_detection_cap_independent():
@@ -348,3 +368,77 @@ def test_digest_format_shows_dash_headroom_when_no_cap(tmp_path):
     text = rw.format_digest(sample, cfg)
     assert "headroom=—" in text
     assert "均" in text  # balanced verdict
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 9. Settings() must survive the keys this module is documented to read
+#
+# The rest of this file loads config with `config_env_path=/nonexistent`
+# and a synthetic `env`, so the watchdog never meets the real file it is
+# documented to read from — and `Settings` (pydantic, extra='forbid')
+# parses that same file. These two tests close that gap: the feature and
+# the model that validates its config file must meet at least once.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _watchdog_keys_in_source() -> list[str]:
+    """Every ``GITS_*`` key literal the watchdog config reader looks up.
+
+    Note the character class includes digits: a ``[A-Z_]+``-only pattern
+    silently truncates ``GITS_ACCOUNT_5H_CAPS`` at the ``5``.
+    """
+    import re
+
+    src = inspect.getsource(wc_mod)
+    return sorted(set(re.findall(r"GITS_[A-Z0-9_]+", src)))
+
+
+def test_settings_accepts_a_real_config_env_with_watchdog_keys(tmp_path):
+    """Writing the watchdog keys into a real config.env must not brick Settings.
+
+    This is the operator's only documented way to configure the feature.
+    An undeclared key here makes *every* ``Settings()`` raise — bot, hooks
+    and CLI — and the failure lands nowhere near the watchdog.
+    """
+    from gits.config import Settings
+
+    keys = _watchdog_keys_in_source()
+    assert keys, "no GITS_* keys found in watchdog_config source"
+
+    env_file = tmp_path / "config.env"
+    env_file.write_text(
+        "\n".join(f"{k}={_sample_value(k)}" for k in keys) + "\n",
+        encoding="utf-8",
+    )
+
+    # Must not raise. Before the keys were declared this raised
+    # ValidationError: Extra inputs are not permitted [type=extra_forbidden].
+    Settings(_env_file=str(env_file))
+
+
+def _sample_value(key: str) -> str:
+    if key.endswith("_CAPS"):
+        return "acctname=150000000"
+    if key.endswith("_CHANNEL"):
+        return "1510821666492649503"
+    if key.endswith("_MENTION"):
+        return "<@123>"
+    if key.endswith("_PATH"):
+        return "~/.gits"
+    return "1"
+
+
+def test_every_watchdog_key_is_declared_in_settings():
+    """Coverage guard: no watchdog key may exist without a Settings field.
+
+    Deliberately has **no prefix exception**. The per-account caps are
+    collapsed into single ``GITS_ACCOUNT_5H_CAPS``/``7D_CAPS`` keys
+    precisely so that an arbitrary-suffix family cannot exist here — if
+    this test ever needs a wildcard, a dynamic key has come back and
+    ``Settings`` cannot cover it.
+    """
+    from gits.config import Settings
+
+    declared = set(Settings.model_fields)
+    missing = [k for k in _watchdog_keys_in_source() if k.lower() not in declared]
+    assert not missing, f"watchdog keys not declared in Settings: {missing}"

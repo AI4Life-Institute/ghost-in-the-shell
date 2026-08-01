@@ -1,11 +1,22 @@
 """Watchdog configuration — thresholds, caps, routing.
 
 Loads the resource/token watchdog's tunables from ``~/.gits/config.env``
-merged over ``os.environ`` (process env wins). Kept separate from
-:class:`gits.config.Settings` (pydantic) because the per-account token
-caps are **dynamic keys** (``GITS_ACCOUNT_5H_CAP_<NAME>``) that a fixed
-pydantic model can't represent — the watchdog needs to read an arbitrary
-account name at runtime.
+merged over ``os.environ`` (process env wins). The parsing lives here
+rather than in :class:`gits.config.Settings` (pydantic) for the same
+reason it does in :mod:`gits.hooks.core_os_ticket`: a PreToolUse hook
+must not import pydantic. **Every key read here is still declared in
+Settings** — that model validates the same file with ``extra='forbid'``,
+so an undeclared key makes every ``Settings()`` raise (see ghost#18).
+
+Per-account token caps are therefore **one key per window**, holding a
+``name=value`` list (``GITS_ACCOUNT_5H_CAPS="alice=150000000,bob=..."``)
+rather than a family of dynamic per-account keys. An
+arbitrary-suffix key cannot be declared in a fixed pydantic model, so the
+dynamic form bricked ``Settings()`` for exactly the operator who
+configured the feature. The collapsed form also moves the blast radius of
+a typo: a malformed list degrades *here*, in this parser, where the
+watchdog can carry on — instead of in ``Settings()``, where it takes down
+the bot, the hooks and the CLI alike.
 
 All values have conservative defaults so the watchdog is safe out of the
 box (task [[jeyuxq]], operator answers 2026-06-01):
@@ -148,6 +159,40 @@ def _to_int(raw: str | None, default: int) -> int:
         return default
 
 
+def _parse_caps(raw: str | None, default: float) -> dict[str, float]:
+    """Parse ``"alice=150000000,bob=2e9"`` into ``{"alice": ..., "bob": ...}``.
+
+    Never raises. A malformed entry is dropped with a warning and the rest
+    of the list still applies — a dropped cap is *inert* (the cap-% check
+    reports ``None`` for that account), never a false alarm. Degrading here
+    is deliberate: this is the failure that used to happen inside
+    ``Settings()``, where it took the whole program down instead.
+    """
+    caps: dict[str, float] = {}
+    if not raw:
+        return caps
+    for chunk in raw.replace(";", ",").split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        name, sep, val = entry.partition("=")
+        name = name.strip().lower()
+        if not sep or not name:
+            logger.warning(
+                "watchdog: ignoring malformed account-cap entry %r "
+                "(expected NAME=VALUE)", entry
+            )
+            continue
+        parsed = _to_float(val.strip(), -1.0)
+        if parsed < 0:
+            logger.warning(
+                "watchdog: ignoring non-numeric cap for account %r: %r", name, val
+            )
+            continue
+        caps[name] = parsed or default
+    return caps
+
+
 def load_watchdog_config(
     config_env_path: Path | None = None,
     *,
@@ -191,15 +236,8 @@ def load_watchdog_config(
         skew_score_median_mult=_to_float(g("GITS_SKEW_SCORE_MEDIAN_MULT"), 2.0),
     )
 
-    caps_5h: dict[str, float] = {}
-    caps_7d: dict[str, float] = {}
-    for key, val in merged.items():
-        if key.startswith("GITS_ACCOUNT_5H_CAP_"):
-            name = key[len("GITS_ACCOUNT_5H_CAP_"):].lower()
-            caps_5h[name] = _to_float(val, _PLACEHOLDER_5H_CAP)
-        elif key.startswith("GITS_ACCOUNT_7D_CAP_"):
-            name = key[len("GITS_ACCOUNT_7D_CAP_"):].lower()
-            caps_7d[name] = _to_float(val, _PLACEHOLDER_7D_CAP)
+    caps_5h = _parse_caps(g("GITS_ACCOUNT_5H_CAPS"), _PLACEHOLDER_5H_CAP)
+    caps_7d = _parse_caps(g("GITS_ACCOUNT_7D_CAPS"), _PLACEHOLDER_7D_CAP)
 
     disk = g("GITS_DISK_WATCH_PATH")
     return WatchdogConfig(
