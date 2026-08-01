@@ -43,6 +43,12 @@ class IncomingMessage:
     # adapters that cannot supply one leave it None and forwarding still
     # works — delivery beats citability.
     message_id: str | None = None
+    # Server/guild the message came from (task [[gldref]]). Optional and None
+    # for a DM, which is a fact worth reporting honestly: a permalink needs
+    # /channels/<guild>/<channel>/<message>, and the renderer substitutes
+    # Discord's "@me" only because the adapter said there was no guild. See
+    # gits.core.utterance_ref on why that asymmetry matters.
+    guild_id: str | None = None
     raw: Any = None  # original platform message object
 
 

@@ -495,6 +495,11 @@ class DiscordAdapter(PlatformAdapter):
             image_paths=image_paths,
             reply_to=str(message.reference.message_id) if message.reference else None,
             message_id=str(message.id),
+            # Reuse the guild resolved for access control above rather than
+            # re-deriving it: one source of truth, and it keeps the value
+            # provably the inbound message's own (task [[gldref]]). None here
+            # means Discord reported a DM, not that we failed to look.
+            guild_id=str(guild_id) if guild_id else None,
             raw=message,
         )
 
