@@ -294,7 +294,9 @@ def test_pointer_preserves_plan_phase_instruction():
         channel_id="999",
     )
     assert "Phase: **plan first**" in msg
-    assert "Do not implement yet." in msg
+    # No trailing period: task dsptpl continues this sentence with the
+    # "even if the task page states a delivery method" clause.
+    assert "Do not implement yet" in msg
 
 
 def test_pointer_done_notice_present_in_impl_phase_too():
@@ -308,6 +310,220 @@ def test_pointer_done_notice_present_in_impl_phase_too():
     assert "Phase: **impl**" in msg
     assert "ghost butler send 777" in msg
     assert msg.index("Phase: **impl**") < msg.index("ghost butler send")
+
+
+# ---------------------------------------------------------------------------
+# Delivery method defers to the task page; safety does not (task dsptpl)
+#
+# These assert on the rendered brief directly and are the ONLY proof this
+# ticket has: the live `ghost butler dispatch` runs a uv-installed snapshot,
+# not this checkout, so "run a real dispatch and look at the tail" would read
+# stale code and prove nothing.
+# ---------------------------------------------------------------------------
+
+
+def _page(tmp_path, body: str, name: str = "2026-08-01-dsptpl-t.md") -> str:
+    p = tmp_path / name
+    p.write_text("---\nid: dsptpl\n---\n\n" + body, encoding="utf-8")
+    return str(p)
+
+
+_DIFF_ONLY = "output a unified diff only"
+_NO_COMMIT = "do not commit"
+_NO_INSTALL = "do not install anything"
+_NO_RESTART = "do not restart any running service"
+
+
+def _impl_brief(task_path: str) -> str:
+    return dispatch_task.build_pointer_message(
+        {"id": "dsptpl", "personas": "[senior platform engineer]"},
+        task_path, "impl", channel_id="999",
+    )
+
+
+# ── green: page states a delivery method ⇒ no contradictory diff-only text ──
+
+
+def test_impl_brief_defers_to_page_when_delivery_section_present(tmp_path):
+    """Green case #1 from the spec: a page that says "this one goes to PR"
+    must not receive a brief that also says "do not commit"."""
+    path = _page(tmp_path, "## 交付方式\n\n本票走 PR：切分支→提交→推→开 PR。\n")
+    msg = _impl_brief(path)
+    assert _DIFF_ONLY not in msg
+    assert _NO_COMMIT not in msg
+    assert "the task page decides" in msg
+    assert "authoritative" in msg
+
+
+def test_delivery_heading_matched_by_prefix_not_equality(tmp_path):
+    """The heading that motivated this ticket carries a parenthetical suffix.
+    Equality matching misses it outright — hence prefix matching."""
+    path = _page(
+        tmp_path,
+        "## 交付方式（本票自己的 —— 显式覆盖派单尾巴）\n\n本票走 PR。\n",
+    )
+    assert dispatch_task.page_declares_delivery(path) is True
+    assert _NO_COMMIT not in _impl_brief(path)
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "## Delivery",
+        "## Delivery method (this ticket goes to PR)",
+        "## delivery",
+        "## DELIVERY",
+        "# 交付方式",
+        "### 交付方式 (PR)",
+    ],
+)
+def test_delivery_heading_variants_all_detected(tmp_path, heading):
+    """English/Chinese, any heading level, case-insensitive, with suffixes."""
+    path = _page(tmp_path, f"{heading}\n\nsome delivery prose\n")
+    assert dispatch_task.page_declares_delivery(path) is True
+
+
+# ── green: page silent on delivery ⇒ conservative default survives ──────────
+
+
+def test_impl_brief_keeps_diff_only_default_when_page_silent(tmp_path):
+    """Green case #2: forgetting to declare delivery lands on the
+    conservative side, exactly as before this ticket."""
+    path = _page(tmp_path, "## Goal\n\nfix the thing\n\n## Test plan\n\npytest\n")
+    msg = _impl_brief(path)
+    assert _DIFF_ONLY in msg
+    assert _NO_COMMIT in msg
+
+
+def test_passing_mention_of_pr_is_not_a_delivery_declaration(tmp_path):
+    """Question 2 answered mechanically: prose that merely *mentions* a PR
+    does not flip delivery. Only a heading does — that is why detection is
+    a heading scan and not prose sniffing."""
+    path = _page(
+        tmp_path,
+        "## Context\n\nThis regressed in the PR that added branch pinning;\n"
+        "we should commit to a fix and push it out.\n",
+    )
+    assert dispatch_task.page_declares_delivery(path) is False
+    assert _DIFF_ONLY in _impl_brief(path)
+
+
+def test_default_branch_still_states_page_precedence(tmp_path):
+    """Belt-and-braces: even the default branch tells the executor the page
+    wins if it does state a delivery method — so a heading we failed to
+    recognise degrades into the page-authoritative reading instead of
+    reproducing the conflict this ticket fixes."""
+    path = _page(tmp_path, "## Goal\n\nfix the thing\n")
+    msg = _impl_brief(path)
+    assert "follow the page instead" in msg
+    assert "overrides this paragraph" in msg
+
+
+# ── red: safety half is NOT overridable (anti-relaxation) ───────────────────
+
+
+@pytest.mark.parametrize("phase", ["plan", "impl"])
+def test_safety_survives_a_page_demanding_install_and_restart(tmp_path, phase):
+    """THE anti-relaxation case. A page that explicitly orders an install and
+    a service restart must still receive both prohibitions. Without this
+    test the change silently converts safety into another opt-out."""
+    path = _page(
+        tmp_path,
+        "## 交付方式\n\n装好依赖并重启服务：uv tool install . && "
+        "pm2 restart ghost-in-the-shell\n",
+    )
+    msg = dispatch_task.build_pointer_message(
+        {"id": "dsptpl", "personas": "[a]"}, path, phase, channel_id="999",
+    )
+    assert _NO_INSTALL in msg
+    assert _NO_RESTART in msg
+    assert "not negotiable by the task page" in msg
+
+
+def test_safety_tail_is_last_paragraph_in_both_phases(tmp_path):
+    """Positional argument of this ticket: the module's convention is that the
+    final paragraph carries the most weight, so the final paragraph must be the
+    one thing a page may never relax — after the done-notice, not before."""
+    path = _page(tmp_path, "## 交付方式\n\n走 PR\n")
+    for phase in ("plan", "impl"):
+        msg = dispatch_task.build_pointer_message(
+            {"id": "dsptpl", "personas": "[a]"}, path, phase, channel_id="999",
+        )
+        assert msg.index("ghost butler send") < msg.index(_NO_INSTALL)
+        assert msg.rstrip().endswith("these may not.")
+
+
+def test_plan_phase_carries_safety_clause_too(tmp_path):
+    """Regression on a gap this ticket closes as a by-product: before the
+    split, the safety clause lived inside the *impl* tail only, so plan-phase
+    executors were told nothing about installing or restarting."""
+    path = _page(tmp_path, "## Goal\n\nfix it\n")
+    msg = dispatch_task.build_pointer_message(
+        {"id": "dsptpl", "personas": "[a]"}, path, "plan", channel_id="999",
+    )
+    assert _NO_INSTALL in msg and _NO_RESTART in msg
+
+
+# ── plan phase ignores the page's delivery clause (no referent) ─────────────
+
+
+def test_plan_phase_omits_delivery_clause_entirely(tmp_path):
+    """Question 3 / PM answer Q2: at plan phase the page's delivery clause has
+    no referent — there is no artifact to land — so no delivery text is
+    emitted at all, in either direction."""
+    for body in ("## 交付方式\n\n走 PR\n", "## Goal\n\nfix it\n"):
+        msg = dispatch_task.build_pointer_message(
+            {"id": "dsptpl", "personas": "[a]"}, _page(tmp_path, body),
+            "plan", channel_id="999",
+        )
+        assert _DIFF_ONLY not in msg
+        assert "the task page decides" not in msg
+
+
+def test_plan_tail_states_that_page_delivery_does_not_apply_yet(tmp_path):
+    """...and says so in words rather than leaving the executor to derive it.
+    This ticket's own page was dispatched at plan phase carrying a "go to PR"
+    delivery section — the conflict was live, not hypothetical."""
+    path = _page(tmp_path, "## 交付方式\n\n走 PR\n")
+    msg = dispatch_task.build_pointer_message(
+        {"id": "dsptpl", "personas": "[a]"}, path, "plan", channel_id="999",
+    )
+    assert "Do not implement yet" in msg
+    assert "applies to the later impl dispatch, not to this one" in msg
+
+
+# ── degenerate input lands conservative, never raises ───────────────────────
+
+
+def test_unreadable_page_falls_back_to_diff_only_without_raising(tmp_path):
+    """Spec's 4th test bullet, adapted: a missing/unreadable page must land on
+    the conservative side, and must NOT take the dispatch down with it."""
+    missing = str(tmp_path / "2026-08-01-dsptpl-nope.md")
+    assert dispatch_task.page_declares_delivery(missing) is False
+    msg = _impl_brief(missing)
+    assert _DIFF_ONLY in msg
+    assert _NO_INSTALL in msg
+
+
+def test_directory_as_page_path_falls_back_to_diff_only(tmp_path):
+    """IsADirectoryError is an OSError too — same conservative landing."""
+    assert dispatch_task.page_declares_delivery(str(tmp_path)) is False
+
+
+def test_undecodable_page_bytes_do_not_raise(tmp_path):
+    """errors="replace" — a page with broken encoding degrades, never throws."""
+    p = tmp_path / "2026-08-01-dsptpl-bin.md"
+    p.write_bytes(b"## \xff\xfe Delivery\n\nwalk to PR\n")
+    assert dispatch_task.page_declares_delivery(str(p)) in (True, False)
+
+
+def test_delivery_word_in_body_prose_is_not_a_heading(tmp_path):
+    """Only headings count — a paragraph starting with the word "Delivery"
+    must not flip the brief."""
+    path = _page(
+        tmp_path, "## Goal\n\nDelivery of this feature slipped last quarter.\n"
+    )
+    assert dispatch_task.page_declares_delivery(path) is False
 
 
 # ---------------------------------------------------------------------------
