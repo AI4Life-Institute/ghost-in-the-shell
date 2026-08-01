@@ -115,6 +115,11 @@ def main() -> None:
 
     _org_cli.install_parser(sub)
 
+    # gits doctor — which ghost code is live (task whlive).
+    from . import cli_doctor as _cli_doctor
+
+    _cli_doctor.install_parser(sub)
+
     # gits restart
     sub.add_parser("restart", help="Restart the Ghost background service")
 
@@ -176,6 +181,8 @@ def main() -> None:
         _butler_cli.dispatch(args)
     elif args.command == "org":
         _org_cli.dispatch(args)
+    elif args.command == "doctor":
+        _cli_doctor.dispatch(args)
     elif args.command == "setup":
         _cmd_setup(args)
     elif args.command == "desktop":

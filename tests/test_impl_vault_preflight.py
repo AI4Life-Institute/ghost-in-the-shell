@@ -357,12 +357,22 @@ def test_is_vault_root_source_repo_is_false(tmp_path):
 # --- main(): end-to-end stdin/exit-code via the installed `gits guard` ------
 
 def _run_guard(payload: dict, env_project_dir: str) -> subprocess.CompletedProcess:
+    # GHOST_GUARD_DRIFT_TTL=0 silences the whlive drift banner. These tests
+    # assert on the *refusal* contract (exit code + a clean stderr on allow),
+    # and the banner is a rate-limited notice about the checkout this test run
+    # itself lives in — leaving it on would make them depend on the branch and
+    # dirtiness of the developer's tree. The banner has its own tests, against
+    # constructed checkouts, in tests/test_drift_banner.py.
     return subprocess.run(
         [sys.executable, "-m", "gits", "guard"],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        env={"CLAUDE_PROJECT_DIR": env_project_dir, "PATH": __import__("os").environ["PATH"]},
+        env={
+            "CLAUDE_PROJECT_DIR": env_project_dir,
+            "PATH": __import__("os").environ["PATH"],
+            "GHOST_GUARD_DRIFT_TTL": "0",
+        },
     )
 
 

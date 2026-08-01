@@ -565,9 +565,27 @@ def main() -> None:
         cwd=payload.get("cwd") or None,
     )
     if allow:
+        _drift_banner()
         sys.exit(0)
     print(_MESSAGE.format(project_dir=project_dir, target=target), file=sys.stderr)
     sys.exit(2)
+
+
+def _drift_banner() -> None:
+    """Note on stderr when the guard itself is running unreviewed code.
+
+    Ghost task whlive. Deliberately confined to the **allow** path and to
+    ``except Exception: pass``: this is a cosmetic notice, and a cosmetic
+    notice must never be able to change a refusal or an exit code. Rate
+    limiting lives in :mod:`gits.hooks.drift_banner` — this hangs off every
+    tool call.
+    """
+    try:
+        from .drift_banner import emit
+
+        emit()
+    except Exception:  # noqa: BLE001 — never let a notice affect the verdict
+        pass
 
 
 if __name__ == "__main__":
