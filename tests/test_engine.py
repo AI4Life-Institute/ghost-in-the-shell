@@ -630,33 +630,19 @@ class TestUtteranceRefRelay:
         return asyncio.run(_test())
 
     def test_forwarded_text_carries_parseable_ref(self, engine, tmp_path):
-        """The relayed payload carries a ref that reads back to the facts.
-
-        Parsed with the format's own parser rather than a second hand-written
-        regex: the arity of the path grew a guild segment in task [[gldref]],
-        and a local regex here would have to be kept in step by hand. The
-        two-segment legacy form is pinned in ``tests/test_utterance_ref.py``
-        against ``parse_ref`` -- that is where this tripwire moved to, not
-        away.
-        """
-        from gits.core.utterance_ref import parse_ref, permalink
-
         payload = self._forward(
             engine, tmp_path,
             platform="discord", channel_id="ch-ref", user_id="u-authority",
-            text="可以合", guild_id="g-7", message_id="m-42",
+            text="可以合", message_id="m-42",
         )
 
         assert "可以合" in payload  # operator's words are untouched
-        parsed = parse_ref(payload)
-        assert parsed is not None, payload
-        assert parsed.platform == "discord"
-        assert parsed.guild_id == "g-7"
-        assert parsed.channel_id == "ch-ref"
-        assert parsed.message_id == "m-42"
-        assert parsed.user_id == "u-authority"
-        # The point of the guild segment: the relayed ref is now clickable.
-        assert permalink(parsed) == "https://discord.com/channels/g-7/ch-ref/m-42"
+        m = re.search(r"\[ref: (\S+):(\S+?)/(\S+?) · from:(\S+?)\]", payload)
+        assert m is not None, payload
+        assert m.group(1) == "discord"
+        assert m.group(2) == "ch-ref"
+        assert m.group(3) == "m-42"
+        assert m.group(4) == "u-authority"
 
     def test_missing_message_id_still_forwards_text(self, engine, tmp_path):
         """Delivery beats citability: a message with no id is forwarded

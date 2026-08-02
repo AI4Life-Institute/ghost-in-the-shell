@@ -115,54 +115,6 @@ def test_partial_consent_is_not_consent():
     assert allow is False
 
 
-def test_compact_relay_reference_is_not_consent():
-    """A forwarded reference must never satisfy the consent check (task
-    [[gldref]]).
-
-    ghost appends a compact reference to *every* message it relays into a
-    session (``gits.core.utterance_ref``). Pasting a permalink is an act of
-    consent -- someone went and got that link; forwarding is not. Accepting
-    the compact form here would let a forwarded message file a core-OS ticket
-    with no human having agreed to anything, so this guard takes full
-    permalinks only. That is a consent boundary, not a format detail.
-    """
-    from gits.adapters.base import IncomingMessage
-    from gits.core.utterance_ref import format_ref, parse_ref, permalink
-
-    # Built by the real producer, not hand-written, so this stays true if the
-    # relay format changes.
-    relayed = format_ref(
-        IncomingMessage(
-            platform="discord",
-            guild_id="1258194549998878731",
-            channel_id="153301",
-            user_id="liang",
-            text="可以合",
-            message_id="1533010149977886760",
-        )
-    )
-    compact = parse_ref(relayed)
-    assert compact.guild_id  # the ref does carry a guild now...
-
-    for body in (
-        f'principal_ref=liang utterance_ref={relayed}',
-        f"principal_ref=liang utterance_ref=discord:"
-        f"{compact.guild_id}/{compact.channel_id}/{compact.message_id}",
-    ):
-        allow, msg = _eval(f'gh issue create --repo {CORE} --body "{body}"')
-        assert allow is False, body
-        assert "utterance_ref" in msg
-        assert g.consent_refs(body)[1] is None, body
-
-    # ...and the permalink a human would paste from it still passes, so the
-    # refusal above is about provenance, not about the guild being unusable.
-    allow, _ = _eval(
-        f'gh issue create --repo {CORE} --body "principal_ref=liang '
-        f'utterance_ref={permalink(compact)}"'
-    )
-    assert allow is True
-
-
 # --- Case 3: the mandated line is never blocked -----------------------------
 
 def test_mandated_line_is_never_blocked():

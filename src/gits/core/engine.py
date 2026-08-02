@@ -35,7 +35,6 @@ from .subscription import SubscriptionVault, SwitchPrimitive
 from .terminal_parser import PromptInfo, parse_status_line
 from .tmux import TmuxController
 from .usage_panel import format_usage_panel
-from .utterance_ref import format_ref
 
 logger = logging.getLogger(__name__)
 
@@ -3229,18 +3228,25 @@ async def _wait_for_cli_idle(
 def _format_utterance_ref(msg: IncomingMessage) -> str | None:
     """Render a compact, machine-parseable pointer to *msg* itself.
 
-    ``[ref: <platform>:<guild_id>/<channel_id>/<message_id> · from:<user_id>]``
+    ``[ref: <platform>:<channel_id>/<message_id> · from:<user_id>]``
 
     ghost hands over the facts it already holds and nothing more — it does
     not know or care what a consumer does with them (task [[utrref]]).
-    Returns ``None`` when there is nothing citable to point at, so callers
+    Returns ``None`` when the platform gave us no message id, so callers
     forward the bare text rather than dropping the message.
-
-    The format itself lives in :mod:`gits.core.utterance_ref`, which owns the
-    guild segment and its ``@me`` rule (task [[gldref]]). This stays as the
-    engine's local name for it so the relay path reads in one line.
     """
-    return format_ref(msg)
+    if not msg.message_id or not msg.channel_id or not msg.platform:
+        return None
+    # Command payloads are parsed by the CLI, not read as prose: `!cmd` runs a
+    # shell command and `/cmd` a slash command. Appending a ref would become an
+    # extra argument, so those stay verbatim.
+    stripped = (msg.text or "").lstrip()
+    if stripped.startswith(("!", "/")):
+        return None
+    return (
+        f"[ref: {msg.platform}:{msg.channel_id}/{msg.message_id}"
+        f" · from:{msg.user_id}]"
+    )
 
 
 # CLIs that need Escape+Enter to submit (multi-line editor mode)
