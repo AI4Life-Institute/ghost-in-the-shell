@@ -111,33 +111,6 @@ bot neither replays everything nor forgets what it owes.
 and retries on the next scan. Delivery failure must not be indistinguishable
 from delivery — that is one more way a notifier goes quiet while looking fine.
 
-### The failure posture, for every notifier in this repo
-
-Settled by ghost#42 after the drift watch and the resource watchdog landed
-hours apart with opposite answers. It applies to both, and to whatever comes
-next:
-
-1. **An undelivered notification is never recorded as delivered.** The de-dupe
-   ledger — `last_notified_at` here, `WatchdogState` levels and the digest
-   date-gate in the watchdog — is the only thing deciding whether something is
-   ever said again. Writing to it on a failed send trades one network blip for
-   permanent silence.
-2. **Implement that by not advancing state, never by raising.** A notifier that
-   propagates an exception can kill the loop it runs in, which is worse than
-   the silence it replaced. Swallow the error, report the outcome, leave the
-   ledger alone; the next tick re-derives the same edge and retries by
-   construction. *Doesn't crash* and *doesn't forget* are separate properties
-   and both are available.
-3. **Log a dropped operator alert at WARNING, not DEBUG.** It is the event the
-   subsystem exists to prevent and must not be the quietest line in the log.
-4. **Never let "cannot tell" share a representation with "nothing is wrong".**
-   A missing or defaulted configuration has to produce a visible complaint that
-   names the knob to turn.
-
-In code: `DriftWatcher.run_once` for notices,
-`gits.core.resource_watch.deliver` for watchdog alerts. Both reconcile first,
-send second, and commit the ledger only for what actually landed.
-
 ## Fetching, and the signal it costs
 
 A watcher that never fetches measures `0 behind` forever. So it fetches — and
@@ -164,26 +137,9 @@ To the **butler home channel** of the checkout the bot runs from — not
 machine-level alert delivered into everyone's working session is the noise that
 gets the whole mechanism muted (operator answer Q1, 2026-06-01).
 
-No new channel setting was added. ghost#18's `GITS_WATCHDOG_ALERT_CHANNEL` has
-since landed, and the obvious follow-up — converge the two onto one key — was
-taken up as ghost#42 and **rejected on inspection** (operator answer Q1,
-2026-08-01).
-
-The two are not two knobs for one audience. `GITS_WATCHDOG_ALERT_CHANNEL`
-defaults to `1510821666492649503`, which is the bound home channel of
-`vault-weiliu-ghost-efficiency` — the charter the watchdog belongs to. Drift
-notices are about *this* checkout and belong to whoever runs it. Merging the
-routes would move one team's alerts into a channel they do not read, which is
-this ticket's own failure mode aimed at a different victim.
-
-What *was* wrong is that falling back to that default was invisible: with the
-constant as the field's default there was no value of `alert_channel` meaning
-"nobody set this", so a missing configuration and a deliberate one looked
-identical, and the silence of the unset switch read as "nothing is wrong". The
-fix is not to remove the default — that would relocate the alerts — but to make
-*using* it audible. `WatchdogConfig.alert_channel_configured` records which
-happened, and the engine logs a warning at startup and before the first alert,
-naming `GITS_WATCHDOG_ALERT_CHANNEL` so the reader knows which knob to turn.
+No new channel setting was added. ghost#18 proposes
+`GITS_WATCHDOG_ALERT_CHANNEL` for the same job and has not landed; if it does,
+the two should converge on one key rather than each owning half the routing.
 
 ## Configuration
 

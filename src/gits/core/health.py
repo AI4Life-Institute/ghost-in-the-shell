@@ -195,26 +195,13 @@ class HealthMonitor:
             self._watchdog_state = WatchdogState(path)
         return self._watchdog_state
 
-    async def _safe_notify(self, text: str) -> bool:
-        """Attempt one send. Returns whether it landed; never raises.
-
-        Swallowing is deliberate — an exception escaping here would take down
-        the watch loop, which is worse than a missed alert. Returning the
-        outcome instead of discarding it is what lets the caller keep the edge
-        un-consumed so the next tick retries (ghost#42). See
-        :func:`gits.core.resource_watch.deliver`.
-        """
+    async def _safe_notify(self, text: str) -> None:
         if self._notify is None:
-            return False
+            return
         try:
-            result = await self._notify(text)
+            await self._notify(text)
         except Exception:
             logger.exception("watchdog notify failed")
-            return False
-        # A notifier that reports delivery explicitly is believed; one that
-        # returns None (the older callback shape) is taken at its word that
-        # returning without raising means it sent.
-        return True if result is None else bool(result)
 
     async def _resource_watch_loop(self) -> None:
         """Sample host resources on the slow sub-tick and edge-alert."""
@@ -224,13 +211,13 @@ class HealthMonitor:
         while self._running:
             try:
                 cfg = self._watchdog_config
-                state = self._state()
                 sample = await asyncio.to_thread(rw.sample_resources, cfg)
-                verdicts = rw.classify_resources(sample, cfg.thresholds, state)
-                alerts = rw.reconcile(verdicts, state, cfg)
-                # Edge committed on delivery only — an undelivered alert stays
-                # outstanding and is retried next tick (ghost#42).
-                await rw.deliver(alerts, state, self._safe_notify)
+                verdicts = rw.classify_resources(
+                    sample, cfg.thresholds, self._state()
+                )
+                alerts = rw.reconcile(verdicts, self._state(), cfg)
+                for a in alerts:
+                    await self._safe_notify(a.text)
             except Exception:
                 logger.exception("resource watch error")
             await asyncio.sleep(self.RESOURCE_WATCH_INTERVAL)
@@ -268,9 +255,8 @@ class HealthMonitor:
                 # Cap-% (inert when unconfigured) + skew, both edge-triggered.
                 verdicts = rw.classify_token(sample, cfg.thresholds, state)
                 verdicts.append(rw.classify_skew(sample, state))
-                await rw.deliver(
-                    rw.reconcile(verdicts, state, cfg), state, self._safe_notify
-                )
+                for a in rw.reconcile(verdicts, state, cfg):
+                    await self._safe_notify(a.text)
                 # Daily balance digest — date-gated, fires once/day past the
                 # configured local hour.
                 await self._maybe_send_digest(sample, cfg, state)
@@ -287,11 +273,8 @@ class HealthMonitor:
             return
         if state.last_digest_date() == today:
             return
-        # Same posture as the edge state: the date-gate is a de-dupe ledger
-        # too, so burning it on a failed send buys a full day of silence
-        # (ghost#42). Gate on delivery, not on "we got as far as trying".
-        if await self._safe_notify(rw.format_digest(sample, cfg)):
-            state.mark_digest_sent(today)
+        await self._safe_notify(rw.format_digest(sample, cfg))
+        state.mark_digest_sent(today)
 
     async def _check_loop(self) -> None:
         """Periodic health check loop."""

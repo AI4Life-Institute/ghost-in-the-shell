@@ -40,22 +40,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Name of the knob, as a symbol, so the complaint below can name it without
-# a second copy of the string drifting out of sync with this one.
-ALERT_CHANNEL_ENV = "GITS_WATCHDOG_ALERT_CHANNEL"
-
 # Default alert channel = the efficiency owner's home channel where the
 # CEO reads (operator answer Q1, 2026-06-01). Override with
 # GITS_WATCHDOG_ALERT_CHANNEL.
-#
-# This is *not* an orphan constant: it is the bound home channel of
-# ``vault-weiliu-ghost-efficiency``, whose charter the watchdog belongs to.
-# ghost#42 read it as a second knob competing with #40's butler-home routing
-# and proposed converging the two; that premise is wrong — they serve
-# different audiences, and converging would move this team's alerts to a
-# channel they do not read (operator answer Q1, 2026-08-01). **Do not
-# "unify" this with the drift-notice route.** Pinned by
-# ``test_unset_key_keeps_the_existing_destination``.
 _DEFAULT_ALERT_CHANNEL = "1510821666492649503"
 
 # Placeholder caps (cost-weighted token units) — documented round
@@ -146,13 +133,6 @@ class WatchdogConfig:
     # unconfigured → cap-% check inert for that account.
     caps_5h: dict[str, float] = field(default_factory=dict)
     caps_7d: dict[str, float] = field(default_factory=dict)
-    # Was ``alert_channel`` *chosen*, or did it fall back to the baked-in
-    # default? Without this there is no value of ``alert_channel`` meaning
-    # "nobody set this" — a reasonable-looking default had turned an
-    # observable state into an unobservable one, which is exactly how the
-    # unset switch's silence came to read as "nothing is wrong" (ghost#42).
-    # The fix is not to delete the default; it is to make *using* it visible.
-    alert_channel_configured: bool = False
 
     def cap_5h(self, account: str) -> float | None:
         """Configured 5h cap for ``account`` or ``None`` if unset/inert."""
@@ -260,10 +240,8 @@ def load_watchdog_config(
     caps_7d = _parse_caps(g("GITS_ACCOUNT_7D_CAPS"), _PLACEHOLDER_7D_CAP)
 
     disk = g("GITS_DISK_WATCH_PATH")
-    explicit_channel = g(ALERT_CHANNEL_ENV)
     return WatchdogConfig(
-        alert_channel=explicit_channel or _DEFAULT_ALERT_CHANNEL,
-        alert_channel_configured=bool(explicit_channel),
+        alert_channel=g("GITS_WATCHDOG_ALERT_CHANNEL") or _DEFAULT_ALERT_CHANNEL,
         owner_mention=g("GITS_WATCHDOG_OWNER_MENTION") or "",
         disk_watch_path=Path(disk) if disk else Path("~/.gits"),
         digest_hour=_to_int(g("GITS_BALANCE_DIGEST_HOUR"), 9),
