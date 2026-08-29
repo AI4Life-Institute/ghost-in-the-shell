@@ -12,15 +12,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
 
+from .prefix import VAULT_DISPATCH_RE
+
 API = "https://discord.com/api/v10"
 CONFIG = os.path.expanduser("~/.gits/config.env")
+STATE = os.path.expanduser("~/.gits/state.json")
 USER_AGENT = "ghost-butler/1.0 (vault dispatch)"
+
+# POST here publishes a message. Guarded below; every other route is not.
+_MESSAGE_POST_RE = re.compile(r"^/channels/(\d+)/messages$")
 
 
 def load_token() -> str:
@@ -40,6 +48,91 @@ def load_token() -> str:
     sys.exit(f"GITS_DISCORD_TOKEN not found in {CONFIG}")
 
 
+def self_bound_channel() -> str | None:
+    """Channel the *calling* session is itself bound to, or ``None``.
+
+    The caller runs inside a tmux pane the gateway created for a binding, so
+    ``$TMUX_PANE`` -> window id -> binding is an identity, not a guess.
+    Returns ``None`` outside tmux, when tmux or the state file can't be read,
+    or when the pane's window carries no binding (a plain shell, a cron, a
+    dispatch worker) -- every failure mode leaves the send permitted, because
+    a broken lookup must never swallow a report.
+
+    Reads ``~/.gits/state.json`` directly rather than importing the engine's
+    SessionManager: this module is on the stdlib-only CLI path.
+    """
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane, "#{window_id}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        window_id = out.stdout.strip()
+        if out.returncode != 0 or not window_id:
+            return None
+        with open(STATE) as f:
+            bindings = json.load(f).get("bindings") or {}
+        # tmux reuses window ids, so several *stale* bindings can carry the
+        # same one. The live session is the most recently active of them —
+        # taking the first match would silently resolve to a dead binding and
+        # let the guard through.
+        matches = [
+            (b.get("last_active_at") or 0, c)
+            for c, b in bindings.items()
+            if b.get("window_id") == window_id
+        ]
+        if not matches:
+            return None
+        return max(matches)[1]
+    except Exception:
+        return None
+
+
+def _refuse_self_send(channel_id: str, body: Any) -> None:
+    """Refuse publishing a message into the caller's own bound channel.
+
+    A bound channel already carries everything the session says: the gateway
+    tails the CLI transcript and posts each assistant text there. Publishing
+    the same words again puts a second copy in the channel, and the
+    butler-prefixed copy is forwarded back into the session's own pane, where
+    it reads as a fresh instruction and can trigger yet another report.
+
+    The check lives here, at the single REST chokepoint, rather than on one
+    verb: ``ghost butler send`` and ``ghost discord message send`` both reach
+    Discord through :func:`api`, and a guard on either one alone just teaches
+    the caller to use the other.
+
+    Slash payloads are exempt: ``/bind`` and friends are control messages the
+    gateway routes through ``_handle_butler_command``, not prose the transcript
+    relay would have duplicated.
+    """
+    content = (body or {}).get("content") if isinstance(body, dict) else None
+    if not content:
+        return
+    # Strip butler decoration before asking "is this a command?" — by the time
+    # a dispatch reaches here the payload reads `📨 **[butler:x]** /bind ...`.
+    payload = VAULT_DISPATCH_RE.sub("", content).lstrip()
+    if payload.startswith("/"):
+        return
+    if self_bound_channel() != channel_id:
+        return
+    sys.exit(
+        f"ghost: refusing to publish into {channel_id} — that is this "
+        "session's own bound channel.\n"
+        "  Everything you say in this session is already posted there: the "
+        "gateway tails this\n"
+        "  CLI's transcript and forwards each reply to that channel. The "
+        "operator has read it.\n"
+        "  Sending it again puts a second copy in the channel and feeds a "
+        "copy back into this\n"
+        "  pane as if it were a new instruction. Answering in this session IS "
+        "answering in the\n"
+        "  channel. To reach a *different* channel or thread, pass its id."
+    )
+
+
 def api(
     path: str,
     method: str = "GET",
@@ -47,6 +140,10 @@ def api(
     query: dict | None = None,
 ) -> tuple[int, Any]:
     """Call Discord REST. Returns (http_status, parsed_body_or_raw_text)."""
+    if method == "POST":
+        m = _MESSAGE_POST_RE.match(path)
+        if m is not None:
+            _refuse_self_send(m.group(1), body)
     url = API + path
     if query:
         url += "?" + urllib.parse.urlencode(
