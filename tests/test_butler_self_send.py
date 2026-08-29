@@ -1,172 +1,210 @@
-"""``ghost butler send`` must refuse the caller's own bound channel.
+"""Publishing into the caller's own bound channel is refused at the REST
+chokepoint.
 
 A bound channel already carries everything the session says — the gateway
-tails the CLI transcript and posts each assistant text there. A ``butler
-send`` to that same channel publishes the words a second time and feeds a
-butler-prefixed copy back into the session's own pane, where it reads as a
-fresh instruction. These tests pin the refusal, and pin every fail-open path
-so a broken lookup can never swallow a real report.
+tails the CLI transcript and posts each assistant text there. Publishing the
+same words again puts a second copy in the channel, and the butler-prefixed
+copy is forwarded back into the session's own pane, where it reads as a fresh
+instruction.
+
+The guard lives in :func:`gits.butler.http.api`, not on a verb, because
+``ghost butler send`` and ``ghost discord message send`` both reach Discord
+through it — guarding one verb only teaches the caller to use the other.
+These tests pin both verbs, the routes that must stay untouched, and every
+fail-open path.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
-from unittest.mock import patch
 
 import pytest
 
-from gits.butler import butler_cli
+from gits.butler import butler_cli, discord_cli, http
+
+OWN = "1541713284296871956"
+OTHER = "1541714141889171546"
+THREAD = "1541723658869805058"
 
 
-@pytest.fixture(autouse=True)
-def _no_real_http(monkeypatch):
-    """Any unmocked REST call must fail loudly rather than reach Discord."""
-    def boom(*a, **kw):
-        raise RuntimeError(f"unmocked api() call leaked through: {a!r} {kw!r}")
+@pytest.fixture
+def sent(monkeypatch) -> list[tuple[str, str, dict]]:
+    """Capture what would have gone over the wire.
 
-    monkeypatch.setattr(butler_cli, "api", boom)
+    Only the transport is stubbed — ``http.api`` itself runs for real, so
+    these tests exercise the guard exactly where it is wired in.
+    """
+    log: list[tuple[str, str, dict]] = []
 
+    class _Resp:
+        status = 200
 
-def _args(target: str | None = "1541713284296871956", content: str = "hello", **over):
-    ns = argparse.Namespace(
-        target_id=target, content=content, prefix=None, user="weiliu",
-        raw=False, force=False,
-    )
-    for k, v in over.items():
-        setattr(ns, k, v)
-    return ns
+        def read(self):
+            return b'{"id": "msg-1"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, *a, **kw):
+        body = json.loads(req.data.decode()) if req.data else {}
+        log.append((req.full_url.replace(http.API, ""), req.get_method(), body))
+        return _Resp()
+
+    monkeypatch.setattr(http, "load_token", lambda: "token")
+    monkeypatch.setattr(http.urllib.request, "urlopen", fake_urlopen)
+    return log
 
 
 def _bound_to(monkeypatch, channel_id: str | None):
     """Pretend the calling pane is the session bound to *channel_id*."""
-    monkeypatch.setattr(butler_cli, "_self_bound_channel", lambda: channel_id)
+    monkeypatch.setattr(http, "self_bound_channel", lambda: channel_id)
 
 
-def _record_sends(monkeypatch) -> list[tuple[str, str]]:
-    """Capture (target, content) instead of sending; returns the log."""
-    sent: list[tuple[str, str]] = []
+def _butler_send(target=OWN, content="hello"):
+    return argparse.Namespace(
+        target_id=target, content=content, prefix=None, user="weiliu", raw=False,
+    )
 
-    def fake_send(target_id, content, **kw):
-        sent.append((target_id, content))
-        return "msg-1"
 
-    monkeypatch.setattr(butler_cli, "send_decorated", fake_send)
-    return sent
+def _discord_send(channel=OWN, content="hello"):
+    return argparse.Namespace(target_id=channel, content=content, reply_to=None)
 
 
 class TestRefusal:
-    def test_own_channel_is_refused_and_nothing_is_sent(self, monkeypatch, capsys):
-        sent = _record_sends(monkeypatch)
-        _bound_to(monkeypatch, "1541713284296871956")
+    def test_butler_send_to_own_channel_is_refused(self, monkeypatch, sent):
+        _bound_to(monkeypatch, OWN)
 
         with pytest.raises(SystemExit) as e:
-            butler_cli.cmd_send(_args(target="1541713284296871956"))
+            butler_cli.cmd_send(_butler_send())
 
         assert sent == []  # the whole point: no second copy in the channel
         msg = str(e.value)
         assert "own bound channel" in msg
-        assert "1541713284296871956" in msg
-        assert "--force" in msg  # the escape hatch is discoverable
+        assert OWN in msg
+        # The refusal must state the fact that makes re-sending pointless,
+        # and must not hand the caller another way to do it.
+        assert "already posted there" in msg
+        assert "--force" not in msg
 
-    def test_default_target_is_guarded_too(self, monkeypatch):
-        """Omitting the target resolves to the home channel, which for a PM
-        session IS its own bound channel — the guard runs on the *resolved*
-        id, not on what the operator typed."""
-        sent = _record_sends(monkeypatch)
-        monkeypatch.setattr(
-            butler_cli, "_resolve_target", lambda t, cwd: "1541713284296871956"
-        )
-        _bound_to(monkeypatch, "1541713284296871956")
+    def test_discord_message_send_to_own_channel_is_refused(self, monkeypatch, sent):
+        """The workaround the guard exists to close: when `butler send` was
+        blocked, the caller reached for the low-level transport verb."""
+        _bound_to(monkeypatch, OWN)
 
         with pytest.raises(SystemExit):
-            butler_cli.cmd_send(_args(target=None))
+            discord_cli.cmd_message_send(_discord_send())
         assert sent == []
 
-    def test_stdin_content_is_guarded(self, monkeypatch):
-        """``send - <<'MSG'`` is the shape that actually caused the duplicate
-        posts, so the guard must run after stdin is read."""
-        sent = _record_sends(monkeypatch)
-        _bound_to(monkeypatch, "1541713284296871956")
-        stdin = type("S", (), {"read": staticmethod(lambda: "报告全文")})()
-        monkeypatch.setattr("sys.stdin", stdin)
+    def test_no_force_escape_hatch_on_the_parser(self):
+        """A discoverable override is not a guard: the first version offered
+        `--force` in its error text and the caller simply started passing it."""
+        parser = argparse.ArgumentParser()
+        butler_cli.install_parser(parser.add_subparsers())
+        with pytest.raises(SystemExit):
+            parser.parse_args(["butler", "send", OWN, "hi", "--force"])
+
+    def test_decorated_prose_is_refused(self, monkeypatch, sent):
+        """By the time a dispatch reaches the chokepoint the body already
+        carries the butler prefix — stripping it must not make prose look
+        like a command."""
+        _bound_to(monkeypatch, OWN)
 
         with pytest.raises(SystemExit):
-            butler_cli.cmd_send(_args(target="1541713284296871956", content="-"))
+            http.api(
+                f"/channels/{OWN}/messages", method="POST",
+                body={"content": "📨 **[butler:weiliu]** 进展汇报"},
+            )
         assert sent == []
 
 
 class TestStillAllowed:
-    def test_other_channel_passes(self, monkeypatch):
-        sent = _record_sends(monkeypatch)
-        _bound_to(monkeypatch, "1541713284296871956")
+    def test_other_channel_passes(self, monkeypatch, sent):
+        _bound_to(monkeypatch, OWN)
+        butler_cli.cmd_send(_butler_send(target=OTHER))
+        assert [p for p, _, _ in sent] == [f"/channels/{OTHER}/messages"]
 
-        butler_cli.cmd_send(_args(target="1541714141889171546"))
-        assert sent == [("1541714141889171546", "hello")]
-
-    def test_thread_of_own_channel_passes(self, monkeypatch):
+    def test_thread_passes(self, monkeypatch, sent):
         """Dispatch reporting into a task thread must keep working — a thread
         has its own id, so it is never the caller's bound channel."""
-        sent = _record_sends(monkeypatch)
-        _bound_to(monkeypatch, "1541713284296871956")
+        _bound_to(monkeypatch, OWN)
+        butler_cli.cmd_send(_butler_send(target=THREAD))
+        assert [p for p, _, _ in sent] == [f"/channels/{THREAD}/messages"]
 
-        butler_cli.cmd_send(_args(target="1541723658869805058"))
-        assert sent == [("1541723658869805058", "hello")]
-
-    def test_unbound_caller_passes(self, monkeypatch):
+    def test_unbound_caller_passes(self, monkeypatch, sent):
         """A cron, a plain shell, a dispatch worker — no binding, no guard."""
-        sent = _record_sends(monkeypatch)
         _bound_to(monkeypatch, None)
+        butler_cli.cmd_send(_butler_send())
+        assert [p for p, _, _ in sent] == [f"/channels/{OWN}/messages"]
 
-        butler_cli.cmd_send(_args(target="1541713284296871956"))
-        assert sent == [("1541713284296871956", "hello")]
+    def test_slash_payload_passes(self, monkeypatch, sent):
+        """`/bind` and friends are control messages the gateway routes through
+        `_handle_butler_command` (org-schema.md:195 sends `/bind` this way),
+        not prose the transcript relay would have duplicated."""
+        _bound_to(monkeypatch, OWN)
+        butler_cli.cmd_send(_butler_send(content="/bind /src/x claude"))
+        assert len(sent) == 1
 
-    def test_slash_payload_passes(self, monkeypatch):
-        """``/bind`` and friends are control messages the gateway routes, not
-        prose the transcript relay would have duplicated (org-schema.md:195
-        onboarding flow sends `/bind` through this verb)."""
-        sent = _record_sends(monkeypatch)
-        _bound_to(monkeypatch, "1541713284296871956")
+    def test_decorated_slash_payload_passes(self, monkeypatch, sent):
+        _bound_to(monkeypatch, OWN)
+        http.api(
+            f"/channels/{OWN}/messages", method="POST",
+            body={"content": "📨 **[butler:weiliu]** /bind /src/x claude"},
+        )
+        assert len(sent) == 1
 
-        butler_cli.cmd_send(_args(target="1541713284296871956", content="/bind /src/x claude"))
-        assert sent == [("1541713284296871956", "/bind /src/x claude")]
+    def test_other_routes_on_own_channel_pass(self, monkeypatch, sent):
+        """Only message *publishing* is guarded. Reading the channel, creating
+        a thread in it, reacting — all still work."""
+        _bound_to(monkeypatch, OWN)
+        http.api(f"/channels/{OWN}/messages", query={"limit": 5})
+        http.api(f"/channels/{OWN}/threads", method="POST", body={"name": "t"})
+        http.api(f"/channels/{OWN}/messages/9/reactions/x/@me", method="PUT")
+        assert len(sent) == 3
 
-    def test_force_overrides(self, monkeypatch):
-        sent = _record_sends(monkeypatch)
-        _bound_to(monkeypatch, "1541713284296871956")
-
-        butler_cli.cmd_send(_args(target="1541713284296871956", force=True))
-        assert sent == [("1541713284296871956", "hello")]
+    def test_empty_body_passes(self, monkeypatch, sent):
+        _bound_to(monkeypatch, OWN)
+        http.api(f"/channels/{OWN}/messages", method="POST", body={"embeds": []})
+        assert len(sent) == 1
 
 
 class TestSelfBoundChannelLookup:
-    """`_self_bound_channel` resolves pane → window → binding, and fails open
+    """`self_bound_channel` resolves pane → window → binding, and fails open
     on every error: a broken lookup must never block a report."""
 
-    def test_resolves_binding_for_this_pane(self, monkeypatch):
-        monkeypatch.setenv("TMUX_PANE", "%260")
+    def _tmux(self, monkeypatch, rc=0, out="@260\n"):
         monkeypatch.setattr(
-            butler_cli.subprocess, "run",
-            lambda *a, **kw: subprocess.CompletedProcess(a, 0, "@260\n", ""),
+            http.subprocess, "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a, rc, out, ""),
         )
-        binding = type("B", (), {"channel_id": "1541713284296871956"})()
-        mgr = type("M", (), {
-            "get_binding_by_window": lambda self, w: binding if w == "@260" else None,
+
+    def _state(self, tmp_path, monkeypatch, bindings):
+        f = tmp_path / "state.json"
+        f.write_text(json.dumps({"bindings": bindings}))
+        monkeypatch.setattr(http, "STATE", str(f))
+
+    def test_resolves_binding_for_this_pane(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TMUX_PANE", "%260")
+        self._tmux(monkeypatch)
+        self._state(tmp_path, monkeypatch, {
+            OTHER: {"window_id": "@1"},
+            OWN: {"window_id": "@260"},
         })
-        with patch("gits.core.session.SessionManager", lambda *a, **kw: mgr()):
-            assert butler_cli._self_bound_channel() == "1541713284296871956"
+        assert http.self_bound_channel() == OWN
 
     def test_no_tmux_pane_fails_open(self, monkeypatch):
         monkeypatch.delenv("TMUX_PANE", raising=False)
-        assert butler_cli._self_bound_channel() is None
+        assert http.self_bound_channel() is None
 
-    def test_tmux_failure_fails_open(self, monkeypatch):
+    def test_tmux_failure_fails_open(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TMUX_PANE", "%260")
-        monkeypatch.setattr(
-            butler_cli.subprocess, "run",
-            lambda *a, **kw: subprocess.CompletedProcess(a, 1, "", "no server"),
-        )
-        assert butler_cli._self_bound_channel() is None
+        self._tmux(monkeypatch, rc=1, out="")
+        self._state(tmp_path, monkeypatch, {OWN: {"window_id": "@260"}})
+        assert http.self_bound_channel() is None
 
     def test_tmux_missing_fails_open(self, monkeypatch):
         monkeypatch.setenv("TMUX_PANE", "%260")
@@ -174,28 +212,46 @@ class TestSelfBoundChannelLookup:
         def boom(*a, **kw):
             raise OSError("tmux not found")
 
-        monkeypatch.setattr(butler_cli.subprocess, "run", boom)
-        assert butler_cli._self_bound_channel() is None
+        monkeypatch.setattr(http.subprocess, "run", boom)
+        assert http.self_bound_channel() is None
 
-    def test_state_read_failure_fails_open(self, monkeypatch):
+    def test_unreadable_state_fails_open(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TMUX_PANE", "%260")
-        monkeypatch.setattr(
-            butler_cli.subprocess, "run",
-            lambda *a, **kw: subprocess.CompletedProcess(a, 0, "@260\n", ""),
-        )
+        self._tmux(monkeypatch)
+        monkeypatch.setattr(http, "STATE", str(tmp_path / "missing.json"))
+        assert http.self_bound_channel() is None
 
-        def boom(*a, **kw):
-            raise RuntimeError("state.json is garbage")
+    def test_corrupt_state_fails_open(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TMUX_PANE", "%260")
+        self._tmux(monkeypatch)
+        f = tmp_path / "state.json"
+        f.write_text("{not json")
+        monkeypatch.setattr(http, "STATE", str(f))
+        assert http.self_bound_channel() is None
 
-        with patch("gits.core.session.SessionManager", boom):
-            assert butler_cli._self_bound_channel() is None
+    def test_stale_binding_on_a_reused_window_id_loses(self, monkeypatch, tmp_path):
+        """tmux reuses window ids: several dead bindings can carry `@8` while
+        the live session also sits there. Taking the first dict match resolved
+        to a dead binding and let a real self-send through — the live session
+        is the most recently active one."""
+        monkeypatch.setenv("TMUX_PANE", "%8")
+        self._tmux(monkeypatch, out="@8\n")
+        self._state(tmp_path, monkeypatch, {
+            "1483720907347460096": {"window_id": "@8", "last_active_at": 1775082472.4},
+            "1505335695252914236": {"window_id": "@8", "last_active_at": 1781549142.9},
+            OWN: {"window_id": "@8", "last_active_at": 1788032728.0},
+        })
+        assert http.self_bound_channel() == OWN
 
-    def test_pane_with_no_binding_fails_open(self, monkeypatch):
+    def test_binding_without_last_active_still_resolves(self, monkeypatch, tmp_path):
+        """A lone binding missing the field must still be found."""
+        monkeypatch.setenv("TMUX_PANE", "%8")
+        self._tmux(monkeypatch, out="@8\n")
+        self._state(tmp_path, monkeypatch, {OWN: {"window_id": "@8"}})
+        assert http.self_bound_channel() == OWN
+
+    def test_pane_with_no_binding_fails_open(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TMUX_PANE", "%9")
-        monkeypatch.setattr(
-            butler_cli.subprocess, "run",
-            lambda *a, **kw: subprocess.CompletedProcess(a, 0, "@9\n", ""),
-        )
-        mgr = type("M", (), {"get_binding_by_window": lambda self, w: None})
-        with patch("gits.core.session.SessionManager", lambda *a, **kw: mgr()):
-            assert butler_cli._self_bound_channel() is None
+        self._tmux(monkeypatch, out="@9\n")
+        self._state(tmp_path, monkeypatch, {OWN: {"window_id": "@260"}})
+        assert http.self_bound_channel() is None

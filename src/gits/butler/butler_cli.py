@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 
 from . import identity, onboarding
@@ -170,70 +169,6 @@ def send_decorated(
     return resp["id"]
 
 
-def _self_bound_channel() -> str | None:
-    """Channel the *calling* session is itself bound to, or ``None``.
-
-    The caller runs inside a tmux pane the gateway created for a binding, so
-    ``$TMUX_PANE`` -> window id -> binding is an identity, not a guess.
-    Returns ``None`` outside tmux, when tmux or the state file can't be read,
-    or when the pane's window carries no binding (a plain shell, a cron, a
-    dispatch worker) -- every failure mode leaves the send permitted, because
-    a broken lookup must never swallow a report.
-    """
-    pane = os.environ.get("TMUX_PANE")
-    if not pane:
-        return None
-    try:
-        out = subprocess.run(
-            ["tmux", "display-message", "-p", "-t", pane, "#{window_id}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        window_id = out.stdout.strip()
-        if out.returncode != 0 or not window_id:
-            return None
-        from ..config import Settings
-        from ..core.session import SessionManager
-
-        binding = SessionManager(Settings().state_dir).get_binding_by_window(window_id)
-    except Exception:
-        return None
-    return binding.channel_id if binding is not None else None
-
-
-def _refuse_self_send(target_id: str, content: str, *, force: bool) -> None:
-    """Refuse a send whose target is the caller's own bound channel.
-
-    A bound channel already carries everything the session says: the gateway
-    tails the CLI transcript and posts each assistant text to that channel.
-    Sending the same words again with ``butler send`` publishes them a second
-    time (a third, counting the tool-call echo of the heredoc), and the
-    butler-prefixed copy is forwarded back into the session's own pane, where
-    it reads as a fresh instruction and can trigger yet another report.
-
-    Slash payloads are exempt: ``/bind`` and friends are control messages the
-    gateway routes through ``_handle_butler_command``, not prose the transcript
-    relay would have duplicated.
-    """
-    if force:
-        return
-    if content.lstrip().startswith("/"):
-        return
-    own = _self_bound_channel()
-    if own is None or own != target_id:
-        return
-    sys.exit(
-        f"ghost butler send: refusing to send to {target_id} — that is this "
-        "session's own bound channel.\n"
-        "  Your text is already relayed there from the CLI transcript, so this "
-        "would post it a second time\n"
-        "  and feed a butler-prefixed copy back into this pane as a new "
-        "instruction.\n"
-        "  Just say it in your reply. To reach a *different* channel or thread, "
-        "pass its id explicitly.\n"
-        "  Override (rarely right): --force"
-    )
-
-
 def _resolve_target(target: str | None, cwd: str) -> str:
     """Resolve a ``send`` target: a Discord snowflake passes through; a
     non-numeric token is treated as an org node **alias** and resolved to its
@@ -266,7 +201,6 @@ def cmd_send(args: argparse.Namespace) -> None:
     content = args.content
     if content == "-":
         content = sys.stdin.read()
-    _refuse_self_send(target_id, content, force=args.force)
     mid = send_decorated(
         target_id, content,
         user=args.user, prefix=args.prefix, raw=args.raw, cwd=cwd,
@@ -372,10 +306,6 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
         help="User in prefix (default: worktree-resolved identity)",
     )
     sp.add_argument("--raw", action="store_true", help="Send content as-is, no auto-prefix")
-    sp.add_argument(
-        "--force", action="store_true",
-        help="Send even when the target is this session's own bound channel",
-    )
     sp.set_defaults(func=cmd_send)
 
     sp = verbs.add_parser(
