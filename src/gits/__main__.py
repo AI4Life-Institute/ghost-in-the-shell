@@ -716,7 +716,10 @@ def _cmd_setup(args: argparse.Namespace) -> None:
     # (G-4 irzsbr). Honors GHOST_NO_INSTALL_SKILLS=1 opt-out.
     try:
         from . import install_skills as _install_skills_mod
-        if not _install_skills_mod._opt_out_active(False):
+        from .butler import butler_enabled
+
+        # Every bundled skill drives butler mode; skip them while it is off.
+        if butler_enabled() and not _install_skills_mod._opt_out_active(False):
             print("\n─── Claude Code skills ───────────────────────")
             _install_skills_mod.install_skills()
     except Exception as exc:  # never let skills install break setup

@@ -219,6 +219,13 @@ def main() -> None:
     if not isinstance(payload, dict):
         sys.exit(0)
 
+    # The vault impl-preflight exists to route impl work through `ghost butler
+    # dispatch`; with butler mode off there is nowhere to route it.
+    from ..butler import butler_enabled
+
+    if not butler_enabled():
+        sys.exit(0)
+
     project_dir = detect_project_dir(payload)
     allow, target = evaluate(
         payload.get("tool_name"),

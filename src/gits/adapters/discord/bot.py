@@ -23,6 +23,7 @@ from typing import Any
 # Single source of truth: gits.butler.prefix — same regex used by the
 # encoder (`ghost butler` CLI). Override via GITS_DISPATCH_PREFIX_PATTERN
 # env var is honored there.
+from ...butler import butler_enabled
 from ...butler.prefix import VAULT_DISPATCH_RE as _VAULT_DISPATCH_RE
 from ...core.account import validate_account_name, validate_model_name
 from ...core.account_load import (
@@ -404,6 +405,9 @@ class DiscordAdapter(PlatformAdapter):
         # sent from a vault session via the bot's REST token (see butler CLI).
         vault_match = None
         if message.author == self.bot.user:
+            # Butler mode off: the bot's own messages are never inbound.
+            if not butler_enabled():
+                return
             vault_match = _VAULT_DISPATCH_RE.match(message.content or "")
             if not vault_match:
                 return
@@ -762,6 +766,8 @@ class DiscordAdapter(PlatformAdapter):
         # butler-prefix dispatch. /thread and /fork don't carry the prefix,
         # so they still skip (their own flow handles session creation).
         if thread.owner_id == self.bot.user.id:
+            if not butler_enabled():
+                return
             if not _VAULT_DISPATCH_RE.match(starter_message):
                 return
 

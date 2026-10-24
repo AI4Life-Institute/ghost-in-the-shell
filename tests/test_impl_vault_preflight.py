@@ -141,13 +141,19 @@ def test_is_vault_root_source_repo_is_false(tmp_path):
 
 # --- main(): end-to-end stdin/exit-code via the installed `gits guard` ------
 
-def _run_guard(payload: dict, env_project_dir: str) -> subprocess.CompletedProcess:
+def _run_guard(
+    payload: dict, env_project_dir: str, butler: str = "1"
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "gits", "guard"],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        env={"CLAUDE_PROJECT_DIR": env_project_dir, "PATH": __import__("os").environ["PATH"]},
+        env={
+            "CLAUDE_PROJECT_DIR": env_project_dir,
+            "PATH": __import__("os").environ["PATH"],
+            "GITS_BUTLER_ENABLED": butler,
+        },
     )
 
 
@@ -163,6 +169,19 @@ def test_main_refuses_impl_edit_in_vault(tmp_path):
     assert r.returncode == 2
     assert "Re-dispatch" in r.stderr
     assert "ghost butler dispatch" in r.stderr
+
+
+def test_main_stands_down_when_butler_mode_off(tmp_path):
+    """Butler mode off: nowhere to re-dispatch to, so the vault guard allows."""
+    vault = tmp_path / "vault-test"
+    (vault / "Projects").mkdir(parents=True)
+    (vault / "MACHINES.md").write_text("x")
+    r = _run_guard(
+        {"tool_name": "Edit", "tool_input": {"file_path": f"{SRC}/x.py"}},
+        str(vault),
+        butler="0",
+    )
+    assert r.returncode == 0, r.stderr
 
 
 def test_main_allows_source_executor(tmp_path):
