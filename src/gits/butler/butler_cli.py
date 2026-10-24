@@ -18,7 +18,7 @@ import json
 import os
 import sys
 
-from . import identity, onboarding
+from . import identity, onboarding, require_enabled
 from .http import api, die
 from .prefix import LABEL_DEFAULT, VAULT_DISPATCH_RE, decorate
 
@@ -428,4 +428,5 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch(args: argparse.Namespace) -> None:
+    require_enabled("ghost butler")
     args.func(args)

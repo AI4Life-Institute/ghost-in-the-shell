@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     ghost_core_os_mandate: str = ""
     ghost_core_os_repos: str = ""
 
+    # ── Butler mode ───────────────────────────────────────────────────
+    # Off by default. Read by gits.butler.butler_enabled() with a stdlib
+    # parser; declared here only so the key is legal in config.env.
+    gits_butler_enabled: bool = False
+
     # ── tmux ──────────────────────────────────────────────────────────
     tmux_session_name: str = "gits"
     coding_cli_command: str = "claude"

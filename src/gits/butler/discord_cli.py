@@ -27,7 +27,7 @@ import argparse
 import json
 import sys
 
-from . import onboarding
+from . import onboarding, require_enabled
 from .http import api, die
 
 
@@ -268,5 +268,12 @@ def install_parser(sub: argparse._SubParsersAction) -> None:
     sp.set_defaults(func=cmd_message_send)
 
 
+# Verbs that publish or create on Discord — butler mode's transport. The
+# setup wizard and read-only verbs stay available with butler mode off.
+_MUTATING = (cmd_thread_create, cmd_thread_archive, cmd_channel_create, cmd_message_send)
+
+
 def dispatch(args: argparse.Namespace) -> None:
+    if args.func in _MUTATING:
+        require_enabled("ghost discord")
     args.func(args)
