@@ -14,7 +14,6 @@ transport group — no duplicated REST code. The differences vs.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 

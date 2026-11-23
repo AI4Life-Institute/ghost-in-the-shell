@@ -955,11 +955,12 @@ def cmd_refresh(args: argparse.Namespace) -> None:
     """``gits account refresh [--account <name>]``.
 
     Invokes ``claude --print ping`` per account to exercise claude's own
-    OAuth refresh path, keeping non-default accounts' refresh tokens warm.
+    OAuth refresh path, keeping every account's refresh token warm — the
+    default one included, since interactive use is not a reliable keepalive.
     Exit code 0 if all attempted refreshes succeed (or no work to do);
     1 if any failed.
     """
-    from .core.token_refresh import refresh_account, refresh_all_non_default
+    from .core.token_refresh import refresh_account, refresh_all
 
     settings = Settings()
     layout = AccountLayout()
@@ -983,9 +984,9 @@ def cmd_refresh(args: argparse.Namespace) -> None:
             sys.exit(1)
         return
 
-    results = refresh_all_non_default(vault, layout)
+    results = refresh_all(vault, layout)
     if not results:
-        print("[ok] no non-default accounts to refresh")
+        print("[ok] no accounts to refresh")
         return
 
     any_failed = False

@@ -5,7 +5,15 @@ accounts live under ``~/.claude-{name}/`` and don't benefit from claude's
 own keychain refresh loop (the macOS keychain entry is global, so it's only
 kept warm by the account routing through ``~/.claude/`` natively — i.e. the
 default account). This module periodically invokes claude for every
-non-default account so its refresh token doesn't silently expire.
+account so its refresh token doesn't silently expire.
+
+The default account was originally excluded on the assumption that the
+operator's own interactive ``claude`` use keeps ``~/.claude/`` warm. That
+assumption fails whenever the operator goes a refresh-token lifetime
+without an interactive session — the account's bindings then answer with
+"Login expired · Please run /login" even though ghost is healthy. The
+scheduled sweep therefore covers the default too; ``refresh_all_non_default``
+remains for callers that deliberately want to skip it.
 
 The refresh is delegated entirely to claude itself — we just exec
 ``CLAUDE_CONFIG_DIR=<dir> claude --print ping`` and let claude's startup
@@ -130,17 +138,22 @@ START_DELAY_S = 5 * 60
 STATE_FILENAME = "token_refresh_state.json"
 
 
-def refresh_all_non_default(
+def refresh_all(
     vault: AccountVault,
     layout: AccountLayout,
     *,
     timeout_s: int = DEFAULT_TIMEOUT_S,
+    include_default: bool = True,
 ) -> list[RefreshResult]:
-    """Refresh every account whose name is NOT the manifest default.
+    """Refresh every account in the manifest.
+
+    The default account is refreshed natively (no ``CLAUDE_CONFIG_DIR``);
+    every other account is refreshed against its own dir. Pass
+    ``include_default=False`` to skip the default.
 
     Sequential, not parallel — concurrent claude invocations can race on
     shared state (statsig file, etc.). One account at a time keeps things
-    boring. Returns one :class:`RefreshResult` per non-default account.
+    boring. Returns one :class:`RefreshResult` per attempted account.
     """
     try:
         manifest = vault.load()
@@ -151,9 +164,12 @@ def refresh_all_non_default(
     default = manifest.default
     results: list[RefreshResult] = []
     for entry in manifest.accounts:
-        if entry.name == default:
+        is_default = entry.name == default
+        if is_default and not include_default:
             continue
-        result = refresh_account(entry.name, layout, timeout_s=timeout_s)
+        result = refresh_account(
+            entry.name, layout, timeout_s=timeout_s, is_default=is_default,
+        )
         results.append(result)
         if result.success:
             logger.info(
@@ -168,10 +184,26 @@ def refresh_all_non_default(
     return results
 
 
+def refresh_all_non_default(
+    vault: AccountVault,
+    layout: AccountLayout,
+    *,
+    timeout_s: int = DEFAULT_TIMEOUT_S,
+) -> list[RefreshResult]:
+    """Refresh every account whose name is NOT the manifest default.
+
+    Thin wrapper over :func:`refresh_all` for callers that deliberately
+    want the default account left alone.
+    """
+    return refresh_all(
+        vault, layout, timeout_s=timeout_s, include_default=False,
+    )
+
+
 class TokenRefreshScheduler:
     """In-process daily OAuth refresh — portable across machines.
 
-    Runs ``refresh_all_non_default`` once per ``interval_s`` (24h default)
+    Runs ``refresh_all`` once per ``interval_s`` (24h default)
     inside the ghost daemon, persisting ``last_refresh_at`` to
     ``<state_dir>/token_refresh_state.json`` so daemon restarts don't
     re-trigger a refresh on every boot. The blocking subprocess call is
@@ -251,7 +283,7 @@ class TokenRefreshScheduler:
                 if wait > 0:
                     await asyncio.sleep(wait)
                 await asyncio.to_thread(
-                    refresh_all_non_default, self._vault, self._layout,
+                    refresh_all, self._vault, self._layout,
                 )
                 self._write_last_refresh(time.time())
         except asyncio.CancelledError:

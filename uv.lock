@@ -656,7 +656,7 @@ wheels = [
 
 [[package]]
 name = "ghost-in-the-shell"
-version = "0.2.46"
+version = "0.2.66"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

@@ -13,6 +13,7 @@ from gits.core.token_refresh import (
     REFRESH_PROMPT,
     RefreshResult,
     refresh_account,
+    refresh_all,
     refresh_all_non_default,
 )
 
@@ -155,6 +156,60 @@ def test_refresh_all_empty_manifest(vault, layout):
     # Brand new vault, no accounts
     results = refresh_all_non_default(vault, layout)
     assert results == []
+
+
+# ─── refresh_all (default included) ─────────────────────────────────────
+
+
+def test_refresh_all_includes_default(vault, layout):
+    vault.add(AccountEntry(name="personal", config_dir=str(layout.account_dir("personal"))))
+    vault.add(AccountEntry(name="work", config_dir=str(layout.account_dir("work"))))
+    assert vault.load().default == "personal"
+
+    fake = RefreshResult(account="x", success=True, exit_code=0, duration_s=1.0)
+    with patch("gits.core.token_refresh.refresh_account", return_value=fake) as ra:
+        results = refresh_all(vault, layout)
+
+    # Both accounts refreshed, not just the non-default one.
+    assert len(results) == 2
+    assert [c.args[0] for c in ra.call_args_list] == ["personal", "work"]
+
+
+def test_refresh_all_flags_default_natively(vault, layout):
+    """The default must refresh WITHOUT CLAUDE_CONFIG_DIR, others with it."""
+    vault.add(AccountEntry(name="personal", config_dir=str(layout.account_dir("personal"))))
+    vault.add(AccountEntry(name="work", config_dir=str(layout.account_dir("work"))))
+
+    fake = RefreshResult(account="x", success=True, exit_code=0, duration_s=1.0)
+    with patch("gits.core.token_refresh.refresh_account", return_value=fake) as ra:
+        refresh_all(vault, layout)
+
+    flags = {c.args[0]: c.kwargs["is_default"] for c in ra.call_args_list}
+    assert flags == {"personal": True, "work": False}
+
+
+def test_refresh_all_can_skip_default(vault, layout):
+    vault.add(AccountEntry(name="personal", config_dir=str(layout.account_dir("personal"))))
+    vault.add(AccountEntry(name="work", config_dir=str(layout.account_dir("work"))))
+
+    fake = RefreshResult(account="work", success=True, exit_code=0, duration_s=1.0)
+    with patch("gits.core.token_refresh.refresh_account", return_value=fake) as ra:
+        results = refresh_all(vault, layout, include_default=False)
+
+    assert len(results) == 1
+    assert ra.call_args.args[0] == "work"
+
+
+def test_refresh_all_default_only_manifest(vault, layout):
+    """A single-account (default-only) install still gets refreshed."""
+    vault.add(AccountEntry(name="personal", config_dir=str(layout.account_dir("personal"))))
+
+    fake = RefreshResult(account="personal", success=True, exit_code=0, duration_s=1.0)
+    with patch("gits.core.token_refresh.refresh_account", return_value=fake) as ra:
+        results = refresh_all(vault, layout)
+
+    assert len(results) == 1
+    assert ra.call_args.kwargs["is_default"] is True
 
 
 # ─── TokenRefreshScheduler ──────────────────────────────────────────────

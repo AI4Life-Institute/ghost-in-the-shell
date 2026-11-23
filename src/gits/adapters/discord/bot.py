@@ -15,6 +15,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import aiohttp
+import discord
+from discord import app_commands
+from discord.ext import commands
+
 # Messages authored by the bot itself are normally skipped to avoid self-loops.
 # Vault-dispatched messages (sent via the bot's REST token from outside, e.g.
 # the `ghost butler send` CLI) tag themselves with a recognizable prefix so
@@ -32,11 +37,6 @@ from ...core.account_load import (
     rank_accounts,
 )
 from ...core.engine import MODEL_CMD_DESCRIPTION
-
-import discord
-from discord import app_commands
-from discord.ext import commands
-
 from ..base import (
     Button,
     ButtonCallback,
@@ -46,6 +46,7 @@ from ..base import (
     PlatformAdapter,
     SelectOption,
 )
+from .resolver import StaleOnErrorResolver
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,12 @@ class DiscordAdapter(PlatformAdapter):
         intents.message_content = True
         intents.guilds = True
 
+        # Resolve DNS through a stale-on-error cache so transient Tailscale
+        # MagicDNS stalls don't drop the gateway connection (and lose
+        # messages). See resolver.py for the full rationale. Lazily created
+        # inside start() because TCPConnector binds to the running loop.
+        self._connector: "aiohttp.TCPConnector | None" = None
+
         self.bot = commands.Bot(
             command_prefix="!",
             intents=intents,
@@ -220,6 +227,18 @@ class DiscordAdapter(PlatformAdapter):
     async def start(self) -> None:
         """Start the Discord bot."""
         self._setup_commands()
+
+        # Inject our stale-on-error DNS resolver into discord.py's aiohttp
+        # connector before login. static_login() only builds its own
+        # connector when http.connector is MISSING, so setting it here makes
+        # both the REST client and the gateway websocket resolve through the
+        # cache — keeping us connected across transient MagicDNS stalls.
+        # limit=0 matches discord.py's own default (unlimited pool).
+        self._connector = aiohttp.TCPConnector(
+            limit=0, resolver=StaleOnErrorResolver()
+        )
+        self.bot.http.connector = self._connector
+
         await self.bot.start(self.token)
 
     async def stop(self) -> None:
