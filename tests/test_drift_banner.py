@@ -279,6 +279,8 @@ def _run_guard_main(monkeypatch, payload: dict, project_dir: str, *, emit_impl):
     monkeypatch.setattr(db, "emit", fake_emit)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", project_dir)
+    # The vault guard only runs with butler mode on; these tests exercise it.
+    monkeypatch.setenv("GITS_BUTLER_ENABLED", "1")
     with pytest.raises(SystemExit) as exc:
         pf.main()
     return int(exc.value.code or 0), calls
